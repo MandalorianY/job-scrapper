@@ -1,0 +1,36 @@
+# macOS and editor noise
+.DS_Store
+*.swp
+*.swo
+
+# Local agent/tooling state
+.agents/
+skills-lock.json
+
+# Python-generated files
+__pycache__/
+*.py[oc]
+.coverage
+.pytest_cache/
+.hypothesis/
+.ruff_cache/
+htmlcov/
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Local scraper state and exports
+data/
+exports/
+.crawlee_storage/
+storage/
+
+# Local configuration (secrets)
+.env
+!.env.example
+*.env.yaml
+src/scrapper/config/config.local.yaml

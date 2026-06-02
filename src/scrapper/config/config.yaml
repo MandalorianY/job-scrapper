@@ -1,0 +1,461 @@
+  # =============================================================================
+# 1. Core Search Scope
+# =============================================================================
+
+app_env: dev
+
+queries:
+  - example role
+  - sample specialist
+  - demo coordinator
+  - example manager
+  - sample lead
+  - demo analyst
+  - placeholder operator
+
+location_label: Chambéry / Lyon / Annecy / Grenoble, France
+locations:
+  - Chambéry, France
+  - Lyon, France
+  - Annecy, France
+  - Grenoble, France
+country: france
+distance_km: 25
+
+location_scope:
+  enabled: true
+  radius_km: 25
+  centers:
+    - name: Chambéry
+      latitude: 45.5646
+      longitude: 5.9178
+      aliases:
+        - Chambery
+        - Grand Chambéry
+        - Grand Chambery
+    - name: Lyon
+      latitude: 45.7640
+      longitude: 4.8357
+      aliases:
+        - Grand Lyon
+        - Métropole de Lyon
+        - Metropole de Lyon
+        - Agglomération lyonnaise
+        - Agglomeration lyonnaise
+    - name: Annecy
+      latitude: 45.8992
+      longitude: 6.1294
+      aliases:
+        - Grand Annecy
+    - name: Grenoble
+      latitude: 45.1885
+      longitude: 5.7245
+      aliases:
+        - Grenoble Alpes Métropole
+        - Grenoble Alpes Metropole
+  city_coordinates:
+    Aix-les-Bains: [45.6898, 5.9097]
+    Allonzier-la-Caille: [45.9940, 6.1074]
+    Annecy-le-Vieux: [45.9190, 6.1430]
+    Beynost: [45.8307, 4.9994]
+    Bron: [45.7355, 4.9112]
+    Caluire-et-Cuire: [45.7976, 4.8488]
+    Chavanod: [45.8840, 6.0517]
+    Cran-Gevrier: [45.8830, 6.1000]
+    Dardilly: [45.8157, 4.7493]
+    Échirolles: [45.1876, 5.7188]
+    Echirolles: [45.1876, 5.7188]
+    Épagny Metz-Tessy: [45.9423, 6.0943]
+    Epagny Metz-Tessy: [45.9423, 6.0943]
+    Le Bourget-du-Lac: [45.7297, 5.8597]
+    Meylan: [45.2150, 5.7805]
+    Meyzieu: [45.7746, 5.0080]
+    Montagny: [45.6279, 4.7540]
+    Montbonnot-Saint-Martin: [45.2254, 5.8088]
+    Oullins: [45.7094, 4.8068]
+    Pusignan: [45.7545, 5.0673]
+    Rumilly: [45.7519, 5.9465]
+    Saint-Fons: [45.7019, 4.8554]
+    St.-Fons: [45.7019, 4.8554]
+    Saint-Laurent-de-Mure: [45.6818, 5.0562]
+    Saint-Martin-d'Hères: [45.1654, 5.7636]
+    Saint-Martin-d'Heres: [45.1654, 5.7636]
+    Seynod: [45.8285, 6.0881]
+    Tassin-la-Demi-Lune: [45.7613, 4.7568]
+    Villeurbanne: [45.7690, 4.8900]
+    Voiron: [45.3781, 5.5855]
+
+# =============================================================================
+# 2. Role Filtering
+# =============================================================================
+
+include_terms:
+  - example
+  - sample
+  - demo
+  - placeholder
+  - role
+  - specialist
+  - coordinator
+  - manager
+  - lead
+  - analyst
+  - operator
+
+exclude_terms:
+  - stage
+  - stagiaire
+  - intern
+  - internship
+  - apprenticeship
+  - apprentice
+  - alternance
+  - alternant
+  - alternante
+  - apprentissage
+  - apprentisage
+  - apprenti
+  - apprentie
+  - professionnalisation
+  - professionalisation
+  - professionnalization
+  - contrat pro
+  - contrat professionnel
+  - contrat de professionnalisation
+  - bénévole
+  - benevole
+  - volunteer
+
+# =============================================================================
+# 3. Scrape Limits And Incremental Window
+# =============================================================================
+
+default_hours_old: 336
+overlap_hours: 24
+results_wanted_per_query: 25
+custom_max_pages: 2
+custom_max_detail_pages: 80
+web_search_max_results_per_query: 8
+web_search_max_detail_pages: 50
+refresh_known_details: false
+request_delay_secs: 1.5
+
+# =============================================================================
+# 4. Outputs And Runtime Paths
+# =============================================================================
+
+paths:
+  database_path: data/job_search.duckdb
+  export_dir: exports
+
+export:
+  # Available fields for the final Offres Excel/CSV export:
+  # Postulé, Rejeté, Lien, Statut, Postuler, Offre source, Autres liens, Intitulé,
+  # Entreprise, Lieu, Contrat, Télétravail, Salaire min (€ annuel),
+  # Salaire max (€ annuel), Salaire, Publié le, Sources,
+  # Source principale, Doublons, Description, URL entreprise, Email,
+  # Recherche, Zone recherchée, Score complétude, Vu le, Dernière vue
+  # Field repairs can be toggled globally, then overridden per source.
+  # Example:
+  # repair_fields_enabled_by_default: true
+  # repair_fields_by_source:
+  #   france_travail: true
+  #   linkedin: false
+  excel_columns:
+    - Statut
+    - Publié le
+    - Lien
+    - Intitulé
+    - Entreprise
+    - Lieu
+    - Contrat
+    - Salaire min (€ annuel)
+    - Salaire max (€ annuel)
+    - Recherche
+  repair_fields_enabled_by_default: true
+  repair_fields_by_source:
+    france_travail: true
+
+# =============================================================================
+# 5. Enabled Sources
+# =============================================================================
+
+jobspy_sites:
+  - indeed
+  - linkedin
+  - glassdoor
+  - google
+
+custom_sites:
+  - hellowork
+  - welcome_to_the_jungle
+  - web_search
+  - aggregators
+
+# Optional per-source switches. Any source omitted here stays enabled.
+# Set a source to false to skip scraping it.
+enabled_sources:
+  indeed: true
+  linkedin: true
+  glassdoor: true
+  google: true
+  hellowork: true
+  welcome_to_the_jungle: true
+  web_search: true
+  aggregators: true
+  example_direct_board: true
+  emploi_territorial: true
+  meteojob: true
+  jobijoba: true
+  makesense: true
+  apec: true
+  isarta: true
+  emploi_collectivites: true
+  cadremploi: true
+  optioncarriere: true
+
+# =============================================================================
+# 6. Dedupe Source Preference
+# =============================================================================
+
+dedupe_fields:
+  primary:
+    - title
+    - company
+  fallback:
+    - location
+  description:
+    - description
+    - company
+    - location
+
+dedupe_default_source_priority: 100
+dedupe_source_priority:
+  indeed: 0
+  linkedin: 10
+  welcome_to_the_jungle: 20
+  france_travail: 1000
+
+# =============================================================================
+# 7. HTTP Defaults
+# =============================================================================
+
+user_agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0 Safari/537.36
+extra_headers: {}
+
+http:
+  accept_language: fr-FR,fr;q=0.9,en;q=0.7
+
+# =============================================================================
+# 8. Free Search Engine Defaults
+# =============================================================================
+
+search_engines:
+  google_domain: google.fr
+  gl: fr
+  hl: fr
+
+# =============================================================================
+# 9. JobSpy
+# =============================================================================
+
+jobspy:
+  google_zero_results_error: "JobSpy Google returned 0 rows. Upstream issue #302 reports 'initial cursor not found' when Google does not return the expected Jobs payload."
+  glassdoor_zero_results_error: "JobSpy Glassdoor returned 0 rows after using the city-only location fallback. Glassdoor may be blocking the Graph API or returning an unsupported payload."
+  glassdoor_results_wanted_per_query: 5
+  google_query_places:
+    - Lyon
+    - Grenoble
+    - Chambéry
+    - Chambery
+    - Annecy
+    - '"Grand Lyon"'
+    - '"Grenoble Alpes Métropole"'
+    - '"Grand Chambéry"'
+    - '"Grand Annecy"'
+  google_query_exclude_terms:
+    - stage
+    - alternance
+    - apprentissage
+    - stagiaire
+  glassdoor_regional_fallback_term: auvergne-rhône-alpes
+  glassdoor_location_override: Lyon
+
+# =============================================================================
+# 10. Web Search
+# =============================================================================
+
+web_search:
+  source: web_search
+  duckduckgo_html_url: https://html.duckduckgo.com/html/
+  query_template: '"{query}" emploi CDI "{location}" -stage -alternance -apprentissage -stagiaire'
+  excluded_domains:
+    - hellowork.com
+    - indeed.com
+    - linkedin.com
+    - welcometothejungle.com
+    - glassdoor.
+    - google.
+    - duckduckgo.com
+  location_terms:
+    - lyon
+    - villeurbanne
+    - bron
+    - caluire-et-cuire
+    - caluire et cuire
+    - dardilly
+    - meyzieu
+    - pusignan
+    - saint-fons
+    - st.-fons
+    - saint fons
+    - oullins
+    - tassin-la-demi-lune
+    - tassin la demi lune
+    - saint-laurent-de-mure
+    - saint laurent de mure
+    - beynost
+    - montagny
+    - grand lyon
+    - métropole de lyon
+    - metropole de lyon
+    - agglomération lyonnaise
+    - agglomeration lyonnaise
+    - grenoble
+    - grenoble alpes métropole
+    - grenoble alpes metropole
+    - meylan
+    - échirolles
+    - echirolles
+    - saint-martin-d'hères
+    - saint-martin-d'heres
+    - voiron
+    - montbonnot-saint-martin
+    - montbonnot saint martin
+    - chambéry
+    - chambery
+    - grand chambéry
+    - grand chambery
+    - aix-les-bains
+    - aix les bains
+    - le bourget-du-lac
+    - le bourget du lac
+    - annecy
+    - grand annecy
+    - annecy-le-vieux
+    - annecy le vieux
+    - cran-gevrier
+    - cran gevrier
+    - seynod
+    - rumilly
+    - chavanod
+    - allonzier-la-caille
+    - allonzier la caille
+    - épagny metz-tessy
+    - epagny metz-tessy
+    - epagny metz tessy
+  info_path_markers:
+    - fiche-metier
+    - fiches-metier
+    - /metier
+    - /metiers
+    - /guides/
+    - /guide/
+    - /salaire
+    - /formation
+  job_signal_terms:
+    - full-time
+    - job
+    - role
+    - hiring
+    - opening
+    - cdi
+    - cdd
+    - emploi
+    - recrute
+    - recrutons
+    - poste
+    - offre
+
+# =============================================================================
+# 11. Direct Custom Sources
+# =============================================================================
+
+hellowork:
+  source: hellowork
+  base_url: https://www.hellowork.com
+
+welcome_to_the_jungle:
+  source: welcome_to_the_jungle
+  site_url: https://www.welcometothejungle.com
+  algolia_url: https://<ALGOLIA_HOST>/1/indexes/*/queries?x-algolia-agent=Algolia%20for%20JavaScript%20(4.20.0)%3B%20Browser&search_origin=jobs_search_client
+  algolia_app_id: <ALGOLIA_APP_ID>
+  job_index: example_jobs_index
+  around_lat_lng: 45.7640,4.8357
+  around_radius: 25000
+  office_country_filter: '["offices.country_code:FR"]'
+
+# =============================================================================
+# 12. Aggregators
+# =============================================================================
+
+aggregators:
+  source: aggregators
+  direct_locations:
+    - 84R
+  direct_specs:
+    - source: example_direct_board
+      search_url_templates:
+        - https://jobs.example.com/search?query={query}&location={department}
+      link_prefixes:
+        - /offres/recherche/detail/
+      base_url: https://jobs.example.com
+      max_links: 12
+      use_direct_locations: true
+    - source: emploi_territorial
+      search_url_templates:
+        - https://www.emploi-territorial.fr/recherche_emploi_mobilite/?search-col={query}
+      link_prefixes:
+        - /offre/
+      base_url: https://www.emploi-territorial.fr
+      max_links: 20
+    - source: meteojob
+      search_url_templates:
+        - https://www.meteojob.com/Auvergne-Rh%C3%B4ne-Alpes-Emploi-{query}
+      link_prefixes:
+        - /jobs/
+      base_url: https://www.meteojob.com
+      max_links: 18
+      query_style: title_slug
+    - source: jobijoba
+      search_url_templates:
+        - https://www.jobijoba.com/fr/emploi/{query}/Auvergne-Rhone-Alpes
+      link_prefixes:
+        - /fr/annonce/
+      base_url: https://www.jobijoba.com
+      max_links: 18
+    - source: makesense
+      search_url_templates:
+        - https://jobs.makesense.org/fr/s/jobs/all/example-role/cdi?sortBy=relevance
+        - https://jobs.makesense.org/fr/s/jobs/all/all/cdi?contracts=cdd&sortBy=relevance
+      link_prefixes:
+        - /fr/jobs/
+        - /fr/s/jobs/
+      base_url: https://jobs.makesense.org
+      max_links: 12
+  site_search_sources:
+    - source: apec
+      query_template: site:apec.fr/candidat/recherche-emploi emploi CDI "{location}" {query} -stage -alternance
+      host: apec.fr
+    - source: isarta
+      query_template: site:isarta.fr/emplois emploi CDI "{location}" {query} -stage -alternance
+      host: isarta.fr
+    - source: emploi_collectivites
+      query_template: site:emploi-collectivites.fr emploi CDI "{location}" {query} -stage -alternance
+      host: emploi-collectivites.fr
+    - source: cadremploi
+      query_template: site:cadremploi.fr emploi CDI "{location}" {query} -stage -alternance
+      host: cadremploi.fr
+    - source: optioncarriere
+      query_template: site:optioncarriere.com emploi CDI "{location}" {query} -stage -alternance
+      host: optioncarriere.com
