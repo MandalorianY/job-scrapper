@@ -1,12 +1,37 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from datetime import UTC, datetime
 from pathlib import Path
 
 from scrapper.config import DEFAULT_EXCLUDE_TERMS, DEFAULT_INCLUDE_TERMS, SearchConfig
 from scrapper.location_scope import location_is_in_scope
 from scrapper.models import JobOffer
 from scrapper.storage import JobStore
+
+
+def test_bad_apply_links_do_not_merge_jobs_or_replace_source_links(tmp_path: Path) -> None:
+    store = JobStore(tmp_path / "jobs.duckdb", source_priority={"hellowork": 0})
+    first = "https://www.hellowork.com/fr-fr/emplois/1.html"
+    second = "https://www.hellowork.com/fr-fr/emplois/2.html"
+    bookmark = "https://www.hellowork.com/fr-fr/candidat/tooglebookmark"
+    try:
+        for title, url in [("Example coordinator", first), ("Demo specialist", second)]:
+            store.upsert_offer(JobOffer(source="hellowork", source_url=url, title=title, company="Example",
+                                       location="Toulouse", direct_url=bookmark, description="Résumé court"))
+        store.upsert_offer(JobOffer(source="partner", source_url="https://example.com/jobs/1", direct_url=first,
+                                   title="Example coordinator", company="Example", location="Toulouse",
+                                   description="Description complète avec les missions et les qualifications du poste."))
+
+        canonical = store.canonical_dataframe().set_index("best_source_url")
+
+        assert set(canonical.index) == {first, second}
+        assert canonical.loc[first, "duplicate_count"] == 2
+        assert canonical.loc[first, "description"].startswith("Description complète")
+        assert canonical.loc[first, "all_direct_links"] == first
+        assert canonical["best_direct_url"].isna().all()
+    finally:
+        store.close()
 
 
 def test_contract_evidence_excludes_sparse_copies_of_same_offer(tmp_path: Path) -> None:
@@ -373,9 +398,8 @@ def test_storage_migrates_relative_dates_using_first_seen_time(tmp_path: Path) -
 
     migrated = JobStore(path)
     try:
-        assert migrated.conn.execute("SELECT date_posted FROM raw_offers").fetchone() == (
-            "2026-06-30T21:00:00+02:00",
-        )
+        (date_posted,) = migrated.conn.execute("SELECT date_posted FROM raw_offers").fetchone()
+        assert datetime.fromisoformat(date_posted) == datetime(2026, 6, 30, 19, tzinfo=UTC)
     finally:
         migrated.close()
 

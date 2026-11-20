@@ -21,6 +21,7 @@ from scrapper.text import (
     dedupe_key_for_fields,
     description_dedupe_key_for_fields,
     has_excluded_contract_signal,
+    is_application_destination,
     matches_job_title,
     normalize_text,
     stable_hash,
@@ -38,7 +39,7 @@ def _offer_url_key(record: Mapping[str, Any]) -> str | None:
     blocked_host = SOURCE_DIRECT_URL_IDENTITY_HOST_BLOCKLIST.get(source)
     if blocked_host:
         direct_url = clean_text(record.get("direct_url"))
-        direct_key = _external_url_key(direct_url, blocked_host)
+        direct_key = _external_url_key(direct_url, blocked_host) if is_application_destination(direct_url) else None
         if direct_key:
             return direct_key
     return url_key(clean_text(record.get("source_url")))
@@ -525,6 +526,7 @@ class JobStore:
             lambda row: absolute_posted_date(row["date_posted"], now=row["first_seen_at"]),
             axis=1,
         )
+        frame["direct_url"] = frame["direct_url"].where(frame["direct_url"].map(is_application_destination), None)
         frame["group_key"] = self._build_group_keys(frame)
         frame["source_priority"] = frame["source"].map(self.source_priority).fillna(self.default_source_priority).astype(int)
 
@@ -577,6 +579,7 @@ class JobStore:
             .reset_index()
         )
         result = best_rows.merge(links, on="group_key", how="inner")
+        result["description"] = result.pop("group_description")
         result["date_posted"] = result["date_posted"].where(
             result["date_posted"].notna() & (result["date_posted"].astype(str).str.strip() != ""),
             result["group_date_posted"],
@@ -648,7 +651,8 @@ class JobStore:
 
         seen_identity: dict[tuple[str, ...], int] = {}
         for index, row in enumerate(rows):
-            keys = [("url", key) for link in (row.source_url, row.direct_url) if (key := _listing_link_key(link))]
+            direct_url = row.direct_url if is_application_destination(row.direct_url) else None
+            keys = [("url", key) for link in (row.source_url, direct_url) if (key := _listing_link_key(link))]
             if row.source_id and str(row.source_id).lower() not in GENERIC_LISTING_PATHS:
                 host = (urlparse(row.source_url).hostname or "").removeprefix("www.")
                 keys.append(("id", row.source, host, str(row.source_id)))
@@ -684,6 +688,7 @@ class JobStore:
                 "sources": ", ".join(sorted({value for value in group["source"].dropna() if value})),
                 "all_source_links": "\n".join(sorted({value for value in group["source_url"].dropna() if value})),
                 "all_direct_links": JobStore._join_optional_links(group["direct_url"]),
+                "group_description": max(group["description"].dropna(), key=len, default=None),
                 "group_date_posted": JobStore._best_group_value(group, "date_posted"),
                 "duplicate_count": len(group),
                 "first_seen_at": group["first_seen_at"].min(),

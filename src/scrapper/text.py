@@ -12,6 +12,11 @@ from bs4 import BeautifulSoup
 SPACE_RE = re.compile(r"\s+")
 NON_WORD_RE = re.compile(r"[^a-z0-9]+")
 DESCRIPTION_DEDUPE_MIN_LENGTH = 80
+NON_APPLICATION_PATH_RE = re.compile(
+    r"/[^/]*bookmark(?:/|$)|/editorial/conseils/|/media/guide-candidat(?:/|$)|"
+    r"/candidats/placement\.php$|/[^/]*cvtheque[^/]*(?:/|$)",
+    re.IGNORECASE,
+)
 CONTRACT_MARKERS_RE = re.compile(
     r"\b(h/?f|f/?h|m/?f|f/?m|cdi|cdd|stage|alternance|apprentissage)\b",
     re.IGNORECASE,
@@ -54,6 +59,21 @@ def clean_text(value: object | None) -> str | None:
         text = BeautifulSoup(text, "lxml").get_text(" ")
     text = SPACE_RE.sub(" ", text).strip()
     return text or None
+
+
+def is_application_destination(url: object | None) -> bool:
+    if not isinstance(url, str):
+        return False
+    try:
+        parsed = urlparse(url)
+    except ValueError:
+        return False
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc or NON_APPLICATION_PATH_RE.search(parsed.path):
+        return False
+    return not (
+        parsed.hostname in {"meteojob.com", "www.meteojob.com"}
+        and parsed.path.startswith("/candidat/offres/offre-d-emploi-")
+    )
 
 
 def normalize_text(value: object | None) -> str:
