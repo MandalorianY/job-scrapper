@@ -1,14 +1,27 @@
 from __future__ import annotations
 
 import re
+from datetime import datetime
 from urllib.parse import urlparse
+from zoneinfo import ZoneInfo
 
 import httpx
+from bs4 import Tag
 
 from scrapper.config import SearchConfig
+from scrapper.dates import parse_posted_date
 from scrapper.models import JobOffer
 from scrapper.scrapers.async_http import HostThrottle
 from scrapper.text import clean_text
+
+
+def listing_date(anchor: Tag) -> str | None:
+    date_node = anchor.select_one(".date")
+    label = clean_text(date_node.get_text(" ")) if date_node else None
+    if not label or not label.startswith("Publié"):
+        return None
+    parsed = parse_posted_date(label, now=datetime.now(ZoneInfo("Europe/Paris")))
+    return parsed.day.isoformat() if parsed else None
 
 
 async def extract_public_offer(
@@ -33,17 +46,24 @@ async def extract_public_offer(
     if not isinstance(data, dict) or not data.get("intituleOffre"):
         raise ValueError("France Travail returned no offer details")
     employer = data.get("etablissement") or {}
+    workplace = data.get("lieuTravail")
+    if isinstance(workplace, dict):
+        workplace = workplace.get("libelleLieuTravail") or workplace.get("libelleCommuneLieuTravail")
     return JobOffer(
-        source="france_travail", source_id=offer_id, source_url=url, direct_url=url,
+        source="france_travail",
+        source_id=offer_id,
+        source_url=url,
+        direct_url=url,
         title=clean_text(data.get("intituleOffre")),
         company=clean_text(employer.get("libelleEnseigne")),
-        location=clean_text(data.get("lieuTravail")),
+        location=clean_text(workplace),
         description=clean_text(data.get("descriptif")),
         employment_type=clean_text(data.get("syntheseContrat")),
-        date_posted=clean_text(data.get("dateDerniereModification")),
+        date_posted=clean_text(data.get("datePublication") or data.get("dateCreation")),
         salary=clean_text(data.get("salaire")),
         company_url=clean_text(employer.get("urlEntreprise")),
         company_description=clean_text(employer.get("descriptionEtablissement")),
-        search_query=query, search_location=config.location_label,
+        search_query=query,
+        search_location=config.location_label,
         raw={"public_offer": data},
     )

@@ -60,7 +60,9 @@ def _site_search_source(source: str) -> SmokeSource:
 _SMOKE_CONFIG = SearchConfig()
 REAL_SMOKE_SOURCES = (
     *(_jobspy_source(source) for source in _SMOKE_CONFIG.jobspy_sites),
-    SmokeSource("welcome_to_the_jungle", lambda config, store: asyncio.run(scrape_welcome_to_the_jungle(config, store))),
+    SmokeSource(
+        "welcome_to_the_jungle", lambda config, store: asyncio.run(scrape_welcome_to_the_jungle(config, store))
+    ),
     *(_direct_aggregator_source(spec.source) for spec in _SMOKE_CONFIG.aggregators.direct_specs),
     *(_site_search_source(spec.source) for spec in _SMOKE_CONFIG.aggregators.site_search_sources),
 )
@@ -83,8 +85,7 @@ def test_real_small_scrape_by_website(smoke_source: SmokeSource, tmp_path: Path)
         results_wanted_per_query=1,
         custom_max_pages=1,
         custom_max_detail_pages=3,
-        web_search_max_results_per_query=2,
-        web_search_max_detail_pages=2,
+        aggregators={"max_detail_pages": 2},
         database_path=tmp_path / "job_search.duckdb",
         export_dir=tmp_path / "exports",
     )

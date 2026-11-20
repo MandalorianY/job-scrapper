@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import re
 
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, Tag
 
+from scrapper.dates import FRENCH_DATE_PHRASE_RE
 from scrapper.text import clean_text
 
 CONTRACT_LABELS = {
@@ -13,22 +14,6 @@ CONTRACT_LABELS = {
     "intérim": "Intérim",
     "interim": "Intérim",
 }
-FRENCH_MONTH_RE = (
-    r"janvier|février|fevrier|mars|avril|mai|juin|juillet|août|aout|"
-    r"septembre|octobre|novembre|décembre|decembre"
-)
-DATE_VALUE_RE = re.compile(
-    rf"""
-    (?:
-        il\s+y\s+a\s+\d+\s*(?:min|mn|minutes?|h|heures?|j|jours?|d|semaines?|mois)
-        | aujourd'hui
-        | hier
-        | \d{{1,2}}/\d{{1,2}}/\d{{4}}
-        | \d{{1,2}}\s+(?:{FRENCH_MONTH_RE})(?:\s+\d{{4}})?
-    )
-    """,
-    re.IGNORECASE | re.VERBOSE,
-)
 PUBLISHED_PREFIX_RE = re.compile(r"^publi[ée]e?\s+le\s+", re.IGNORECASE)
 
 
@@ -91,7 +76,7 @@ def _offer_lines(soup: BeautifulSoup) -> list[str]:
     return [line.strip() for line in offer.get_text("\n", strip=True).splitlines() if line.strip()]
 
 
-def _current_offer(soup: BeautifulSoup):
+def _current_offer(soup: BeautifulSoup) -> Tag | None:
     return soup.select_one(".offer.current") or soup.select_one(".permalink-open")
 
 
@@ -100,7 +85,7 @@ def _date_value(value: str) -> str | None:
     if not text:
         return None
     text = PUBLISHED_PREFIX_RE.sub("", text)
-    match = DATE_VALUE_RE.search(text)
+    match = FRENCH_DATE_PHRASE_RE.search(text)
     return clean_text(match.group(0)) if match else None
 
 

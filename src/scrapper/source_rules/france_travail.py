@@ -90,9 +90,8 @@ def extract_company_url(soup: BeautifulSoup, url: str) -> str | None:
     if not _is_france_travail_url(url):
         return None
     link = soup.select_one('div.media .media-body a[href*="/page-employeur/"]')
-    if not link or not link.get("href"):
-        return None
-    return urljoin(url, link["href"])
+    href = link.get("href") if link else None
+    return urljoin(url, href) if isinstance(href, str) and href else None
 
 
 def extract_location(soup: BeautifulSoup, url: str) -> str | None:

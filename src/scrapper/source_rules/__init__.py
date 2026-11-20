@@ -5,11 +5,13 @@ from dataclasses import dataclass
 
 from bs4 import BeautifulSoup
 
-from scrapper.source_rules import emploi_territorial, france_travail, jobijoba
+from scrapper.source_rules import emploi_collectivites, emploi_territorial, france_travail, isarta, jobijoba
 from scrapper.source_rules.common import normalize_offer_title
 from scrapper.text import clean_text
 
-TrackerRepair = Callable[[object | None, object | None, object | None, object | None], tuple[str | None, str | None, str | None]]
+TrackerRepair = Callable[
+    [object | None, object | None, object | None, object | None], tuple[str | None, str | None, str | None]
+]
 SoupExtractor = Callable[[BeautifulSoup, str], str | None]
 
 
@@ -60,6 +62,15 @@ SOURCE_RULES: dict[str, SourceRuleSet] = {
         extract_employment_type=jobijoba.extract_employment_type,
         extract_date=jobijoba.extract_date,
         extract_salary=jobijoba.extract_salary,
+    ),
+    "isarta": SourceRuleSet(
+        extract_location=isarta.extract_location,
+        extract_date=isarta.extract_date,
+        extract_employment_type=isarta.extract_employment_type,
+    ),
+    "emploi_collectivites": SourceRuleSet(
+        extract_location=emploi_collectivites.extract_location,
+        extract_description=emploi_collectivites.extract_description,
     ),
     "emploi_territorial": SourceRuleSet(
         extract_title=emploi_territorial.extract_title,

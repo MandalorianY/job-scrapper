@@ -41,7 +41,7 @@ def extract_company_url(soup: BeautifulSoup, url: str) -> str | None:
     node = _label_value_node(soup, "Site web de l'employeur")
     link = node.select_one("a[href]") if node else None
     href = link.get("href") if link else None
-    return urljoin(url, href) if href else None
+    return urljoin(url, href) if isinstance(href, str) and href else None
 
 
 def extract_location(soup: BeautifulSoup, url: str) -> str | None:
@@ -86,32 +86,27 @@ def _label_value(soup: BeautifulSoup, label: str) -> str | None:
 
 
 def _label_value_node(soup: BeautifulSoup, label: str) -> Tag | None:
+    container = _label_container(soup, label)
+    return container.select_one(".offre-item-value, .offre-item-text") if container is not None else None
+
+
+def _label_container(soup: BeautifulSoup, label: str) -> Tag | None:
     label_node = soup.find(
         class_="offre-item-label",
         string=lambda value: (clean_text(value) or "").casefold() == label.casefold(),
     )
-    if not label_node:
-        return None
-    container = label_node.parent
-    if not isinstance(container, Tag):
-        return None
-    return container.select_one(".offre-item-value, .offre-item-text")
+    parent = label_node.parent if label_node else None
+    return parent if isinstance(parent, Tag) else None
 
 
 def _section_text_after_label(soup: BeautifulSoup, label: str) -> str | None:
-    label_node = soup.find(
-        class_="offre-item-label",
-        string=lambda value: (clean_text(value) or "").casefold() == label.casefold(),
-    )
-    if not label_node:
-        return None
-    container = label_node.parent
-    if not isinstance(container, Tag):
+    container = _label_container(soup, label)
+    if container is None:
         return None
     sibling = container.find_next_sibling()
     if not isinstance(sibling, Tag):
         return None
-    if "offre-item-text" not in sibling.get("class", []):
+    if "offre-item-text" not in (sibling.get("class") or []):
         return None
     return clean_text(sibling.get_text(" "))
 
