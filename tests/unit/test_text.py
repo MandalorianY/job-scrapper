@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import pytest
-from hypothesis import given, strategies as st
+from hypothesis import given
+from hypothesis import strategies as st
 
 from scrapper.config import DEFAULT_EXCLUDE_TERMS, DEFAULT_INCLUDE_TERMS
 from scrapper.text import (
@@ -9,9 +10,10 @@ from scrapper.text import (
     completeness_score,
     contains_any_terms,
     contains_excluded_terms,
-    description_dedupe_key,
     dedupe_key,
+    description_dedupe_key,
     has_excluded_contract_signal,
+    matches_job_title,
     normalize_text,
     stable_hash,
     url_key,
@@ -62,6 +64,8 @@ def test_excluded_terms_are_word_based_not_substrings() -> None:
 
 
 def test_url_key_ignores_tracking_params_but_preserves_known_job_ids() -> None:
+    assert url_key("https://isarta.fr/?job=123&utm_source=search") == "isarta.fr?job=123"
+    assert url_key("https://isarta.fr/?job=456") != url_key("https://isarta.fr/?job=123")
     assert url_key("https://example.com/jobs/123?utm_source=x") == "example.com/jobs/123"
     assert (
         url_key("https://www.linkedin.com/jobs/view/current?currentJobId=42&utm_source=x")
@@ -113,3 +117,64 @@ def test_completeness_score_increases_when_description_is_added(description: str
     base = {"title": "Example coordinator", "company": "Example Organization"}
     enriched = {**base, "description": description}
     assert completeness_score(enriched) >= completeness_score(base)
+
+
+@pytest.mark.parametrize("title", [
+    "Assistant Communication - Marketing en Alt H/F",
+    "Alt - Assistant(e) Administratif(ve) - Communication H/F",
+    "Bts com alt chargé de communication (H/F)",
+    "Responsable communication (bénévolat de compétence)",
+    "JOB ÉTUDIANT : Chargé de projet marketing",
+])
+def test_audit_rejects_abbreviated_student_and_volunteer_titles(title: str) -> None:
+    assert has_excluded_contract_signal(title, "FULL_TIME", None, DEFAULT_EXCLUDE_TERMS)
+
+
+@pytest.mark.parametrize("description", [
+    "Assistant en contrat d’apprentissage à partir de septembre.",
+    "Stage d'un ou deux mois temps plein 35h.",
+    "Type d’alternance : Apprentissage. Type de contrat : CDD.",
+    "Type d'emploi : alternance. Rémunération 850 euros.",
+    "Ce stage est fait pour vous si vous préparez un Bac+3.",
+    "Lieu du stage : Toulouse.",
+    "Alternance à compter de septembre 2026.",
+    "Dans le cadre d'une alternance, nous recrutons.",
+    "Assistant marketing (Alternance sur 1 an).",
+    "ALTERNANCE MARKETING / COMMUNICATION. Missions variées.",
+    "Nous cherchons un(e) alternant(e) en marketing.",
+    "On cherche notre futur alternant pour nous aider.",
+    "Le poste est bénévole et nécessite quelques heures par semaine.",
+    "This position is an internship.",
+])
+def test_audit_rejects_student_contracts_hidden_in_descriptions(description: str) -> None:
+    assert has_excluded_contract_signal("Chargé de communication", "CDI, CDD", description, DEFAULT_EXCLUDE_TERMS)
+
+
+@pytest.mark.parametrize("description", [
+    "Vous encadrez un stagiaire et une alternante.",
+    "Vous travaillez avec notre alternante graphisme et communication.",
+    "Une première expérience en alternance est appréciée.",
+    "Expérience en pilotage de campagnes digitales, y compris dans le cadre d'une alternance.",
+    "Au moins deux ans d'expérience, alternance comprise.",
+    "Vous managez un assistant presse en stage et un chargé des réseaux sociaux.",
+    "Poste CDD avec possibilité de mise en stage dans la fonction publique.",
+    "Our hiring process: Stage 1: Applied, Stage 2: Peer Interview.",
+    "Nous recherchons un responsable pour accompagner un stagiaire.",
+])
+def test_audit_preserves_supervision_experience_and_non_student_stage_contexts(description: str) -> None:
+    assert not has_excluded_contract_signal("Communication interne", "CDI", description, DEFAULT_EXCLUDE_TERMS)
+
+
+@pytest.mark.parametrize(("title", "allowed"), [
+    ("Ingénieur en communications sémantiques 6G", False),
+    ("Agent de communication des dossiers patients", False),
+    ("Formateur en marketing digital", False),
+    ("Développeur Marketing Automation", False),
+    ("Chargé de communication interne", True),
+    ("Chargé marketing dans un centre de formation", True),
+    ("Community manager & communication cible étudiante", True),
+    ("Responsable administratif", False),
+])
+def test_configured_title_exclusions_preserve_relevant_roles(title: str, allowed: bool) -> None:
+    patterns = (r"\bcommunications semantiques\b", r"\bdossiers patients\b", r"^formateur\b", r"^developpeur\b")
+    assert matches_job_title(title, ("communication", "communications", "marketing"), patterns) is allowed

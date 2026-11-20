@@ -12,14 +12,13 @@ from scrapper.config import SearchConfig
 from scrapper.export import export_jobs
 from scrapper.location_scope import location_is_in_scope
 from scrapper.scrapers import (
-    scrape_hellowork,
     scrape_aggregators,
+    scrape_hellowork,
     scrape_jobspy_sources,
     scrape_web_search,
     scrape_welcome_to_the_jungle,
 )
 from scrapper.storage import JobStore
-
 
 app = typer.Typer(help="Scrape example role jobs and export deduped CSV/XLSX files.")
 console = Console()
@@ -87,9 +86,12 @@ def run(
         purged = store.purge_excluded_offers(config.exclude_terms)
         if purged:
             counts["excluded_removed"] = purged
-        purged_nonmatching = store.purge_nonmatching_offers(config.include_terms)
+        purged_nonmatching = store.purge_nonmatching_offers(config.include_terms, config.excluded_title_patterns)
         if purged_nonmatching:
             counts["nonmatching_removed"] = purged_nonmatching
+        purged_companies = store.purge_excluded_companies(config.excluded_companies_by_source)
+        if purged_companies:
+            counts["excluded_companies_removed"] = purged_companies
         purged_out_of_scope = store.purge_out_of_scope_offers(
             lambda location: location_is_in_scope(location, config.location_scope)
         )
@@ -101,8 +103,10 @@ def run(
             config.export.excel_columns,
             repair_fields_enabled_by_default=config.export.repair_fields_enabled_by_default,
             repair_fields_by_source=config.export.repair_fields_by_source,
+            direct_links_enabled_by_source=config.export.direct_links_enabled_by_source,
             include_terms=config.include_terms,
             exclude_terms=config.exclude_terms,
+            excluded_title_patterns=config.excluded_title_patterns,
             location_allowed=lambda location: location_is_in_scope(location, config.location_scope),
         )
         _print_summary(counts, total, excel_path, csv_path, raw_csv_path)

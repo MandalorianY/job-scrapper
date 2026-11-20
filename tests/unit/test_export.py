@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import date, datetime
 from pathlib import Path
 
@@ -8,7 +9,7 @@ import pytest
 from openpyxl import load_workbook
 
 from scrapper.config import SearchConfig
-from scrapper.export import _date_fr, _date_value, _salary_bounds, export_jobs
+from scrapper.export import _date_fr, _date_value, _review_note, _salary_bounds, export_jobs
 from scrapper.location_scope import location_is_in_scope
 from scrapper.models import JobOffer
 from scrapper.storage import JobStore
@@ -189,6 +190,37 @@ def test_export_uses_configured_excel_columns(tmp_path: Path) -> None:
         store.close()
 
 
+def test_export_can_disable_direct_links_by_source(tmp_path: Path) -> None:
+    store = JobStore(tmp_path / "jobs.duckdb")
+    try:
+        store.upsert_offer(
+            JobOffer(
+                source="jobijoba",
+                source_url="https://www.jobijoba.com/fr/annonce/54/1",
+                direct_url="https://apply.example.com/1",
+                title="Example manager",
+                company="Example",
+                location="Example City",
+                description="Full-time example role with sample responsibilities.",
+            )
+        )
+
+        excel_path, _csv_path, _raw_csv_path, _total = export_jobs(
+            store,
+            tmp_path / "exports",
+            excel_columns=("Lien", "Postuler", "Offre source"),
+            direct_links_enabled_by_source={"jobijoba": False},
+        )
+
+        worksheet = load_workbook(excel_path, data_only=False)["Offres"]
+        expected = '=HYPERLINK("https://www.jobijoba.com/fr/annonce/54/1","https://www.jobijoba.com/fr/annonce/54/1")'
+        assert worksheet["A2"].value == expected
+        assert worksheet["B2"].value == expected
+        assert worksheet["C2"].value == expected
+    finally:
+        store.close()
+
+
 def test_export_adds_status_dropdown_validation(tmp_path: Path) -> None:
     store = JobStore(tmp_path / "jobs.duckdb")
     try:
@@ -215,11 +247,21 @@ def test_export_adds_status_dropdown_validation(tmp_path: Path) -> None:
         assert validations[0].formula1 == '"En Attente,Postulé,Refusé"'
         assert "A2:A1048576" in str(validations[0].sqref)
         assert worksheet["A2"].value == "En Attente"
+        color_ranges = list(worksheet.conditional_formatting)
+        assert len(color_ranges) == 1
+        assert str(color_ranges[0].sqref) == "A2"
+        rules = worksheet.conditional_formatting[color_ranges[0]]
+        assert [rule.formula for rule in rules] == [['"En Attente"'], ['"Postulé"'], ['"Refusé"']]
+        assert all(rule.type == "cellIs" and rule.operator == "equal" and rule.dxf for rule in rules)
     finally:
         store.close()
 
 
-def test_export_preserves_existing_status_for_matching_tracker_rows(tmp_path: Path) -> None:
+@pytest.mark.parametrize("status_header", ["Statut", "Postulé"])
+@pytest.mark.parametrize("status", ["Postulé", "Refusé"])
+def test_export_preserves_existing_status_for_matching_tracker_rows(
+    tmp_path: Path, status_header: str, status: str
+) -> None:
     export_dir = tmp_path / "exports"
     store = JobStore(tmp_path / "jobs.duckdb")
     try:
@@ -242,7 +284,8 @@ def test_export_preserves_existing_status_for_matching_tracker_rows(tmp_path: Pa
 
     workbook = load_workbook(excel_path, data_only=False)
     worksheet = workbook["Offres"]
-    worksheet["A2"] = "Postulé"
+    worksheet["A1"] = status_header
+    worksheet["A2"] = status
     workbook.save(excel_path)
     workbook.close()
 
@@ -265,9 +308,9 @@ def test_export_preserves_existing_status_for_matching_tracker_rows(tmp_path: Pa
         )
 
         assert total == 1
-        assert pd.read_csv(csv_path).loc[0, "Statut"] == "Postulé"
+        assert pd.read_csv(csv_path).loc[0, "Statut"] == status
         worksheet = load_workbook(excel_path, data_only=False)["Offres"]
-        assert worksheet["A2"].value == "Postulé"
+        assert worksheet["A2"].value == status
     finally:
         refreshed_store.close()
 
@@ -468,6 +511,54 @@ def test_export_does_not_retain_existing_rows_rejected_by_location_scope(tmp_pat
         empty_store.close()
 
 
+def test_export_does_not_retain_meteojob_placeholder_rows(tmp_path: Path) -> None:
+    export_dir = tmp_path / "exports"
+    old_store = JobStore(tmp_path / "old.duckdb")
+    try:
+        old_store.upsert_offer(
+            JobOffer(
+                source="linkedin",
+                source_url="https://www.linkedin.com/jobs/view/valid",
+                title="Valid example manager",
+                company="Example",
+                location="Toulouse",
+                date_posted="2026-07-01",
+            )
+        )
+        old_store.upsert_offer(
+            JobOffer(
+                source="meteojob",
+                source_url="https://www.meteojob.com/jobs/55275233",
+                title="Emploi Chargé de communication à Saint-Quentin-Fallavier",
+                company="Meteojob",
+                location="Saint-Quentin-Fallavier",
+                date_posted=None,
+            )
+        )
+        export_jobs(
+            old_store,
+            export_dir,
+            excel_columns=("Publié le", "Lien", "Intitulé", "Entreprise"),
+        )
+    finally:
+        old_store.close()
+
+    empty_store = JobStore(tmp_path / "empty.duckdb")
+    try:
+        excel_path, csv_path, _raw_csv_path, total = export_jobs(
+            empty_store,
+            export_dir,
+            excel_columns=("Publié le", "Lien", "Intitulé", "Entreprise"),
+        )
+
+        assert total == 1
+        assert pd.read_csv(csv_path)["Intitulé"].to_list() == ["Valid example manager"]
+        worksheet = load_workbook(excel_path, data_only=False)["Offres"]
+        assert worksheet.max_row == 2
+    finally:
+        empty_store.close()
+
+
 def test_export_keeps_postule_boolean_when_status_column_is_omitted(tmp_path: Path) -> None:
     store = JobStore(tmp_path / "jobs.duckdb")
     try:
@@ -659,3 +750,145 @@ def test_date_fr_formats_iso_natural_language_and_relative_dates() -> None:
     assert _date_fr("Il y a 10 h Description", today=today) == "04/06/2026"
     assert _date_fr("Il y a 2 jours", today=today) == "02/06/2026"
     assert _date_value("29/05/2026", today=today) == date(2026, 5, 29)
+    assert _date_value("Il y a 20 h", today=today) == date(2026, 6, 3)
+    assert _date_value("Il y a 2 semaines", today=today) == date(2026, 5, 21)
+    assert _date_value("31 décembre", today=date(2026, 1, 2)) == date(2025, 12, 31)
+
+
+@pytest.mark.parametrize(("minimum", "maximum", "unit", "currency", "expected"), [
+    (2400, 2500, "monthly", "EUR", (28800, 30000)),
+    (2900, 2900, "MONTH", "EUR", (34800, 34800)),
+    (36000, 44000, "yearly", "EUR", (36000, 44000)),
+    (40, 56, "hourly", "EUR", (None, None)),
+    (300, 400, "daily", "EUR", (None, None)),
+    (2400, 2500, None, "EUR", (None, None)),
+    (40000, 45000, "yearly", "USD", (None, None)),
+    (3000, 2000, "monthly", "EUR", (None, None)),
+    (-100, 2000, "monthly", "EUR", (None, None)),
+    (None, 3000, "monthly", "EUR", (None, 36000)),
+    (3000, None, "monthly", "EUR", (36000, None)),
+])
+def test_audit_salary_units_and_unreliable_ranges(minimum, maximum, unit, currency, expected) -> None:
+    assert _salary_bounds(pd.Series({
+        "min_amount": minimum, "max_amount": maximum, "interval": unit, "currency": currency,
+    })) == expected
+
+
+def test_purged_description_only_contract_cannot_return_from_old_tracker(tmp_path: Path) -> None:
+    store = JobStore(tmp_path / "jobs.duckdb")
+    offer = JobOffer(
+        source="indeed", source_url="https://example.com/jobs/student",
+        direct_url="https://example.com/apply/student", title="Assistant communication",
+        company="Example",
+        description="Type d'alternance : Apprentissage", employment_type="FULL_TIME",
+    )
+    export_dir = tmp_path / "exports"
+    try:
+        store.upsert_offer(offer)
+        export_jobs(store, export_dir, excel_columns=("Statut", "Lien", "Intitulé"))
+        assert store.purge_excluded_offers(("alternance", "apprentissage")) == 1
+    finally:
+        store.close()
+    # Reopening models the next scheduled run loading a stale remote workbook.
+    store = JobStore(tmp_path / "jobs.duckdb")
+    try:
+        assert len(store.excluded_url_keys()) == 2
+        _, csv_path, _, total = export_jobs(store, export_dir, include_terms=("communication",))
+        assert total == 0
+        assert pd.read_csv(csv_path).empty
+        store.upsert_offer(replace(offer, description="Paid permanent role", employment_type="CDI"))
+        assert not store.excluded_url_keys()
+        assert export_jobs(store, export_dir, include_terms=("communication",))[3] == 1
+    finally:
+        store.close()
+
+
+def test_export_filters_current_titles_and_flags_uncertain_low_pay_without_losing_status(tmp_path: Path) -> None:
+    store = JobStore(tmp_path / "jobs.duckdb")
+    export_dir = tmp_path / "exports"
+    columns = ("Statut", "Lien", "Intitulé", "Salaire min (€ annuel)", "À vérifier")
+    try:
+        for title, slug, amount in [("Assistant communication", "assistant", 630),
+                                     ("Développeur communication", "developer", 3000)]:
+            store.upsert_offer(JobOffer(
+                source="indeed", source_url=f"https://example.com/jobs/{slug}", title=title,
+                company="Example",
+                min_amount=amount, max_amount=amount, interval="monthly", currency="EUR",
+            ))
+        path, _, _, _ = export_jobs(store, export_dir, excel_columns=columns)
+        book = load_workbook(path)
+        for row in book["Offres"].iter_rows(min_row=2):
+            row[0].value = "Postulé"
+        book.save(path)
+        path, csv_path, _, total = export_jobs(
+            store, export_dir, excel_columns=columns,
+            include_terms=("communication",), excluded_title_patterns=(r"^developpeur\b",),
+        )
+        assert total == 1
+        row = pd.read_csv(csv_path).iloc[0]
+        assert row["Intitulé"] == "Assistant communication"
+        assert row["Statut"] == "Postulé"
+        assert row["Salaire min (€ annuel)"] == 7560
+        assert "vérifier stage/alternance" in row["À vérifier"]
+    finally:
+        store.close()
+
+
+def test_export_preserves_status_when_canonical_source_changes_without_restoring_duplicate(tmp_path: Path) -> None:
+    store = JobStore(tmp_path / "jobs.duckdb")
+    try:
+        offer = JobOffer(source="indeed", source_url="https://indeed.example/job/1", title="Communication",
+                         company="Example", employment_type="CDI")
+        store.upsert_offer(offer)
+        columns = ("Statut", "Lien", "Intitulé")
+        path, _, _, _ = export_jobs(store, tmp_path / "exports", excel_columns=columns)
+        book = load_workbook(path)
+        book["Offres"]["A2"] = "Postulé"
+        book.save(path)
+        store.upsert_offer(replace(offer, source="linkedin", source_url="https://linkedin.example/job/2",
+                                   description="A richer description with the role's responsibilities."))
+        path, csv_path, _, total = export_jobs(store, tmp_path / "exports", excel_columns=columns)
+        assert total == 1
+        row = pd.read_csv(csv_path).iloc[0]
+        assert row["Statut"] == "Postulé"
+        assert "linkedin.example" in row["Lien"]
+    finally:
+        store.close()
+
+
+def test_export_checks_contract_evidence_from_noncanonical_copy(tmp_path: Path) -> None:
+    store = JobStore(tmp_path / "jobs.duckdb", source_priority={"indeed": 0, "glassdoor": 10})
+    try:
+        for source, description in [("indeed", None), ("glassdoor", "Lieu du stage : Toulouse")]:
+            store.upsert_offer(JobOffer(source=source, source_url=f"https://{source}.example/jobs/1",
+                                       title="Responsable Marketing", company="Example", description=description))
+        assert store.canonical_dataframe().iloc[0]["best_source"] == "indeed"
+        assert export_jobs(store, tmp_path / "exports", exclude_terms=("stage",))[3] == 0
+    finally:
+        store.close()
+
+
+def test_review_notes_distinguish_teaching_recruitment_from_mentoring() -> None:
+    assert "formation" in _review_note(pd.Series({"description": "Nous recrutons des formateurs/trices indépendants."}))
+    assert not _review_note(pd.Series({"description": "Vous encadrez les stagiaires et préparez les contenus marketing."}))
+
+
+def test_duplicate_status_conflicts_stay_visible_after_repeated_exports(tmp_path: Path) -> None:
+    from scrapper.export import _merge_existing_tracker_rows
+
+    columns = ["Statut", "Lien", "Intitulé", "À vérifier"]
+    old = pd.DataFrame([
+        ["En Attente", "https://example.com/a", "Communication", ""],
+        ["Postulé", "https://example.com/b", "Communication", ""],
+    ], columns=columns)
+    path = tmp_path / "jobs.csv"
+    old.to_csv(path, index=False)
+    current = old.iloc[:1].copy()
+    aliases = {"url:example.com/a": {"url:example.com/a", "url:example.com/b"}}
+    merged = _merge_existing_tracker_rows(current, tmp_path / "missing.xlsx", path, current_link_aliases=aliases)
+    assert len(merged) == 1
+    assert merged.iloc[0]["Statut"] == "En Attente"
+    assert merged.iloc[0]["À vérifier"] == "Statuts divergents entre doublons : En Attente / Postulé"
+    merged.to_csv(path, index=False)
+    repeated = _merge_existing_tracker_rows(current, tmp_path / "missing.xlsx", path, current_link_aliases=aliases)
+    assert repeated.iloc[0]["À vérifier"] == merged.iloc[0]["À vérifier"]

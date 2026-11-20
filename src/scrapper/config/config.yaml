@@ -102,6 +102,9 @@ include_terms:
   - analyst
   - operator
 
+# Optional regular expressions matched against normalized titles (lowercase, no accents/punctuation).
+excluded_title_patterns: []
+
 exclude_terms:
   - stage
   - stagiaire
@@ -161,6 +164,11 @@ export:
   # repair_fields_by_source:
   #   france_travail: true
   #   linkedin: false
+  # Direct/apply links can also be disabled per source for the export's main
+  # Lien/Postuler columns. When false, the source/original listing URL is used.
+  # Example:
+  # direct_links_enabled_by_source:
+  #   jobijoba: false
   excel_columns:
     - Statut
     - Publié le
@@ -175,6 +183,7 @@ export:
   repair_fields_enabled_by_default: true
   repair_fields_by_source:
     france_travail: true
+  direct_links_enabled_by_source: {}
 
 # =============================================================================
 # 5. Enabled Sources
@@ -213,6 +222,9 @@ enabled_sources:
   emploi_collectivites: true
   cadremploi: true
   optioncarriere: true
+
+# Exact company names to exclude per source. Use "*" for all sources.
+excluded_companies_by_source: {}
 
 # =============================================================================
 # 6. Dedupe Source Preference

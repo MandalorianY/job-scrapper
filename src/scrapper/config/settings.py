@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
@@ -13,6 +14,7 @@ from pydantic_settings import (
     YamlConfigSettingsSource,
 )
 
+from scrapper.text import matches_job_title, normalize_text
 
 PACKAGE_CONFIG_DIR = Path(__file__).resolve().parent
 LOCAL_CONFIG_FILE = PACKAGE_CONFIG_DIR / "config.local.yaml"
@@ -163,6 +165,7 @@ class ExportConfig(BaseModel):
     excel_columns: tuple[str, ...] = DEFAULT_EXCEL_COLUMNS
     repair_fields_enabled_by_default: bool = True
     repair_fields_by_source: dict[str, bool] = Field(default_factory=dict)
+    direct_links_enabled_by_source: dict[str, bool] = Field(default_factory=dict)
 
 
 JobOfferField = Literal["title", "company", "location", "description"]
@@ -198,9 +201,11 @@ class Settings(BaseSettings):
     location_scope: LocationScopeConfig
     exclude_terms: tuple[str, ...]
     include_terms: tuple[str, ...]
+    excluded_title_patterns: tuple[str, ...] = ()
     jobspy_sites: tuple[str, ...]
     custom_sites: tuple[str, ...]
     enabled_sources: dict[str, bool] = Field(default_factory=dict)
+    excluded_companies_by_source: dict[str, tuple[str, ...]] = Field(default_factory=dict)
     dedupe_fields: DedupeFieldsConfig = Field(default_factory=DedupeFieldsConfig)
     dedupe_source_priority: dict[str, int] = Field(default_factory=dict)
     dedupe_default_source_priority: int = 100
@@ -263,7 +268,7 @@ class Settings(BaseSettings):
         init_settings: PydanticBaseSettingsSource,
         env_settings: PydanticBaseSettingsSource,
         dotenv_settings: PydanticBaseSettingsSource,
-        file_secret_settings: PydanticBaseSettingsSource,  # noqa: ARG003
+        file_secret_settings: PydanticBaseSettingsSource,
     ) -> tuple[PydanticBaseSettingsSource, ...]:
         app_env = init_settings.init_kwargs.get("app_env") or EnvironmentSettings().app_env
         yaml_override = init_settings.init_kwargs.pop("yaml_file", None)
@@ -300,6 +305,27 @@ class Settings(BaseSettings):
 
     def is_source_enabled(self, source: str) -> bool:
         return self.enabled_sources.get(source, True)
+
+    @field_validator("excluded_title_patterns")
+    @classmethod
+    def _valid_title_patterns(cls, patterns: tuple[str, ...]) -> tuple[str, ...]:
+        for pattern in patterns:
+            try:
+                re.compile(pattern)
+            except re.error as exc:
+                raise ValueError(f"Invalid excluded title pattern: {pattern}") from exc
+        return patterns
+
+    def title_is_allowed(self, title: object | None) -> bool:
+        return matches_job_title(title, self.include_terms, self.excluded_title_patterns)
+
+    def is_company_excluded(self, source: str, company: object | None) -> bool:
+        normalized_company = normalize_text(company)
+        if not normalized_company:
+            return False
+        excluded = self.excluded_companies_by_source.get(source, ())
+        excluded += self.excluded_companies_by_source.get("*", ())
+        return normalized_company in {normalize_text(value) for value in excluded}
 
 
 @lru_cache
