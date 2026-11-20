@@ -546,7 +546,7 @@ def _google_search_term(site: str, query: str, location: str, config: SearchConf
     if site != "google":
         return None
     excluded = " ".join(f"-{term}" for term in config.jobspy.google_query_exclude_terms)
-    places = " OR ".join(config.jobspy.google_query_places)
+    places = " OR ".join(config.jobspy.google_query_places) or f'"{location}"'
     return f'{query} emploi ({places}) {excluded}'
 
 

@@ -63,7 +63,8 @@ def test_google_jobspy_source_uses_google_search_term_and_records_rows(
         ]
         assert calls[0]["site_name"] == "google"
         assert calls[0]["location"] == "Toulouse, France"
-        assert "Toulouse" in calls[0]["google_search_term"]
+        assert '"Toulouse, France"' in calls[0]["google_search_term"]
+        assert "Colomiers" not in calls[0]["google_search_term"]
         assert "-stage" in calls[0]["google_search_term"]
         assert search_state == (None,)
         assert canonical.iloc[0]["best_source"] == "google"
