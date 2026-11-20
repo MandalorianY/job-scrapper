@@ -6,7 +6,6 @@ from bs4 import BeautifulSoup
 
 from scrapper.text import clean_text
 
-
 CONTRACT_LABELS = {
     "alternance": "Alternance",
     "cdi": "CDI",
@@ -14,6 +13,23 @@ CONTRACT_LABELS = {
     "intérim": "Intérim",
     "interim": "Intérim",
 }
+FRENCH_MONTH_RE = (
+    r"janvier|février|fevrier|mars|avril|mai|juin|juillet|août|aout|"
+    r"septembre|octobre|novembre|décembre|decembre"
+)
+DATE_VALUE_RE = re.compile(
+    rf"""
+    (?:
+        il\s+y\s+a\s+\d+\s*(?:min|mn|minutes?|h|heures?|j|jours?|d|semaines?|mois)
+        | aujourd'hui
+        | hier
+        | \d{{1,2}}/\d{{1,2}}/\d{{4}}
+        | \d{{1,2}}\s+(?:{FRENCH_MONTH_RE})(?:\s+\d{{4}})?
+    )
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+PUBLISHED_PREFIX_RE = re.compile(r"^publi[ée]e?\s+le\s+", re.IGNORECASE)
 
 
 def extract_company(soup: BeautifulSoup, _url: str) -> str | None:
@@ -49,9 +65,15 @@ def extract_employment_type(soup: BeautifulSoup, _url: str) -> str | None:
 
 
 def extract_date(soup: BeautifulSoup, _url: str) -> str | None:
+    offer = _current_offer(soup)
+    for node in (offer or soup).select(".permalink-date"):
+        date_text = _date_value(node.get_text(" "))
+        if date_text:
+            return date_text
     for line in _offer_lines(soup):
-        if line.lower().startswith("publiée le ") or line.lower().startswith("publié le "):
-            return clean_text(re.sub(r"^publi[ée]e?\s+le\s+", "", line, flags=re.IGNORECASE))
+        date_text = _date_value(line)
+        if date_text:
+            return date_text
     return None
 
 
@@ -63,10 +85,23 @@ def extract_salary(soup: BeautifulSoup, _url: str) -> str | None:
 
 
 def _offer_lines(soup: BeautifulSoup) -> list[str]:
-    offer = soup.select_one(".offer.current") or soup.select_one(".permalink-open")
+    offer = _current_offer(soup)
     if not offer:
         return []
     return [line.strip() for line in offer.get_text("\n", strip=True).splitlines() if line.strip()]
+
+
+def _current_offer(soup: BeautifulSoup):
+    return soup.select_one(".offer.current") or soup.select_one(".permalink-open")
+
+
+def _date_value(value: str) -> str | None:
+    text = clean_text(value) or ""
+    if not text:
+        return None
+    text = PUBLISHED_PREFIX_RE.sub("", text)
+    match = DATE_VALUE_RE.search(text)
+    return clean_text(match.group(0)) if match else None
 
 
 def _contract_label(value: str) -> str | None:
@@ -79,7 +114,5 @@ def _looks_like_metadata(value: str) -> bool:
     return (
         _contract_label(text) is not None
         or "€" in text
-        or lowered.startswith("publié")
-        or lowered.startswith("description de l'offre")
-        or lowered.startswith("postuler")
+        or lowered.startswith(("publié", "description de l'offre", "postuler"))
     )

@@ -8,7 +8,6 @@ from bs4 import BeautifulSoup
 from scrapper.source_rules.common import normalize_offer_title
 from scrapper.text import clean_text, normalize_text
 
-
 FRANCE_TRAVAIL_LOCATION_RE = re.compile(
     r"^\s*\d{2,3}\s*-\s*(?P<location>.+?)\s*-\s*Localiser avec Mappy\s*$",
     re.IGNORECASE,
@@ -19,6 +18,7 @@ DESCRIPTION_COMPANY_PATTERNS = (
         r"(?:recherche|recrute|ouvre|est\s+une|est\s+un)\b"
     ),
 )
+PUBLISHED_PREFIX_RE = re.compile(r"^publi[ée]e?\s+le\s+", re.IGNORECASE)
 
 
 def repair_tracker_fields(
@@ -103,6 +103,15 @@ def extract_location(soup: BeautifulSoup, url: str) -> str | None:
         return None
     text = clean_text(title_complement.get_text(" "))
     return extract_mappy_location(text) or text
+
+
+def extract_date(soup: BeautifulSoup, url: str) -> str | None:
+    if not _is_france_travail_url(url):
+        return None
+    node = soup.select_one("[itemprop='datePosted']")
+    if not node:
+        return None
+    return clean_text(node.get("content")) or clean_text(PUBLISHED_PREFIX_RE.sub("", node.get_text(" ")))
 
 
 def normalize_title(value: object | None) -> str | None:

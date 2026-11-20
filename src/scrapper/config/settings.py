@@ -111,12 +111,15 @@ class DirectAggregatorConfig(BaseModel):
     max_links: int
     query_style: str = "quote_plus"
     use_direct_locations: bool = False
+    blocked_direct_hosts: tuple[str, ...] = ()
+    blocked_provider_terms: tuple[str, ...] = ()
 
 
 class SiteSearchConfig(BaseModel):
     source: str
     query_template: str
     host: str
+    search_url_templates: tuple[str, ...] = ()
 
 
 class AggregatorConfig(BaseModel):

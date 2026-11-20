@@ -35,6 +35,7 @@ def test_france_travail_page_extractors_live_in_dedicated_rules_module() -> None
     soup = BeautifulSoup(
         """
         <div class="modal-body">
+          <span itemprop="datePosted" content="2026-05-28">Publié le 28 mai 2026</span>
           <p class="title-complementary">31 - Blagnac - Localiser avec Mappy</p>
           <h2>Employeur</h2>
           <div class="media">
@@ -53,6 +54,7 @@ def test_france_travail_page_extractors_live_in_dedicated_rules_module() -> None
     assert rules.extract_company(soup, url) == "RANDSTAD"
     assert rules.extract_company_url(soup, url) == "https://candidat.francetravail.fr/page-employeur/randstad-093"
     assert rules.extract_location(soup, url) == "Blagnac"
+    assert rules.extract_date(soup, url) == "2026-05-28"
 
 
 def test_jobijoba_extracts_current_offer_block_instead_of_navigation_text() -> None:
@@ -88,3 +90,101 @@ def test_jobijoba_extracts_current_offer_block_instead_of_navigation_text() -> N
     assert rules.extract_date(soup, url) == "Il y a 10 h"
     assert rules.extract_salary(soup, url) == "De 780 € à 1 222 € par mois"
     assert "alternant(e)" in (rules.extract_description(soup, url) or "")
+
+
+def test_jobijoba_extracts_visible_permalink_date_without_trailing_content() -> None:
+    soup = BeautifulSoup(
+        """
+        <div class="offer current">
+          <div class="permalink-content">
+            <div class="permalink-date">Publiée le 4 juin</div>
+            <div class="permalink-subtitle">Description de l'offre</div>
+            <p class="permalink-description">Poste situé à Quint-Fonsegrives.</p>
+          </div>
+        </div>
+        """,
+        "lxml",
+    )
+    rules = get_source_rules("jobijoba")
+    url = "https://www.jobijoba.com/fr/annonce/54/2daeed2968112308d7cd8a5f4c119f28"
+
+    assert rules.extract_date(soup, url) == "4 juin"
+
+
+def test_jobijoba_date_parser_does_not_glue_description_text_to_relative_dates() -> None:
+    soup = BeautifulSoup(
+        """
+        <div class="offer current">
+          <span>Publiée le Il y a 10 h Description de l'offre</span>
+        </div>
+        """,
+        "lxml",
+    )
+    rules = get_source_rules("jobijoba")
+    url = "https://www.jobijoba.com/fr/annonce/54/2daeed2968112308d7cd8a5f4c119f28"
+
+    assert rules.extract_date(soup, url) == "Il y a 10 h"
+
+
+def test_emploi_territorial_extracts_labeled_offer_fields() -> None:
+    soup = BeautifulSoup(
+        """
+        <html>
+          <head>
+            <title>Chargé de communication - MAIRIE DE TOULOUSE | emploi-territorial.fr</title>
+            <meta property="og:title" content="www.emploi-territorial.fr">
+          </head>
+          <body>
+            <main>
+              <h1 class="set-header-logo-h1"></h1>
+              <h2 class="set-line-emploi">Chargé de communication</h2>
+              <div class="offre-item row p-2">
+                <div class="offre-item-label col-4 font-weight-bold">Employeur</div>
+                <div class="offre-item-value col-8"><strong>MAIRIE DE TOULOUSE</strong></div>
+              </div>
+              <div class="offre-item row p-2">
+                <div class="offre-item-label col-12 col-sm-4 font-weight-bold">Site web de l'employeur</div>
+                <div class="offre-item-value col-12 col-sm-8">
+                  <a href="https://www.toulouse.fr">https://www.toulouse.fr</a>
+                </div>
+              </div>
+              <div class="offre-item row p-2">
+                <div class="offre-item-label col-12 col-sm-4 font-weight-bold">Lieu de travail</div>
+                <div class="offre-item-value col-12 col-sm-8">Toulouse (Haute-Garonne (31))</div>
+              </div>
+              <div class="offre-item row p-2">
+                <div class="offre-item-label col-12 col-sm-4 font-weight-bold">Type d'emploi</div>
+                <div class="offre-item-value col-12 col-sm-8">Emploi permanent - vacance d'emploi</div>
+              </div>
+              <div class="offre-item row p-2">
+                <div class="offre-item-label col-12 col-sm-4 font-weight-bold">Publiée le</div>
+                <div class="offre-item-value col-12 col-sm-8">04/06/2026</div>
+              </div>
+              <div class="offre-item row p-2 font-weight-bold">
+                <div class="offre-item-label col">Descriptif de l'emploi</div>
+              </div>
+              <div class="offre-item-text row px-3 mb-3">
+                Communication institutionnelle et relations presse.
+              </div>
+              <div class="offre-item row p-2 font-weight-bold">
+                <div class="offre-item-label col">Missions / conditions d'exercice</div>
+              </div>
+              <div class="offre-item-text row px-3 mb-3">
+                Gérer les contenus web et les supports de communication.
+              </div>
+            </main>
+          </body>
+        </html>
+        """,
+        "lxml",
+    )
+    rules = get_source_rules("emploi_territorial")
+    url = "https://www.emploi-territorial.fr/offre/o069-example-charge-communication"
+
+    assert rules.extract_title(soup, url) == "Chargé de communication"
+    assert rules.extract_company(soup, url) == "MAIRIE DE TOULOUSE"
+    assert rules.extract_company_url(soup, url) == "https://www.toulouse.fr"
+    assert rules.extract_location(soup, url) == "Toulouse (Haute-Garonne (31))"
+    assert rules.extract_employment_type(soup, url) == "Emploi permanent - vacance d'emploi"
+    assert rules.extract_date(soup, url) == "04/06/2026"
+    assert "Communication institutionnelle" in (rules.extract_description(soup, url) or "")

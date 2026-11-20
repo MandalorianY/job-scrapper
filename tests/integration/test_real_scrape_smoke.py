@@ -22,7 +22,6 @@ from scrapper.scrapers import (
 )
 from scrapper.storage import JobStore
 
-
 RUN_REAL_SMOKE_ENV = "SCRAPPER_RUN_REAL_SMOKE"
 SOURCE_FILTER_ENV = "SCRAPPER_REAL_SMOKE_SOURCE"
 
@@ -60,24 +59,14 @@ def _site_search_source(source: str) -> SmokeSource:
     return SmokeSource(source, run)
 
 
+_SMOKE_CONFIG = SearchConfig()
 REAL_SMOKE_SOURCES = (
-    _jobspy_source("indeed"),
-    _jobspy_source("linkedin"),
-    _jobspy_source("glassdoor"),
-    _jobspy_source("google"),
+    *(_jobspy_source(source) for source in _SMOKE_CONFIG.jobspy_sites),
     SmokeSource("hellowork", lambda config, store: asyncio.run(scrape_hellowork(config, store))),
     SmokeSource("welcome_to_the_jungle", lambda config, store: asyncio.run(scrape_welcome_to_the_jungle(config, store))),
     SmokeSource("web_search", lambda config, store: asyncio.run(scrape_web_search(config, store))),
-    _direct_aggregator_source("example_direct_board"),
-    _direct_aggregator_source("emploi_territorial"),
-    _direct_aggregator_source("meteojob"),
-    _direct_aggregator_source("jobijoba"),
-    _direct_aggregator_source("makesense"),
-    _site_search_source("apec"),
-    _site_search_source("isarta"),
-    _site_search_source("emploi_collectivites"),
-    _site_search_source("cadremploi"),
-    _site_search_source("optioncarriere"),
+    *(_direct_aggregator_source(spec.source) for spec in _SMOKE_CONFIG.aggregators.direct_specs),
+    *(_site_search_source(spec.source) for spec in _SMOKE_CONFIG.aggregators.site_search_sources),
 )
 
 
@@ -90,9 +79,11 @@ def test_real_small_scrape_by_website(smoke_source: SmokeSource, tmp_path: Path)
     selected_source = os.getenv(SOURCE_FILTER_ENV)
     if selected_source and selected_source != smoke_source.source:
         pytest.skip(f"Set {SOURCE_FILTER_ENV}={smoke_source.source} to run this website smoke test.")
+    if not _SMOKE_CONFIG.is_source_enabled(smoke_source.source):
+        pytest.skip(f"{smoke_source.source} is disabled in the active configuration.")
 
     config = SearchConfig(
-        queries=("example role",),
+        queries=_SMOKE_CONFIG.queries[:1],
         results_wanted_per_query=1,
         custom_max_pages=1,
         custom_max_detail_pages=3,
@@ -124,6 +115,7 @@ def test_real_small_scrape_by_website(smoke_source: SmokeSource, tmp_path: Path)
             config.export.excel_columns,
             repair_fields_enabled_by_default=config.export.repair_fields_enabled_by_default,
             repair_fields_by_source=config.export.repair_fields_by_source,
+            direct_links_enabled_by_source=config.export.direct_links_enabled_by_source,
         )
         assert excel_path.exists()
         assert csv_path.exists()
@@ -132,16 +124,22 @@ def test_real_small_scrape_by_website(smoke_source: SmokeSource, tmp_path: Path)
         workbook = load_workbook(excel_path, data_only=False)
         worksheet = workbook["Offres"]
         assert "Données brutes" in workbook.sheetnames
-        assert worksheet["A1"].value == "Postulé"
-        assert worksheet["B1"].value == config.export.excel_columns[1]
+        assert [cell.value for cell in worksheet[1]] == list(config.export.excel_columns)
         if total:
             assert "TableOffres" in worksheet.tables
+            expected_range = f"A1:{get_column_letter(worksheet.max_column)}{worksheet.max_row}"
+            assert worksheet.tables["TableOffres"].ref == expected_range
+            assert worksheet.tables["TableOffres"].autoFilter.ref == expected_range
             if "Statut" in config.export.excel_columns:
+                assert worksheet.data_validations.dataValidation
+                assert worksheet.conditional_formatting
+            if "Postulé" in config.export.excel_columns and "Statut" in config.export.excel_columns:
                 status_col = config.export.excel_columns.index("Statut") + 1
                 status_cell = f"{get_column_letter(status_col)}2"
-                assert worksheet["A2"].value == f'={status_cell}="Postulé"'
-            else:
-                assert worksheet["A2"].value in {False, "☐"}
+                applied_col = config.export.excel_columns.index("Postulé") + 1
+                assert worksheet.cell(2, applied_col).value == f'={status_cell}="Postulé"'
+
+        print(f"Live source={smoke_source.source} stored={counts!r} exported={total} states={search_state!r}")
 
         errors = [f"{source}: {error}" for source, _seen_count, error in search_state if error]
         if errors:
