@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import defaultdict
 from datetime import datetime, timedelta
 from urllib.parse import urlencode
 
@@ -31,6 +32,8 @@ async def scrape_hellowork(config: SearchConfig, store: JobStore) -> int:
         return 0
 
     discovered = set[str]()
+    seen_by_search: defaultdict[tuple[str, str], set[str]] = defaultdict(set)
+    errors: dict[tuple[str, str], str] = {}
     detail_enqueued = 0
     written = 0
     log.info(
@@ -59,6 +62,11 @@ async def scrape_hellowork(config: SearchConfig, store: JobStore) -> int:
         ),
     )
 
+    @crawler.failed_request_handler
+    async def failed_request(context: BeautifulSoupCrawlingContext, error: Exception) -> None:
+        data = context.request.user_data
+        errors[(data["query"], data["location"])] = str(error) or type(error).__name__
+
     @crawler.router.handler("LIST")
     async def list_handler(context: BeautifulSoupCrawlingContext) -> None:
         nonlocal detail_enqueued
@@ -83,7 +91,10 @@ async def scrape_hellowork(config: SearchConfig, store: JobStore) -> int:
             if posted_date_is_before_cutoff(listing_date, cutoff):
                 continue
             url = absolutize(config.hellowork.base_url, anchor.get("href"))
-            if not url or url in discovered:
+            if not url:
+                continue
+            seen_by_search[(request_query, request_location)].add(url)
+            if url in discovered:
                 continue
             discovered.add(url)
             if not config.refresh_known_details and store.source_url_seen(config.hellowork.source, url):
@@ -172,22 +183,31 @@ async def scrape_hellowork(config: SearchConfig, store: JobStore) -> int:
             store.upsert_offer(offer)
             written += 1
 
+    searches = [(query, location) for query in config.queries for location in config.search_locations]
     requests = []
-    for query in config.queries:
-        for search_location in config.search_locations:
-            store.start_search(config.hellowork.source, query, search_location)
-            request = _search_request(config, query, search_location, 1)
-            if request:
-                requests.append(request)
-    await crawler.run(requests)
-    per_query_seen = len(discovered)
-    for query in config.queries:
-        for search_location in config.search_locations:
-            store.finish_search(config.hellowork.source, query, search_location, per_query_seen)
+    for query, location in searches:
+        store.start_search(config.hellowork.source, query, location)
+        request = _search_request(config, query, location, 1)
+        if request:
+            requests.append(request)
+        else:
+            errors[(query, location)] = "Could not build a search request"
+    try:
+        await crawler.run(requests)
+    except BaseException as error:
+        errors.update(dict.fromkeys(searches, str(error) or type(error).__name__))
+        raise
+    finally:
+        for query, location in searches:
+            store.finish_search(
+                config.hellowork.source, query, location, len(seen_by_search[(query, location)]),
+                error=errors.get((query, location)),
+            )
     log.info(
         "custom_source_completed",
         source=config.hellowork.source,
-        seen=per_query_seen,
+        seen=len(discovered),
+        failed_searches=len(errors),
         enqueued=detail_enqueued,
         stored=written,
     )

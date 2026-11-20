@@ -229,6 +229,51 @@ def test_storage_can_override_dedupe_fields(tmp_path: Path) -> None:
         store.close()
 
 
+def test_listing_identity_beats_title_company_matches(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    try:
+        for source, listing, location, apply in (
+            ("board", "toulouse-1", "Toulouse", "https://employer.example/jobs/432?utm_source=board"),
+            ("board", "colomiers-1", "Colomiers", "https://employer.example/careers"),
+            ("board", "toulouse-2", "Toulouse", "https://employer.example/careers"),
+            ("partner", "different-title", "Toulouse, France", "https://employer.example/jobs/432"),
+            ("third-board", "tournefeuille-1", "Tournefeuille", None),
+        ):
+            store.upsert_offer(JobOffer(
+                source=source, source_id=listing, source_url=f"https://{source}.example/jobs/{listing}",
+                title="Analyste confirmé" if source == "partner" else "Data Analyst",
+                company="Same employer", location=location, direct_url=apply,
+            ))
+        # A provider can change a detail URL while keeping the listing ID.
+        store.upsert_offer(JobOffer(
+            source="board", source_id="toulouse-1", source_url="https://board.example/jobs/renamed",
+            title="Data Analyst", company="Same employer", location="Toulouse",
+        ))
+        canonical = store.canonical_dataframe()
+        assert sorted(canonical["duplicate_count"].tolist()) == [1, 1, 1, 3]
+        assert set(canonical["location"]) >= {"Toulouse", "Colomiers", "Tournefeuille"}
+    finally:
+        store.close()
+
+
+def test_search_attempts_distinguish_empty_failed_and_unfinished(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    try:
+        store.start_search("board", "analyst", "Toulouse")
+        assert store.conn.execute("SELECT status FROM source_health").fetchone() == ("unfinished",)
+        store.finish_search("board", "analyst", "Toulouse", 0)
+        watermark = store.get_last_success("board", "analyst", "Toulouse")
+        assert watermark is not None
+        assert store.conn.execute("SELECT status, seen_count FROM source_health").fetchone() == ("succeeded", 0)
+        store.start_search("board", "analyst", "Toulouse")
+        store.finish_search("board", "analyst", "Toulouse", 0, error="Source unavailable")
+        assert store.get_last_success("board", "analyst", "Toulouse") == watermark
+        assert store.conn.execute("SELECT status, error FROM source_health").fetchone() == ("failed", "Source unavailable")
+        assert store.conn.execute("SELECT count(*) FROM search_attempts WHERE run_id = ?", [store.run_id]).fetchone() == (2,)
+    finally:
+        store.close()
+
+
 def test_default_config_declares_dedupe_source_priorities() -> None:
     config = SearchConfig()
 

@@ -161,6 +161,25 @@ def test_jobspy_batches_compatible_sites_in_one_call(monkeypatch, tmp_path: Path
         store.close()
 
 
+def test_jobspy_records_failed_batch_and_successful_retry(monkeypatch, tmp_path: Path) -> None:
+    def fake_scrape_jobs(**kwargs):
+        if kwargs["site_name"] == ["indeed", "linkedin"]:
+            raise RuntimeError("Batch unavailable")
+        return pd.DataFrame()
+
+    monkeypatch.setattr(jobspy_sources, "scrape_jobs", fake_scrape_jobs)
+    config = SearchConfig(queries=("example",), locations=("Toulouse, France",), jobspy_sites=("indeed", "linkedin"))
+    store = JobStore(tmp_path / "jobs.duckdb")
+    try:
+        assert jobspy_sources.scrape_jobspy_sources(config, store) == {"indeed": 0, "linkedin": 0}
+        assert store.conn.execute(
+            "SELECT error, count(*) FROM search_attempts GROUP BY error ORDER BY error NULLS LAST"
+        ).fetchall() == [("Batch unavailable", 2), (None, 2)]
+        assert store.conn.execute("SELECT DISTINCT status, seen_count FROM source_health").fetchall() == [("succeeded", 0)]
+    finally:
+        store.close()
+
+
 def test_jobspy_hours_old_override_ignores_incremental_state(monkeypatch, tmp_path: Path) -> None:
     calls: list[dict] = []
 

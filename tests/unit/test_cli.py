@@ -7,6 +7,7 @@ from typer.testing import CliRunner
 from scrapper import cli
 from scrapper.config.settings import PACKAGE_CONFIG_DIR
 from scrapper.models import JobOffer
+from scrapper.storage import JobStore
 
 
 def test_show_config_reports_effective_values_and_origins(monkeypatch, tmp_path: Path) -> None:
@@ -78,3 +79,41 @@ def test_local_export_survives_source_failure_and_never_syncs(monkeypatch, tmp_p
     assert result.exit_code == 0, result.output
     assert "unavailable_board failed" in result.output
     assert (tmp_path / "exports/jobs.xlsx").exists()
+
+
+def test_offline_replay_restores_purged_offers_and_is_idempotent(monkeypatch, tmp_path: Path) -> None:
+    archive_path = tmp_path / "archive.duckdb"
+    archive = JobStore(archive_path)
+    try:
+        offer = JobOffer(
+            source="example", source_id="1", source_url="https://example.com/jobs/1", title="Example coordinator",
+            company="Example", location="Toulouse, France", scraped_at="2026-06-04T12:00:00+00:00",
+            raw={"listing_id": "1"},
+        )
+        archive.upsert_offer(offer)
+        archive.upsert_offer(offer)
+        assert archive.purge_nonmatching_offers(("unrelated",)) == 1
+        assert archive.conn.execute("SELECT count(*) FROM offer_observations").fetchone() == (1,)
+    finally:
+        archive.close()
+
+    def forbidden(*args):
+        raise AssertionError("Replay must never scrape or use the remote tracker")
+
+    for name in ("_run_custom_sources", "_run_all_sources_parallel", "scrape_jobspy_sources", "_tracker_sync_hooks"):
+        monkeypatch.setattr(cli, name, forbidden)
+
+    target = tmp_path / "rebuilt.duckdb"
+    for _ in range(2):
+        result = CliRunner().invoke(cli.app, [
+            "--replay-from", str(archive_path), "--db", str(target),
+            "--export-dir", str(tmp_path / "exports"), "--log-file", str(tmp_path / "run.jsonl"),
+        ])
+        assert result.exit_code == 0, result.output
+        assert "observations_replayed" in result.output
+        store = JobStore(target)
+        try:
+            assert len(store.raw_dataframe()) == len(store.canonical_dataframe()) == 1
+            assert store.conn.execute("SELECT count(*) FROM search_state").fetchone() == (0,)
+        finally:
+            store.close()
