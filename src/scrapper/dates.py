@@ -3,7 +3,6 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
-from typing import Any
 
 from scrapper.text import clean_text
 
@@ -40,6 +39,18 @@ FRENCH_MONTHS = {
     "décembre": 12,
     "decembre": 12,
 }
+FRENCH_DATE_PHRASE_RE = re.compile(
+    rf"""
+    (?:
+        il\s+y\s+a\s+\d+\s*(?:min|mn|minutes?|h|heures?|j|jours?|d|semaines?|mois)
+        | aujourd'hui
+        | hier
+        | \d{{1,2}}/\d{{1,2}}/\d{{4}}
+        | \d{{1,2}}\s+(?:{"|".join(FRENCH_MONTHS)})(?:\s+\d{{4}})?
+    )
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
 
 
 @dataclass(frozen=True)
@@ -48,7 +59,7 @@ class ParsedPostedDate:
     moment: datetime | None = None
 
 
-def parse_posted_date(value: Any, now: datetime | None = None) -> ParsedPostedDate | None:
+def parse_posted_date(value: object, now: datetime | None = None) -> ParsedPostedDate | None:
     now = now or datetime.now(UTC)
     if now.tzinfo is None:
         now = now.replace(tzinfo=UTC)
@@ -83,7 +94,7 @@ def parse_posted_date(value: Any, now: datetime | None = None) -> ParsedPostedDa
     return None
 
 
-def absolute_posted_date(value: Any, now: datetime | None = None) -> str | None:
+def absolute_posted_date(value: object, now: datetime | None = None) -> str | None:
     text = clean_text(value)
     if not text:
         return None

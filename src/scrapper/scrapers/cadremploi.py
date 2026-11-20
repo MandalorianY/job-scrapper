@@ -14,9 +14,11 @@ def _tls_get(url: str, user_agent: str) -> httpx.Response:
     try:
         session.headers["user-agent"] = user_agent
         response = session.get(url, timeout=20, allow_redirects=True)
+        response_headers = httpx.Headers({key: value for key, value in response.headers.items() if value is not None})
         return httpx.Response(
-            response.status_code, text=response.text,
-            headers={"content-type": httpx.Headers(response.headers).get("content-type", "")},
+            response.status_code,
+            text=response.text,
+            headers={"content-type": response_headers.get("content-type", "")},
             request=httpx.Request("GET", response.url or url),
         )
     except Exception as exc:
@@ -26,7 +28,7 @@ def _tls_get(url: str, user_agent: str) -> httpx.Response:
 
 
 class _PublicClient:
-    def __init__(self, user_agent: str):
+    def __init__(self, user_agent: str) -> None:
         self.user_agent = user_agent
 
     async def get(self, url: str) -> httpx.Response:

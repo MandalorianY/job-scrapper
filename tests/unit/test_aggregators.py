@@ -1,40 +1,42 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from pathlib import Path
 
 import httpx
 import pytest
 
-from scrapper.config import SearchConfig
+from scrapper.config import SearchConfig, SiteSearchConfig
 from scrapper.models import JobOffer
 from scrapper.scrapers import aggregators
 from scrapper.storage import JobStore
 
 
 def test_isarta_discovers_absolute_job_query_links() -> None:
-    html = '''
+    html = """
         <a href="https://isarta.fr/?job=123"><img src="logo.png"></a>
         <a href="https://isarta.fr/?job=123">Chargé de communication Toulouse</a>
         <a href="https://isarta.fr/?job=123">Publié le 16 octobre</a>
         <a href="https://isarta.fr/?job=456">Développeur</a>
-    '''
+    """
 
-    async def run():
+    async def run() -> list[str]:
         transport = httpx.MockTransport(lambda _: httpx.Response(200, text=html, headers={"content-type": "text/html"}))
         async with httpx.AsyncClient(transport=transport) as client:
             return await aggregators._direct_site_search_results(
                 client, "isarta", "communication", SearchConfig(include_terms=("communication",))
             )
 
-    assert asyncio.run(run()) == [aggregators.SearchResult(
-        "https://isarta.fr/?job=123", "Chargé de communication Toulouse", None
-    )]
+    assert asyncio.run(run()) == ["https://isarta.fr/?job=123"]
 
 
-def test_cadremploi_all_blocked_pages_raise_instead_of_empty_success(monkeypatch) -> None:
-    monkeypatch.setattr(aggregators.cadremploi, "_tls_get", lambda url, _: httpx.Response(403, request=httpx.Request("GET", url)))
-    async def run():
+def test_cadremploi_all_blocked_pages_raise_instead_of_empty_success(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        aggregators.cadremploi, "_tls_get", lambda url, _: httpx.Response(403, request=httpx.Request("GET", url))
+    )
+
+    async def run() -> list[str]:
         async with httpx.AsyncClient(transport=httpx.MockTransport(lambda _: httpx.Response(403))) as client:
             return await aggregators._direct_site_search_results(client, "cadremploi", "communication", SearchConfig())
 
@@ -42,7 +44,7 @@ def test_cadremploi_all_blocked_pages_raise_instead_of_empty_success(monkeypatch
         asyncio.run(run())
 
 
-def test_cadremploi_continues_to_working_location_after_http_error(monkeypatch) -> None:
+def test_cadremploi_continues_to_working_location_after_http_error(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setitem(
         aggregators.SITE_SEARCH_DIRECT_TEMPLATES,
         "cadremploi",
@@ -51,77 +53,103 @@ def test_cadremploi_continues_to_working_location_after_http_error(monkeypatch) 
             "https://www.cadremploi.fr/emploi/liste_offres?motscles={query}&ville=colomiers-31",
         ),
     )
-    monkeypatch.setattr(aggregators.cadremploi, "_tls_get", lambda url, _: httpx.Response(403, request=httpx.Request("GET", url)))
+    monkeypatch.setattr(
+        aggregators.cadremploi, "_tls_get", lambda url, _: httpx.Response(403, request=httpx.Request("GET", url))
+    )
+
     def respond(request: httpx.Request) -> httpx.Response:
         if request.url.params.get("ville") != "colomiers-31":
             return httpx.Response(403)
-        return httpx.Response(200, headers={"content-type": "text/html"}, text=(
-            '<a href="/emploi/detail_offre?annonceId=123">Chargé de communication</a>'
-        ))
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/html"},
+            text=('<a href="/emploi/detail_offre?annonceId=123">Chargé de communication</a>'),
+        )
 
-    async def run():
+    async def run() -> list[str]:
         async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
             return await aggregators._direct_site_search_results(
                 client, "cadremploi", "communication", SearchConfig(include_terms=("communication",))
             )
 
-    assert [result.url for result in asyncio.run(run())] == [
-        "https://www.cadremploi.fr/emploi/detail_offre?annonceId=123"
-    ]
+    assert asyncio.run(run()) == ["https://www.cadremploi.fr/emploi/detail_offre?annonceId=123"]
 
 
-def test_makesense_navigation_does_not_consume_detail_limit() -> None:
+@pytest.mark.asyncio
+async def test_makesense_navigation_does_not_consume_detail_limit(
+    mock_html_client: Callable[[str], httpx.AsyncClient],
+) -> None:
     config = SearchConfig()
-    spec = next(s for s in config.aggregators.direct_specs if s.source == "makesense").model_copy(update={"max_links": 1})
-    html = '''
+    spec = next(s for s in config.aggregators.direct_specs if s.source == "makesense").model_copy(
+        update={"max_links": 1}
+    )
+    html = """
         <a href="/fr/s/jobs/all/all">All jobs</a>
         <a href="/fr/s/jobs/all/all/stage">Internships</a>
         <a href="/fr/jobs/employer-communication-123">Chargé de communication</a>
-    '''
+    """
+    async with mock_html_client(html) as client:
+        links = await aggregators._detail_links(client, spec, "https://jobs.makesense.org/fr/s/jobs/all/all")
 
-    async def run():
-        async with httpx.AsyncClient(transport=httpx.MockTransport(lambda _: httpx.Response(200, text=html))) as client:
-            return await aggregators._detail_links(client, spec, "https://jobs.makesense.org/fr/s/jobs/all/all")
-
-    assert asyncio.run(run()) == ["https://jobs.makesense.org/fr/jobs/employer-communication-123"]
+    assert links == ["https://jobs.makesense.org/fr/jobs/employer-communication-123"]
 
 
-def test_blocked_title_only_result_does_not_become_unverified_offer() -> None:
-    async def run():
+def test_blocked_detail_page_does_not_become_unverified_offer() -> None:
+    async def run() -> JobOffer | None:
         async with httpx.AsyncClient(transport=httpx.MockTransport(lambda _: httpx.Response(403))) as client:
-            return await aggregators._extract_result_offer(
-                client, aggregators.SearchResult("https://isarta.fr/?job=123", "Communication Toulouse", None),
-                "isarta", "communication", "Toulouse", SearchConfig(),
+            return await aggregators._extract_detail_offer(
+                client,
+                "https://isarta.fr/?job=123",
+                "isarta",
+                "communication",
+                SearchConfig(),
             )
 
     assert asyncio.run(run()) is None
 
 
-def test_disabled_site_search_source_is_skipped(monkeypatch, tmp_path: Path) -> None:
+def test_provider_search_urls_honor_title_and_requested_radius() -> None:
+    config = SearchConfig(distance_km=10)
+    specs = {spec.source: spec for spec in config.aggregators.direct_specs}
+
+    france_travail = aggregators._search_urls(specs["france_travail"], "chargé communication", config)
+    assert all("rayon=10" in url for url in france_travail)
+    makesense = specs["makesense"].model_copy(
+        update={
+            "search_url_templates": ("https://jobs.makesense.org/fr/s/jobs/all/communication/cdi?sortBy=relevance",)
+        }
+    )
+    assert aggregators._search_urls(makesense, "responsable marketing", config)[0].endswith(
+        "?sortBy=relevance&s=responsable+marketing"
+    )
+
+
+def test_site_search_attempts_every_query_and_skips_disabled_sources(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     async def fake_site_search_results(
         client: httpx.AsyncClient,
-        spec,
+        spec: SiteSearchConfig,
         query: str,
-        search_query: str,
         config: SearchConfig,
-    ) -> list[aggregators.SearchResult]:
-        return [aggregators.SearchResult(url=f"https://{spec.host}/jobs/example", title="Example role", snippet=None)]
+    ) -> list[str]:
+        return [f"https://{spec.host}/jobs/example"]
 
-    async def fake_extract_result_offer(
+    async def fake_extract_detail_offer(
         client: httpx.AsyncClient,
-        result: aggregators.SearchResult,
+        url: str,
         source: str,
         query: str,
-        search_location: str,
         config: SearchConfig,
-    ):
+        **_kwargs: object,
+    ) -> None:
         return None
 
     monkeypatch.setattr(aggregators, "_site_search_results", fake_site_search_results)
-    monkeypatch.setattr(aggregators, "_extract_result_offer", fake_extract_result_offer)
+    monkeypatch.setattr(aggregators, "_extract_detail_offer", fake_extract_detail_offer)
 
     config = SearchConfig(
-        queries=("example role",),
+        queries=("example role", "sample coordinator", "demo lead", "placeholder specialist"),
         locations=("Toulouse, France",),
         enabled_sources={"apec": False},
         database_path=tmp_path / "jobs.duckdb",
@@ -139,54 +167,47 @@ def test_disabled_site_search_source_is_skipped(monkeypatch, tmp_path: Path) -> 
 
         assert "apec" not in counts
         assert row == (0,)
+        assert store.conn.execute("SELECT COUNT(*) FROM search_state WHERE source = 'cadremploi'").fetchone() == (4,)
     finally:
         store.close()
 
 
-def test_jobijoba_detail_parser_rejects_alternance_offer() -> None:
-    url = "https://www.jobijoba.com/fr/annonce/54/66cdbc5f83c4667724e965945b83f122"
-    html = """
-    <html>
-      <head>
-        <meta name="description" content="Voir l'offre d'emploi - Jobijoba">
-      </head>
-      <body>
-        <nav>
-          <span>Emploi CDI/CDD</span>
-          <span>Offres d'alternance</span>
-        </nav>
-        <div class="offer current">
-          <div class="row permalink-open">
-            <h1 class="permalink-title">Chargé de communication et marketing digital h/f</h1>
-            <span>Castelginest</span>
-            <span>Alternance</span>
-            <span>Chargé de communication</span>
-            <span>De 780 € à 1 222 € par mois</span>
-          </div>
-          <span>Publiée le Il y a 10 h</span>
-          <h2>Description de l'offre</h2>
-          <p class="permalink-description">
-            Dans le cadre de son partenariat avec une entreprise spécialisée dans l'immobilier,
-            notre école recherche un(e) alternant(e) pour occuper un poste.
-          </p>
-        </div>
-      </body>
-    </html>
-    """
+def test_site_search_records_missing_direct_route(tmp_path: Path) -> None:
+    isarta = next(spec for spec in SearchConfig().aggregators.site_search_sources if spec.source == "isarta")
+    config = SearchConfig(
+        queries=("example role",),
+        locations=("Unconfigured City, France",),
+        aggregators={"site_search_sources": (isarta,)},
+    )
+    store = JobStore(tmp_path / "jobs.duckdb")
+    requests = []
 
-    async def run_test():
-        transport = httpx.MockTransport(
-            lambda request: httpx.Response(
-                200,
-                text=html,
-                headers={"content-type": "text/html; charset=UTF-8"},
-                request=request,
-            )
+    def respond(request: httpx.Request) -> httpx.Response:
+        requests.append(request.url)
+        return httpx.Response(500)
+
+    async def run() -> dict[str, int]:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+            return await aggregators._scrape_site_search(client, config, store)
+
+    try:
+        assert asyncio.run(run()) == {"isarta": 0}
+        assert not requests
+        assert store.conn.execute("SELECT last_error FROM search_state").fetchone() == (
+            "No direct discovery URL configured for isarta",
         )
-        async with httpx.AsyncClient(transport=transport, follow_redirects=True) as client:
-            return await aggregators._extract_detail_offer(client, url, "jobijoba", "communication", SearchConfig())
+    finally:
+        store.close()
 
-    offer = asyncio.run(run_test())
+
+@pytest.mark.asyncio
+async def test_jobijoba_detail_parser_rejects_alternance_offer(
+    jobijoba_alternance_page: tuple[str, str], mock_html_client: Callable[[str], httpx.AsyncClient]
+) -> None:
+    url, html = jobijoba_alternance_page
+    config = SearchConfig()
+    async with mock_html_client(html) as client:
+        offer = await aggregators._extract_detail_offer(client, url, "jobijoba", "communication", config)
 
     assert offer is not None
     assert offer.location == "Castelginest"
@@ -202,7 +223,7 @@ def test_generic_date_inference_keeps_only_the_date_phrase() -> None:
 
 
 def test_meteojob_placeholder_page_is_rejected() -> None:
-    config = SearchConfig(include_terms=("communication",))
+    config = SearchConfig(include_terms=("communication",), location_scope={"enabled": False})
     offer = JobOffer(
         source="meteojob",
         source_url="https://www.meteojob.com/jobs/55275233",
@@ -217,12 +238,11 @@ def test_meteojob_placeholder_page_is_rejected() -> None:
         raw={"json_ld": {}, "url": "https://www.meteojob.com/jobs/55275233"},
     )
 
-    assert aggregators._is_meteojob_placeholder_offer(offer)
     assert not aggregators._offer_is_usable(offer, config)
 
 
 def test_specific_undated_meteojob_offer_is_not_rejected_as_placeholder() -> None:
-    config = SearchConfig(include_terms=("communication",))
+    config = SearchConfig(include_terms=("communication",), location_scope={"enabled": False})
     offer = JobOffer(
         source="meteojob",
         source_url="https://www.meteojob.com/jobs/example",
@@ -234,11 +254,11 @@ def test_specific_undated_meteojob_offer_is_not_rejected_as_placeholder() -> Non
         raw={"json_ld": {}, "url": "https://www.meteojob.com/jobs/example"},
     )
 
-    assert not aggregators._is_meteojob_placeholder_offer(offer)
     assert aggregators._offer_is_usable(offer, config)
 
 
-def test_detail_parser_extracts_direct_apply_url() -> None:
+@pytest.mark.asyncio
+async def test_detail_parser_extracts_direct_apply_url(mock_html_client: Callable[[str], httpx.AsyncClient]) -> None:
     url = "https://www.meteojob.com/jobs/example"
     html = """
     <html>
@@ -260,78 +280,25 @@ def test_detail_parser_extracts_direct_apply_url() -> None:
       </body>
     </html>
     """
-
-    async def run_test():
-        transport = httpx.MockTransport(
-            lambda request: httpx.Response(
-                200,
-                text=html,
-                headers={"content-type": "text/html; charset=UTF-8"},
-                request=request,
-            )
-        )
-        async with httpx.AsyncClient(transport=transport, follow_redirects=True) as client:
-            return await aggregators._extract_detail_offer(client, url, "meteojob", "communication", SearchConfig())
-
-    offer = asyncio.run(run_test())
+    async with mock_html_client(html) as client:
+        offer = await aggregators._extract_detail_offer(client, url, "meteojob", "communication", SearchConfig())
 
     assert offer is not None
     assert offer.direct_url == "https://ats.example/apply/example"
 
 
-def test_emploi_territorial_detail_parser_uses_source_specific_title() -> None:
-    url = "https://www.emploi-territorial.fr/offre/o069-example-charge-communication"
+@pytest.mark.asyncio
+async def test_emploi_territorial_detail_parser_uses_source_specific_title(
+    emploi_territorial_page: tuple[str, str], mock_html_client: Callable[[str], httpx.AsyncClient]
+) -> None:
+    url, html = emploi_territorial_page
     config = SearchConfig(
         include_terms=("communication",),
         exclude_terms=("stage", "alternance", "apprentissage"),
         location_scope={"enabled": False},
     )
-    html = """
-    <html>
-      <head>
-        <title>Chargé de communication - MAIRIE DE TOULOUSE | emploi-territorial.fr</title>
-        <meta property="og:title" content="www.emploi-territorial.fr">
-      </head>
-      <body>
-        <main>
-          <h1 class="set-header-logo-h1"></h1>
-          <h2 class="set-line-emploi">Chargé de communication</h2>
-          <div class="offre-item row p-2">
-            <div class="offre-item-label col-4 font-weight-bold">Employeur</div>
-            <div class="offre-item-value col-8"><strong>MAIRIE DE TOULOUSE</strong></div>
-          </div>
-          <div class="offre-item row p-2">
-            <div class="offre-item-label col-12 col-sm-4 font-weight-bold">Lieu de travail</div>
-            <div class="offre-item-value col-12 col-sm-8">Toulouse (Haute-Garonne (31))</div>
-          </div>
-          <div class="offre-item row p-2">
-            <div class="offre-item-label col-12 col-sm-4 font-weight-bold">Type d'emploi</div>
-            <div class="offre-item-value col-12 col-sm-8">Emploi permanent - vacance d'emploi</div>
-          </div>
-          <div class="offre-item row p-2 font-weight-bold">
-            <div class="offre-item-label col">Descriptif de l'emploi</div>
-          </div>
-          <div class="offre-item-text row px-3 mb-3">
-            Poste de communication basé à Toulouse.
-          </div>
-        </main>
-      </body>
-    </html>
-    """
-
-    async def run_test():
-        transport = httpx.MockTransport(
-            lambda request: httpx.Response(
-                200,
-                text=html,
-                headers={"content-type": "text/html; charset=UTF-8"},
-                request=request,
-            )
-        )
-        async with httpx.AsyncClient(transport=transport, follow_redirects=True) as client:
-            return await aggregators._extract_detail_offer(client, url, "emploi_territorial", "communication", config)
-
-    offer = asyncio.run(run_test())
+    async with mock_html_client(html) as client:
+        offer = await aggregators._extract_detail_offer(client, url, "emploi_territorial", "communication", config)
 
     assert offer is not None
     assert offer.title == "Chargé de communication"
@@ -341,10 +308,10 @@ def test_emploi_territorial_detail_parser_uses_source_specific_title() -> None:
     assert aggregators._offer_is_usable(offer, config)
 
 
-def test_jobijoba_detail_parser_resolves_redirect_target() -> None:
+@pytest.fixture
+def jobijoba_redirect_page() -> tuple[str, str, str]:
     detail_url = "https://www.jobijoba.com/fr/annonce/54/example"
     redirect_url = "https://www.jobijoba.com/fr/redirect/offer/54/example"
-    target_url = "https://www.hellowork.com/fr-fr/emplois/79739983.html?utm_source=jobijoba"
     detail_html = """
     <html>
       <body>
@@ -361,20 +328,28 @@ def test_jobijoba_detail_parser_resolves_redirect_target() -> None:
       </body>
     </html>
     """
+    return detail_url, redirect_url, detail_html
+
+
+def test_jobijoba_detail_parser_resolves_redirect_target(jobijoba_redirect_page: tuple[str, str, str]) -> None:
+    detail_url, redirect_url, detail_html = jobijoba_redirect_page
+    target_url = "https://www.hellowork.com/fr-fr/emplois/79739983.html?utm_source=jobijoba"
     redirect_html = f"""
     <html><body>
       <a href="https://r.holeest.com/redirect?from={target_url}">Continuer</a>
     </body></html>
     """
 
-    async def run_test():
+    async def run_test() -> JobOffer | None:
         def handler(request: httpx.Request) -> httpx.Response:
             if str(request.url) == redirect_url:
                 return httpx.Response(200, text=redirect_html, headers={"content-type": "text/html"}, request=request)
             return httpx.Response(200, text=detail_html, headers={"content-type": "text/html"}, request=request)
 
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler), follow_redirects=True) as client:
-            return await aggregators._extract_detail_offer(client, detail_url, "jobijoba", "communication", SearchConfig())
+            return await aggregators._extract_detail_offer(
+                client, detail_url, "jobijoba", "communication", SearchConfig()
+            )
 
     offer = asyncio.run(run_test())
 
@@ -383,24 +358,11 @@ def test_jobijoba_detail_parser_resolves_redirect_target() -> None:
     assert offer.source_id == "www.hellowork.com/fr-fr/emplois/79739983.html"
 
 
-def test_jobijoba_detail_parser_rejects_jobleads_redirect() -> None:
-    detail_url = "https://www.jobijoba.com/fr/annonce/54/example"
-    redirect_url = "https://www.jobijoba.com/fr/redirect/offer/54/example"
+def test_jobijoba_detail_parser_rejects_jobleads_redirect(jobijoba_redirect_page: tuple[str, str, str]) -> None:
+    detail_url, redirect_url, detail_html = jobijoba_redirect_page
     target_url = "https://fr.jobleads.com/register/example"
-    detail_html = """
-    <html><body>
-      <div class="offer current">
-        <div class="row permalink-open">
-          <h1 class="permalink-title">Chargé de communication H/F</h1>
-          <span>Toulouse</span><span>CDI</span><span>Example</span>
-        </div>
-        <p class="permalink-description">Poste de communication basé à Toulouse.</p>
-        <span class="button-primary" data-redirect="/fr/redirect/offer/54/example">Postuler</span>
-      </div>
-    </body></html>
-    """
 
-    async def run_test():
+    async def run_test() -> JobOffer | None:
         def handler(request: httpx.Request) -> httpx.Response:
             if str(request.url) == redirect_url:
                 return httpx.Response(302, headers={"location": target_url}, request=request)
@@ -431,7 +393,10 @@ def test_jobijoba_detail_parser_rejects_jobleads_redirect() -> None:
     assert asyncio.run(run_test()) is None
 
 
-def test_jobijoba_detail_parser_rejects_jobleads_provider_metadata() -> None:
+@pytest.mark.asyncio
+async def test_jobijoba_detail_parser_rejects_jobleads_provider_metadata(
+    mock_html_client: Callable[[str], httpx.AsyncClient],
+) -> None:
     detail_url = "https://www.jobijoba.com/fr/annonce/54/c7e225bc09a4711321f713f9c9bdda07"
     detail_html = """
     <html><body>
@@ -449,29 +414,16 @@ def test_jobijoba_detail_parser_rejects_jobleads_provider_metadata() -> None:
       </script>
     </body></html>
     """
+    async with mock_html_client(detail_html) as client:
+        offer = await aggregators._extract_detail_offer(client, detail_url, "jobijoba", "communication", SearchConfig())
 
-    async def run_test():
-        transport = httpx.MockTransport(
-            lambda request: httpx.Response(
-                200,
-                text=detail_html,
-                headers={"content-type": "text/html"},
-                request=request,
-            )
-        )
-        async with httpx.AsyncClient(transport=transport, follow_redirects=True) as client:
-            return await aggregators._extract_detail_offer(
-                client,
-                detail_url,
-                "jobijoba",
-                "communication",
-                SearchConfig(),
-            )
-
-    assert asyncio.run(run_test()) is None
+    assert offer is None
 
 
-def test_jobijoba_detail_parser_ignores_jobleads_in_similar_offers() -> None:
+@pytest.mark.asyncio
+async def test_jobijoba_detail_parser_ignores_jobleads_in_similar_offers(
+    mock_html_client: Callable[[str], httpx.AsyncClient],
+) -> None:
     detail_url = "https://www.jobijoba.com/fr/annonce/54/example"
     detail_html = """
     <html><body>
@@ -487,23 +439,7 @@ def test_jobijoba_detail_parser_ignores_jobleads_in_similar_offers() -> None:
       </script>
     </body></html>
     """
+    async with mock_html_client(detail_html) as client:
+        offer = await aggregators._extract_detail_offer(client, detail_url, "jobijoba", "communication", SearchConfig())
 
-    async def run_test():
-        transport = httpx.MockTransport(
-            lambda request: httpx.Response(
-                200,
-                text=detail_html,
-                headers={"content-type": "text/html"},
-                request=request,
-            )
-        )
-        async with httpx.AsyncClient(transport=transport, follow_redirects=True) as client:
-            return await aggregators._extract_detail_offer(
-                client,
-                detail_url,
-                "jobijoba",
-                "communication",
-                SearchConfig(),
-            )
-
-    assert asyncio.run(run_test()) is not None
+    assert offer is not None

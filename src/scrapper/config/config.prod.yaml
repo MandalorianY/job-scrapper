@@ -2,6 +2,6 @@ app_env: prod
 
 custom_max_pages: 3
 custom_max_detail_pages: 120
-web_search_max_results_per_query: 10
-web_search_max_detail_pages: 80
 refresh_known_details: false
+aggregators:
+  max_detail_pages: 80
