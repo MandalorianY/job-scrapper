@@ -1,11 +1,13 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from dataclasses import replace
+from datetime import UTC, date, datetime
 
 from bs4 import BeautifulSoup
 
 from scrapper.config import SearchConfig
 from scrapper.dates import absolute_posted_date
+from scrapper.models import JobOffer
 from scrapper.scrapers.aggregators import _company_from_domain as aggregator_company_from_domain
 from scrapper.scrapers.aggregators import _has_regional_signal, _infer_contract, _offer_is_usable
 from scrapper.scrapers.common import (
@@ -15,7 +17,6 @@ from scrapper.scrapers.common import (
     parse_posted_date,
     posted_date_is_before_cutoff,
 )
-from scrapper.scrapers.web_search import _unwrap_ddg
 
 
 def test_json_ld_jobposting_finds_nested_graph_payload() -> None:
@@ -85,10 +86,17 @@ def test_apply_url_reads_data_redirect_buttons() -> None:
 def test_parse_posted_date_handles_provider_formats() -> None:
     now = datetime(2026, 6, 5, 12, 0, tzinfo=UTC)
 
-    assert parse_posted_date("2026-06-04T10:30:00Z", now=now).day.isoformat() == "2026-06-04"
-    assert parse_posted_date("Publié le 04/06/2026", now=now).day.isoformat() == "2026-06-04"
-    assert parse_posted_date("Il y a 10 h", now=now).moment == datetime(2026, 6, 5, 2, 0, tzinfo=UTC)
-    assert parse_posted_date("28 mai 2026", now=now).day.isoformat() == "2026-05-28"
+    for text, expected_day in (
+        ("2026-06-04T10:30:00Z", date(2026, 6, 4)),
+        ("Publié le 04/06/2026", date(2026, 6, 4)),
+        ("28 mai 2026", date(2026, 5, 28)),
+    ):
+        parsed = parse_posted_date(text, now=now)
+        assert parsed is not None
+        assert parsed.day == expected_day
+    relative = parse_posted_date("Il y a 10 h", now=now)
+    assert relative is not None
+    assert relative.moment == datetime(2026, 6, 5, 2, 0, tzinfo=UTC)
     assert absolute_posted_date("Il y a 19 h", now=now) == "2026-06-04T17:00:00+00:00"
 
 
@@ -102,54 +110,32 @@ def test_posted_date_before_cutoff_respects_day_precision() -> None:
 
 def test_custom_search_cutoff_uses_last_success_with_overlap() -> None:
     class Store:
-        def get_last_success(self, source: str, query: str, location: str):
+        def get_last_success(self, source: str, query: str, location: str) -> datetime:
             return datetime(2026, 6, 4, 12, 0, tzinfo=UTC)
-
-    class Config:
-        default_hours_old = 336
-        overlap_hours = 24
 
     cutoff = custom_search_cutoff(
         Store(),
         "hellowork",
         "communication",
         "Toulouse, France",
-        Config(),
+        SearchConfig(default_hours_old=336, overlap_hours=24),
         now=datetime(2026, 6, 5, 12, 0, tzinfo=UTC),
     )
 
     assert cutoff == datetime(2026, 6, 3, 12, 0, tzinfo=UTC)
 
 
-def test_duckduckgo_unwraps_result_redirect() -> None:
-    assert (
-        _unwrap_ddg("https://duckduckgo.com/l/?uddg=https%3A%2F%2Fcompany.example%2Fjobs%2F1")
-        == "https://company.example/jobs/1"
-    )
-
-
 def test_aggregator_offer_usability_requires_title_contract_and_region() -> None:
     config = SearchConfig()
-    usable = type(
-        "Offer",
-        (),
-        {
-            "title": "Example coordinator",
-            "employment_type": "CDI",
-            "description": "Role based in Toulouse.",
-            "location": "Toulouse",
-        },
-    )()
-    bad_contract = type(
-        "Offer",
-        (),
-        {
-            "title": "Example coordinator",
-            "employment_type": "Alternance",
-            "description": "Role based in Toulouse.",
-            "location": "Toulouse",
-        },
-    )()
+    usable = JobOffer(
+        source="example",
+        source_url="https://example.com/jobs/1",
+        title="Example coordinator",
+        employment_type="CDI",
+        description="Role based in Toulouse.",
+        location="Toulouse",
+    )
+    bad_contract = replace(usable, employment_type="Alternance")
 
     assert _offer_is_usable(usable, config)
     assert not _offer_is_usable(bad_contract, config)

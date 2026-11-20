@@ -364,7 +364,7 @@ welcome_to_the_jungle:
   algolia_app_id: <ALGOLIA_APP_ID>
   job_index: example_jobs_index
   around_lat_lng: 43.6007,1.4328
-  around_radius: 25000
+  # Omit around_radius to use distance_km, converted to metres.
   office_country_filter: '["offices.country_code:FR"]'
 
 # =============================================================================
