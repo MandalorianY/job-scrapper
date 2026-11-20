@@ -2,9 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, date, datetime
 from pathlib import Path
-from types import SimpleNamespace
 from unittest.mock import Mock
-from urllib.parse import parse_qs, urlparse
 
 import pandas as pd
 import pytest
@@ -74,8 +72,12 @@ def test_google_jobspy_source_uses_google_search_term_and_records_rows(
         store.close()
 
 
-def test_google_jobspy_zero_rows_records_upstream_error(monkeypatch, tmp_path: Path) -> None:
-    monkeypatch.setattr(jobspy_sources, "scrape_jobs", lambda **_: pd.DataFrame())
+@pytest.mark.parametrize("source_error", [None, "HTTP 429"])
+def test_google_jobspy_zero_rows_records_upstream_error(monkeypatch, tmp_path: Path, source_error: str | None) -> None:
+    jobs = pd.DataFrame()
+    if source_error:
+        jobs.attrs["errors"] = {"google": source_error}
+    monkeypatch.setattr(jobspy_sources, "scrape_jobs", lambda **_: jobs)
     config = SearchConfig(
         queries=("example role",),
         locations=("Toulouse, France",),
@@ -91,7 +93,7 @@ def test_google_jobspy_zero_rows_records_upstream_error(monkeypatch, tmp_path: P
 
         assert counts == {"google": 0}
         assert row[0] is None
-        assert "initial cursor not found" in row[1]
+        assert (source_error or "initial cursor not found") in row[1]
     finally:
         store.close()
 
@@ -153,7 +155,6 @@ def test_jobspy_batches_compatible_sites_in_one_call(monkeypatch, tmp_path: Path
 
         assert len(calls) == 1
         assert calls[0]["site_name"] == ["indeed", "linkedin", "google"]
-        assert calls[0]["linkedin_fetch_description"] is True
         assert counts == {"indeed": 1, "linkedin": 1, "google": 1}
     finally:
         store.close()
@@ -186,7 +187,7 @@ def test_jobspy_hours_old_override_ignores_incremental_state(monkeypatch, tmp_pa
         store.close()
 
 
-def test_glassdoor_uses_city_only_location_and_country_domain_headers(monkeypatch, tmp_path: Path) -> None:
+def test_glassdoor_uses_city_only_location_and_configured_country(monkeypatch, tmp_path: Path) -> None:
     calls: list[dict] = []
 
     def fake_scrape_jobs(**kwargs):
@@ -210,9 +211,7 @@ def test_glassdoor_uses_city_only_location_and_country_domain_headers(monkeypatc
         assert counts == {"glassdoor": 0}
         assert calls[0]["location"] == "Toulouse"
         assert calls[0]["results_wanted"] == config.jobspy.glassdoor_results_wanted_per_query
-        assert jobspy_sources.glassdoor_headers["authority"] == "www.glassdoor.fr"
-        assert jobspy_sources.glassdoor_headers["origin"] == "https://www.glassdoor.fr"
-        assert jobspy_sources.glassdoor_headers["referer"] == "https://www.glassdoor.fr/"
+        assert calls[0]["country_indeed"] == config.country
         assert search_state[0] == "Toulouse"
         assert "Glassdoor returned 0 rows" in search_state[1]
     finally:
@@ -226,95 +225,14 @@ def test_glassdoor_strips_france_from_city_location() -> None:
     assert jobspy_sources._site_location("glassdoor", "Paris", config) == "Paris"
 
 
-def test_glassdoor_patch_uses_tolerant_scraper() -> None:
-    jobspy_sources._patch_glassdoor_scraper()
+def test_linkedin_fetches_detail_without_changing_other_sites(monkeypatch) -> None:
+    scrape = Mock(return_value=[])
+    monkeypatch.setattr(jobspy_sources.JobSpyLinkedIn, "scrape", scrape)
+    scraper_input = jobspy_sources.ScraperInput(site_name=[jobspy_sources.Site.LINKEDIN, jobspy_sources.Site.INDEED])
 
-    assert jobspy_sources.scrape_jobs.__globals__["Glassdoor"] is jobspy_sources.TolerantGlassdoor
-
-
-@pytest.mark.parametrize("html", ['{"token":"test-token"}', r'{\"token\":\"test-token\"}'])
-def test_glassdoor_initializes_session_from_homepage(html: str) -> None:
-    scraper = jobspy_sources.TolerantGlassdoor(user_agent="configured-agent")
-    scraper.base_url = "https://www.glassdoor.fr/"
-    scraper.session = Mock(headers={})
-    scraper.session.get.return_value = SimpleNamespace(status_code=200, text=html)
-
-    assert scraper._get_csrf_token() == "test-token"
-    assert scraper.base_url == "https://www.glassdoor.fr"
-    assert scraper.session.headers["user-agent"] == "configured-agent"
-    scraper.session.get.assert_called_once_with(
-        "https://www.glassdoor.fr/", timeout_seconds=15, allow_redirects=True
-    )
-
-
-@pytest.mark.parametrize(
-    ("status", "html", "error"),
-    [(403, "Forbidden", "HTTP 403"), (200, "<html></html>", "CSRF token")],
-)
-def test_glassdoor_session_failure_is_explicit(status: int, html: str, error: str) -> None:
-    scraper = jobspy_sources.TolerantGlassdoor()
-    scraper.base_url = "https://www.glassdoor.fr/"
-    scraper.session = Mock(headers={})
-    scraper.session.get.return_value = SimpleNamespace(status_code=status, text=html)
-
-    with pytest.raises(jobspy_sources.GlassdoorException, match=error):
-        scraper._get_csrf_token()
-
-
-@pytest.mark.parametrize(("code", "kind"), [("C", "CITY"), ("S", "STATE"), ("N", "COUNTRY")])
-def test_glassdoor_uses_current_location_autocomplete(code: str, kind: str) -> None:
-    scraper = jobspy_sources.TolerantGlassdoor()
-    scraper.base_url = "https://www.glassdoor.fr"
-    scraper.session = Mock()
-    scraper.session.get.return_value = Mock(status_code=200)
-    scraper.session.get.return_value.json.return_value = [{"locationId": 2864777, "locationType": code}]
-    location = "Saint-Étienne, France & alentours"
-
-    assert scraper._get_location(location, False) == (2864777, kind)
-    request_url = urlparse(scraper.session.get.call_args.args[0])
-    assert request_url.path == "/autocomplete/location"
-    assert parse_qs(request_url.query) == {
-        "locationTypeFilters": ["CITY,STATE,COUNTRY"], "caller": ["jobs"], "term": [location]
-    }
-
-
-@pytest.mark.parametrize(
-    ("status", "matches", "error"),
-    [
-        (404, [], "HTTP 404"),
-        (200, [], "no matches"),
-        (200, [{"locationId": 1, "locationType": "unknown"}], "unsupported location type"),
-    ],
-)
-def test_glassdoor_location_errors_are_explicit(status: int, matches: list, error: str) -> None:
-    scraper = jobspy_sources.TolerantGlassdoor()
-    scraper.base_url = "https://www.glassdoor.fr"
-    scraper.session = Mock()
-    scraper.session.get.return_value = Mock(status_code=status)
-    scraper.session.get.return_value.json.return_value = matches
-
-    with pytest.raises(jobspy_sources.GlassdoorException, match=error):
-        scraper._get_location("Toulouse", False)
-
-
-@pytest.mark.parametrize("base_url", ["https://www.glassdoor.fr", "https://www.glassdoor.fr/"])
-def test_glassdoor_job_links_preserve_path_separator(base_url: str) -> None:
-    scraper = jobspy_sources.TolerantGlassdoor()
-    scraper.base_url = base_url
-    offer = scraper._process_job({"jobview": {
-        "job": {"listingId": "123", "jobTitleText": "Chargé de communication"},
-        "header": {"employerNameFromSearch": "Example", "employer": {"id": 456}},
-    }})
-
-    assert offer.job_url == "https://www.glassdoor.fr/job-listing/j?jl=123"
-    assert offer.company_url == "https://www.glassdoor.fr/Overview/W-EI_IE456.htm"
-    assert offer.date_posted is None
-
-
-def test_linkedin_patch_uses_tolerant_scraper() -> None:
-    jobspy_sources._patch_linkedin_scraper()
-
-    assert jobspy_sources.scrape_jobs.__globals__["LinkedIn"] is jobspy_sources.TolerantLinkedIn
+    assert jobspy_sources.TolerantLinkedIn().scrape(scraper_input) == []
+    assert scrape.call_args.args[0].fetch_description
+    assert not scraper_input.fetch_description
 
 
 def test_linkedin_date_parser_handles_new_class_and_relative_age() -> None:

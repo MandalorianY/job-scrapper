@@ -3,17 +3,17 @@ from __future__ import annotations
 import asyncio
 
 import httpx
-from jobspy.util import create_session
+from jobspy.util import TLSRotating
 
 from scrapper.scrapers.async_http import HostThrottle
 
 
 def _tls_get(url: str, user_agent: str) -> httpx.Response:
     """Use the existing JobSpy HTTP transport for Cadremploi's public pages."""
-    session = create_session()
+    session = TLSRotating()
     try:
         session.headers["user-agent"] = user_agent
-        response = session.get(url, timeout_seconds=20, allow_redirects=True)
+        response = session.get(url, timeout=20, allow_redirects=True)
         return httpx.Response(
             response.status_code, text=response.text,
             headers={"content-type": httpx.Headers(response.headers).get("content-type", "")},
