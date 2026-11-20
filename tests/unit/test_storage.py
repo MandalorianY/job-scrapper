@@ -1,12 +1,27 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Mapping
 
 from scrapper.config import DEFAULT_EXCLUDE_TERMS, DEFAULT_INCLUDE_TERMS, SearchConfig
 from scrapper.location_scope import location_is_in_scope
 from scrapper.models import JobOffer
 from scrapper.storage import JobStore
+
+
+def test_contract_evidence_excludes_sparse_copies_of_same_offer(tmp_path: Path) -> None:
+    store = JobStore(tmp_path / "jobs.duckdb")
+    try:
+        for source, description in [("indeed", None), ("glassdoor", "Lieu du stage : Toulouse")]:
+            store.upsert_offer(JobOffer(source=source, source_url=f"https://{source}.example/jobs/1",
+                                       title="Responsable Marketing", company="Same employer", description=description))
+        store.upsert_offer(JobOffer(source="indeed", source_url="https://indeed.example/jobs/2",
+                                   title="Responsable Marketing", company="Other employer", employment_type="CDI"))
+        assert store.purge_excluded_offers(("stage",)) == 2
+        assert store.raw_dataframe()["company"].tolist() == ["Other employer"]
+        assert len(store.excluded_url_keys()) == 2
+    finally:
+        store.close()
 
 
 def _store(
@@ -252,6 +267,160 @@ def test_source_url_seen_uses_normalized_url_key(tmp_path: Path) -> None:
         store.close()
 
 
+def test_jobijoba_uses_external_apply_url_as_stable_identity(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    try:
+        for wrapper_url, date_posted, scraped_at in (
+            ("https://www.jobijoba.com/fr/annonce/54/old-wrapper", "Il y a 2 jours", "2026-06-05T12:00:00Z"),
+            ("https://www.jobijoba.com/fr/annonce/54/new-wrapper", "Il y a 1 h", "2026-06-06T12:00:00Z"),
+        ):
+            store.upsert_offer(
+                JobOffer(
+                    source="jobijoba",
+                    source_id="www.hellowork.com/fr-fr/emplois/79739983.html",
+                    source_url=wrapper_url,
+                    direct_url="https://www.hellowork.com/fr-fr/emplois/79739983.html?utm_source=jobijoba",
+                    title="Example coordinator",
+                    company="Example",
+                    location="Toulouse",
+                    date_posted=date_posted,
+                    scraped_at=scraped_at,
+                )
+            )
+
+        rows = store.conn.execute(
+            "SELECT source_url, source_url_key, date_posted, first_seen_at, last_seen_at FROM raw_offers"
+        ).fetchall()
+
+        assert len(rows) == 1
+        assert rows[0][0] == "https://www.jobijoba.com/fr/annonce/54/old-wrapper"
+        assert rows[0][1] == "www.hellowork.com/fr-fr/emplois/79739983.html"
+        assert rows[0][2] == "2026-06-03T12:00:00+00:00"
+        assert rows[0][3] <= rows[0][4]
+        assert store.source_url_seen("jobijoba", "https://www.jobijoba.com/fr/annonce/54/old-wrapper")
+    finally:
+        store.close()
+
+
+def test_storage_migrates_relative_dates_using_first_seen_time(tmp_path: Path) -> None:
+    path = tmp_path / "jobs.duckdb"
+    store = JobStore(path)
+    try:
+        store.upsert_offer(
+            JobOffer(
+                source="jobijoba",
+                source_url="https://www.jobijoba.com/fr/annonce/54/stale-wrapper",
+                title="Old example coordinator",
+                company="Example",
+                location="Toulouse",
+                date_posted="2026-06-30",
+            )
+        )
+        store.conn.execute(
+            """
+            UPDATE raw_offers
+            SET date_posted = 'Il y a 19 h',
+                first_seen_at = TIMESTAMPTZ '2026-07-01 16:00:00+02:00'
+            """
+        )
+    finally:
+        store.close()
+
+    migrated = JobStore(path)
+    try:
+        assert migrated.conn.execute("SELECT date_posted FROM raw_offers").fetchone() == (
+            "2026-06-30T21:00:00+02:00",
+        )
+    finally:
+        migrated.close()
+
+
+def test_storage_sorts_absolute_dates_instead_of_relative_date_text(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    try:
+        store.upsert_offer(
+            JobOffer(
+                source="jobijoba",
+                source_url="https://www.jobijoba.com/fr/annonce/54/old",
+                title="Old example coordinator",
+                company="Old Example",
+                location="Toulouse",
+                date_posted="Il y a 19 h",
+                scraped_at="2026-07-01T16:00:00+02:00",
+            )
+        )
+        store.upsert_offer(
+            JobOffer(
+                source="linkedin",
+                source_url="https://www.linkedin.com/jobs/view/new",
+                title="New example coordinator",
+                company="New Example",
+                location="Toulouse",
+                date_posted="2026-07-22T09:00:00+02:00",
+            )
+        )
+
+        canonical = store.canonical_dataframe()
+
+        assert canonical["title"].to_list() == [
+            "New example coordinator",
+            "Old example coordinator",
+        ]
+        assert canonical.iloc[1]["date_posted"] == "2026-06-30T21:00:00+02:00"
+    finally:
+        store.close()
+
+
+def test_storage_absolutizes_relative_dates_for_every_provider(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    try:
+        for source in ("linkedin", "web_search", "meteojob", "jobijoba"):
+            store.upsert_offer(
+                JobOffer(
+                    source=source,
+                    source_url=f"https://{source}.example/jobs/relative",
+                    title=f"{source} example coordinator",
+                    company="Example",
+                    location="Toulouse",
+                    date_posted="Il y a 2 jours",
+                    scraped_at="2026-07-10T12:00:00Z",
+                )
+            )
+
+        rows = store.conn.execute(
+            "SELECT source, date_posted FROM raw_offers ORDER BY source"
+        ).fetchall()
+
+        assert rows == [
+            ("jobijoba", "2026-07-08T12:00:00+00:00"),
+            ("linkedin", "2026-07-08T12:00:00+00:00"),
+            ("meteojob", "2026-07-08T12:00:00+00:00"),
+            ("web_search", "2026-07-08T12:00:00+00:00"),
+        ]
+    finally:
+        store.close()
+
+
+def test_upsert_preserves_first_known_posted_date(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    try:
+        for date_posted in ("2026-06-01", "2026-06-25"):
+            store.upsert_offer(
+                JobOffer(
+                    source="test",
+                    source_url="https://example.com/jobs/1",
+                    title="Example coordinator",
+                    company="Example",
+                    location="Toulouse",
+                    date_posted=date_posted,
+                )
+            )
+
+        assert store.conn.execute("SELECT date_posted FROM raw_offers").fetchone() == ("2026-06-01",)
+    finally:
+        store.close()
+
+
 def test_purge_filters_remove_student_contracts_and_non_matching_titles(tmp_path: Path) -> None:
     store = _store(tmp_path)
     try:
@@ -287,6 +456,38 @@ def test_purge_filters_remove_student_contracts_and_non_matching_titles(tmp_path
         assert store.purge_nonmatching_offers(DEFAULT_INCLUDE_TERMS) == 1
         canonical = store.canonical_dataframe()
         assert canonical["title"].to_list() == ["Example coordinator"]
+    finally:
+        store.close()
+
+
+def test_purge_excluded_companies_removes_source_specific_company(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    try:
+        store.upsert_offer(
+            JobOffer(
+                source="linkedin",
+                source_url="https://linkedin.example/jobs/france-travail",
+                title="Example communications role",
+                company="France Travail",
+                location="Toulouse",
+                description="Full-time communication role.",
+            )
+        )
+        store.upsert_offer(
+            JobOffer(
+                source="indeed",
+                source_url="https://indeed.example/jobs/france-travail",
+                title="Example communications role",
+                company="France Travail",
+                location="Toulouse",
+                description="Full-time communication role.",
+            )
+        )
+
+        assert store.purge_excluded_companies({"linkedin": ("France Travail",)}) == 1
+
+        remaining = store.conn.execute("SELECT source FROM raw_offers").fetchall()
+        assert remaining == [("indeed",)]
     finally:
         store.close()
 

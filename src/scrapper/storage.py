@@ -1,24 +1,63 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from collections.abc import Callable, Mapping
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import Any
+from urllib.parse import urlparse
 
 import duckdb
 import pandas as pd
 
+from scrapper.dates import absolute_posted_date
 from scrapper.models import JobOffer
 from scrapper.text import (
     clean_text,
     completeness_score,
-    contains_any_terms,
+    dedupe_key_for_fields,
     description_dedupe_key_for_fields,
     has_excluded_contract_signal,
-    dedupe_key_for_fields,
+    matches_job_title,
+    normalize_text,
     stable_hash,
     url_key,
 )
+
+SOURCE_DIRECT_URL_IDENTITY_HOST_BLOCKLIST = {
+    "jobijoba": "jobijoba.com",
+}
+
+
+def _offer_url_key(record: Mapping[str, Any]) -> str | None:
+    source = str(record.get("source") or "")
+    blocked_host = SOURCE_DIRECT_URL_IDENTITY_HOST_BLOCKLIST.get(source)
+    if blocked_host:
+        direct_url = clean_text(record.get("direct_url"))
+        direct_key = _external_url_key(direct_url, blocked_host)
+        if direct_key:
+            return direct_key
+    return url_key(clean_text(record.get("source_url")))
+
+
+def _external_url_key(url: str | None, blocked_host: str) -> str | None:
+    parsed = urlparse(url or "")
+    if not parsed.netloc or blocked_host in parsed.netloc.lower():
+        return None
+    return url_key(url)
+
+
+def _datetime_value(value: object | None) -> datetime | None:
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=UTC)
+    text = clean_text(value)
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
 
 
 class JobStore:
@@ -45,6 +84,7 @@ class JobStore:
         self.conn.close()
 
     def ensure_schema(self) -> None:
+        self.conn.execute("CREATE TABLE IF NOT EXISTS excluded_offer_urls (url_key VARCHAR PRIMARY KEY)")
         self.conn.execute(
             """
             CREATE TABLE IF NOT EXISTS raw_offers (
@@ -99,6 +139,7 @@ class JobStore:
             "CREATE UNIQUE INDEX IF NOT EXISTS raw_offers_url_idx ON raw_offers(source, source_url_key)"
         )
         self._ensure_optional_columns()
+        self._normalize_existing_posted_dates()
 
     def _ensure_optional_columns(self) -> None:
         columns = {
@@ -108,9 +149,30 @@ class JobStore:
         if "description_key" not in columns:
             self.conn.execute("ALTER TABLE raw_offers ADD COLUMN description_key VARCHAR")
 
+    def _normalize_existing_posted_dates(self) -> None:
+        rows = self.conn.execute(
+            """
+            SELECT offer_id, date_posted, first_seen_at
+            FROM raw_offers
+            WHERE date_posted IS NOT NULL
+              AND trim(date_posted) != ''
+              AND NOT regexp_matches(trim(date_posted), '^\\d{4}-\\d{2}-\\d{2}')
+            """
+        ).fetchall()
+        updates = []
+        for offer_id, value, first_seen_at in rows:
+            normalized = absolute_posted_date(value, now=first_seen_at)
+            if normalized and normalized != clean_text(value):
+                updates.append((normalized, offer_id))
+        if updates:
+            self.conn.executemany(
+                "UPDATE raw_offers SET date_posted = ? WHERE offer_id = ?",
+                updates,
+            )
+
     def start_search(self, source: str, query: str, location: str) -> str:
         key = self.search_key(source, query, location)
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         self.conn.execute(
             """
             INSERT INTO search_state(search_key, source, query, location, last_started_at)
@@ -125,7 +187,7 @@ class JobStore:
 
     def finish_search(self, source: str, query: str, location: str, seen_count: int, error: str | None = None) -> None:
         key = self.search_key(source, query, location)
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         if error:
             self.conn.execute(
                 """
@@ -158,14 +220,18 @@ class JobStore:
         if not key:
             return False
         row = self.conn.execute(
-            "SELECT 1 FROM raw_offers WHERE source = ? AND source_url_key = ? LIMIT 1",
-            [source, key],
+            "SELECT 1 FROM raw_offers WHERE source = ? AND (source_url_key = ? OR source_url = ?) LIMIT 1",
+            [source, key, source_url],
         ).fetchone()
         return row is not None
 
     def upsert_offer(self, offer: JobOffer) -> bool:
         record = offer.to_record()
-        source_url_key = url_key(record["source_url"])
+        record["date_posted"] = absolute_posted_date(
+            record.get("date_posted"),
+            now=_datetime_value(record.get("scraped_at")),
+        )
+        source_url_key = _offer_url_key(record)
         offer_id = stable_hash(record["source"], record.get("source_id"), source_url_key or record["source_url"])
         duplicate_key = dedupe_key_for_fields(
             record,
@@ -176,7 +242,7 @@ class JobStore:
             record,
             fields=self.dedupe_description_fields,
         )
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         record_score = completeness_score(record)
         raw_json = json.dumps(record.get("raw") or {}, ensure_ascii=False, default=str)
         params: list[Any] = [
@@ -232,7 +298,7 @@ class JobStore:
                 description = CASE
                     WHEN length(COALESCE(excluded.description, '')) > length(COALESCE(raw_offers.description, ''))
                     THEN excluded.description ELSE raw_offers.description END,
-                date_posted = COALESCE(excluded.date_posted, raw_offers.date_posted),
+                date_posted = COALESCE(raw_offers.date_posted, excluded.date_posted),
                 employment_type = COALESCE(excluded.employment_type, raw_offers.employment_type),
                 salary = COALESCE(excluded.salary, raw_offers.salary),
                 min_amount = COALESCE(excluded.min_amount, raw_offers.min_amount),
@@ -252,6 +318,10 @@ class JobStore:
             """,
             params,
         )
+        # An accepted, freshly scraped offer can replace a previously excluded listing.
+        for link in (record.get("source_url"), record.get("direct_url")):
+            if key := url_key(link):
+                self.conn.execute("DELETE FROM excluded_offer_urls WHERE url_key = ?", [key])
         return True
 
     def canonical_dataframe(self):
@@ -323,6 +393,10 @@ class JobStore:
                 ]
             )
 
+        frame["date_posted"] = frame.apply(
+            lambda row: absolute_posted_date(row["date_posted"], now=row["first_seen_at"]),
+            axis=1,
+        )
         frame["description_key"] = frame.apply(
             lambda row: row["description_key"]
             or description_dedupe_key_for_fields(row, fields=self.dedupe_description_fields),
@@ -384,7 +458,10 @@ class JobStore:
             result["date_posted"].notna() & (result["date_posted"].astype(str).str.strip() != ""),
             result["group_date_posted"],
         )
-        result["sort_date"] = result["date_posted"].fillna(result["last_seen_at"].astype(str))
+        result["sort_date"] = pd.to_datetime(result["date_posted"], errors="coerce", utc=True)
+        result["sort_date"] = result["sort_date"].fillna(
+            pd.to_datetime(result["last_seen_at"], errors="coerce", utc=True)
+        )
         result = result.sort_values(by=["sort_date", "company", "title"], ascending=[False, True, True], kind="stable")
 
         return result.rename(
@@ -464,7 +541,7 @@ class JobStore:
                 "all_source_links": "\n".join(sorted({value for value in group["source_url"].dropna() if value})),
                 "all_direct_links": JobStore._join_optional_links(group["direct_url"]),
                 "group_date_posted": JobStore._best_group_value(group, "date_posted"),
-                "duplicate_count": int(len(group)),
+                "duplicate_count": len(group),
                 "first_seen_at": group["first_seen_at"].min(),
                 "last_seen_at": group["last_seen_at"].max(),
             }
@@ -508,27 +585,36 @@ class JobStore:
         ).fetchdf()
 
     def purge_excluded_offers(self, exclude_terms: tuple[str, ...]) -> int:
-        rows = self.conn.execute(
-            "SELECT offer_id, title, employment_type, description FROM raw_offers"
-        ).fetchall()
-        offer_ids = [
-            offer_id
-            for offer_id, title, employment_type, description in rows
-            if has_excluded_contract_signal(title, employment_type, description, exclude_terms)
-        ]
+        frame = self.conn.execute(
+            "SELECT offer_id, dedupe_key, description_key, title, employment_type, description FROM raw_offers"
+        ).fetchdf()
+        if frame.empty:
+            return 0
+        rejected = frame.apply(
+            lambda row: has_excluded_contract_signal(
+                row["title"], row["employment_type"], row["description"], exclude_terms
+            ), axis=1,
+        )
+        # A sparse copy must not hide the contract disclosed by another board for
+        # the same offer. Use the same identity groups as the canonical export.
+        groups = self._build_group_keys(frame)
+        rejected_groups = set(groups[rejected])
+        offer_ids = frame.loc[groups.isin(rejected_groups), "offer_id"].tolist()
         if not offer_ids:
             return 0
         self._delete_offer_ids(offer_ids)
         return len(offer_ids)
 
-    def purge_nonmatching_offers(self, include_terms: tuple[str, ...]) -> int:
+    def purge_nonmatching_offers(
+        self, include_terms: tuple[str, ...], excluded_title_patterns: tuple[str, ...] = ()
+    ) -> int:
         rows = self.conn.execute(
             "SELECT offer_id, title FROM raw_offers"
         ).fetchall()
         offer_ids = [
             offer_id
             for offer_id, title in rows
-            if not contains_any_terms((title,), include_terms)
+            if not matches_job_title(title, include_terms, excluded_title_patterns)
         ]
         if not offer_ids:
             return 0
@@ -549,7 +635,37 @@ class JobStore:
         self._delete_offer_ids(offer_ids)
         return len(offer_ids)
 
+    def purge_excluded_companies(self, excluded_companies_by_source: Mapping[str, tuple[str, ...]]) -> int:
+        excluded = {
+            str(source): {normalize_text(company) for company in companies if normalize_text(company)}
+            for source, companies in excluded_companies_by_source.items()
+        }
+        if not excluded:
+            return 0
+        global_excluded = excluded.get("*", set())
+        rows = self.conn.execute(
+            "SELECT offer_id, source, company FROM raw_offers"
+        ).fetchall()
+        offer_ids = []
+        for offer_id, source, company in rows:
+            normalized_company = normalize_text(company)
+            if not normalized_company:
+                continue
+            source_excluded = excluded.get(str(source), set())
+            if normalized_company in source_excluded or normalized_company in global_excluded:
+                offer_ids.append(offer_id)
+        if not offer_ids:
+            return 0
+        self._delete_offer_ids(offer_ids)
+        return len(offer_ids)
+
     def _delete_offer_ids(self, offer_ids: list[str]) -> None:
+        rows = self.conn.execute(
+            "SELECT source_url, direct_url FROM raw_offers WHERE offer_id IN (SELECT unnest(?))", [offer_ids]
+        ).fetchall()
+        keys = {(url_key(link),) for row in rows for link in row if link}
+        if keys:
+            self.conn.executemany("INSERT OR IGNORE INTO excluded_offer_urls VALUES (?)", list(keys))
         params = [(offer_id,) for offer_id in offer_ids]
         try:
             self.conn.executemany("DELETE FROM raw_offers WHERE offer_id = ?", params)
@@ -559,6 +675,10 @@ class JobStore:
                 self.conn.executemany("DELETE FROM raw_offers WHERE offer_id = ?", params)
             finally:
                 self.conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS raw_offers_url_idx ON raw_offers(source, source_url_key)")
+
+    def excluded_url_keys(self) -> set[str]:
+        """Prevent old tracker copies from restoring offers removed by a purge."""
+        return {row[0] for row in self.conn.execute("SELECT url_key FROM excluded_offer_urls").fetchall()}
 
     @staticmethod
     def search_key(source: str, query: str, location: str) -> str:

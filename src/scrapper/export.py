@@ -4,50 +4,30 @@ import ast
 import json
 import math
 import re
-from datetime import date, datetime, timedelta
+from collections.abc import Callable, Sequence
+from datetime import UTC, date, datetime, time
 from pathlib import Path
-from typing import Any, Callable, Sequence
+from typing import Any
+from urllib.parse import urlparse
 
 import pandas as pd
+import structlog
 from openpyxl import load_workbook
 
+from scrapper.dates import parse_posted_date
 from scrapper.source_rules import get_source_rules
+from scrapper.source_rules.meteojob import is_placeholder_offer
 from scrapper.storage import JobStore
-from scrapper.text import clean_text, contains_any_terms, has_excluded_contract_signal, url_key
+from scrapper.text import clean_text, contains_any_terms, has_excluded_contract_signal, matches_job_title, url_key
 
+log = structlog.get_logger(__name__)
 
 MONEY_RE = re.compile(r"(\d[\d\s\u202f.,]*)")
-ISO_DATE_PREFIX_RE = re.compile(r"^\d{4}-\d{2}-\d{2}")
-EU_DATE_RE = re.compile(r"^(?P<day>\d{1,2})/(?P<month>\d{1,2})/(?P<year>\d{4})$")
-NATURAL_LANGUAGE_DATE_RE = re.compile(
-    r"(?:Publié le\s+)?(?P<day>\d{1,2})\s+(?P<month>[A-Za-zÀ-ÿ]+)(?:\s+(?P<year>\d{4}))?"
-)
-RELATIVE_DATE_RE = re.compile(
-    r"il\s+y\s+a\s+(?P<count>\d+)\s*(?P<unit>min|mn|minute?s?|h|heure?s?|j|jour?s?)",
-    re.IGNORECASE,
-)
 HYPERLINK_RE = re.compile(r'^=HYPERLINK\("(?P<url>[^"]+)"(?:,"[^"]*")?\)$', re.IGNORECASE)
 LINK_COLUMNS = ("Lien", "Postuler", "Offre source")
 STATUS_OPTIONS = ("En Attente", "Postulé", "Refusé")
 DEFAULT_STATUS = STATUS_OPTIONS[0]
 MAX_EXCEL_ROW_INDEX = 1_048_575
-FRENCH_MONTHS = {
-    "janvier": 1,
-    "fevrier": 2,
-    "février": 2,
-    "mars": 3,
-    "avril": 4,
-    "mai": 5,
-    "juin": 6,
-    "juillet": 7,
-    "aout": 8,
-    "août": 8,
-    "septembre": 9,
-    "octobre": 10,
-    "novembre": 11,
-    "decembre": 12,
-    "décembre": 12,
-}
 LOCALIZED_TRACKER_COLUMNS = (
     "Postulé",
     "Rejeté",
@@ -76,6 +56,7 @@ LOCALIZED_TRACKER_COLUMNS = (
     "Score complétude",
     "Vu le",
     "Dernière vue",
+    "À vérifier",
 )
 DEFAULT_LOCALIZED_TRACKER_COLUMNS = (
     "Postulé",
@@ -101,9 +82,11 @@ def export_jobs(
     excel_columns: Sequence[str] | None = None,
     repair_fields_enabled_by_default: bool = True,
     repair_fields_by_source: dict[str, bool] | None = None,
+    direct_links_enabled_by_source: dict[str, bool] | None = None,
     include_terms: tuple[str, ...] = (),
     exclude_terms: tuple[str, ...] = (),
     location_allowed: Callable[[object | None], bool] | None = None,
+    excluded_title_patterns: tuple[str, ...] = (),
 ) -> tuple[Path, Path, Path, int]:
     export_dir.mkdir(parents=True, exist_ok=True)
     csv_path = export_dir / "jobs.csv"
@@ -112,11 +95,28 @@ def export_jobs(
 
     canonical = _excel_safe(store.canonical_dataframe())
     raw = _excel_safe(store.raw_dataframe())
+    excluded_urls = store.excluded_url_keys()
+    for _, row in raw.iterrows():
+        if not _offer_row_allowed(row, include_terms, exclude_terms, excluded_title_patterns, location_allowed):
+            excluded_urls.update(key for field in ("source_url", "direct_url") if (key := url_key(row.get(field))))
+    if not canonical.empty:
+        canonical = canonical[canonical.apply(
+            _offer_row_allowed, axis=1, include_terms=include_terms, exclude_terms=exclude_terms,
+            excluded_title_patterns=excluded_title_patterns, location_allowed=location_allowed,
+        )]
+        canonical = canonical[canonical.apply(
+            lambda row: not any(
+                url_key(link) in excluded_urls
+                for field in ("all_source_links", "all_direct_links")
+                for link in str(row.get(field) or "").splitlines()
+            ), axis=1,
+        ).astype(bool)]
     localized = _select_tracker_columns(
         _localized_job_tracker(
             canonical,
             repair_fields_enabled_by_default=repair_fields_enabled_by_default,
             repair_fields_by_source=repair_fields_by_source,
+            direct_links_enabled_by_source=direct_links_enabled_by_source,
         ),
         excel_columns or DEFAULT_LOCALIZED_TRACKER_COLUMNS,
     )
@@ -127,6 +127,9 @@ def export_jobs(
         include_terms,
         exclude_terms,
         location_allowed,
+        excluded_title_patterns,
+        excluded_urls,
+        _canonical_link_aliases(canonical, direct_links_enabled_by_source or {}),
     )
     localized = _sort_tracker_for_export(localized)
 
@@ -149,6 +152,9 @@ def _merge_existing_tracker_rows(
     include_terms: tuple[str, ...] = (),
     exclude_terms: tuple[str, ...] = (),
     location_allowed: Callable[[object | None], bool] | None = None,
+    excluded_title_patterns: tuple[str, ...] = (),
+    excluded_urls: set[str] | None = None,
+    current_link_aliases: dict[str, set[str]] | None = None,
 ) -> pd.DataFrame:
     previous = _read_existing_tracker(excel_path, csv_path)
     if previous.empty:
@@ -162,6 +168,8 @@ def _merge_existing_tracker_rows(
             include_terms=include_terms,
             exclude_terms=exclude_terms,
             location_allowed=location_allowed,
+            excluded_title_patterns=excluded_title_patterns,
+            excluded_urls=excluded_urls,
         )
     ]
     previous = previous.apply(_normalize_previous_tracker_row, axis=1)
@@ -176,10 +184,19 @@ def _merge_existing_tracker_rows(
         key = _tracker_row_key(row)
         if not key:
             continue
-        current_keys.add(key)
+        aliases = (current_link_aliases or {}).get(key, {key})
+        current_keys.update(aliases)
         previous_row = previous_by_key.get(key)
+        if previous_row is None:
+            previous_row = next((previous_by_key[alias] for alias in sorted(aliases) if alias in previous_by_key), None)
         if previous_row is not None:
             _preserve_tracker_state(current, index, previous_row)
+        statuses = {
+            _normalize_status(previous_by_key[alias].get("Statut"))
+            for alias in aliases if alias in previous_by_key
+        }
+        if len(statuses) > 1 and "À vérifier" in current.columns:
+            _append_review_note(current, index, "Statuts divergents entre doublons : " + " / ".join(sorted(statuses)))
 
     retained_previous = [
         row
@@ -195,6 +212,19 @@ def _merge_existing_tracker_rows(
     if "Rejeté" in merged.columns:
         merged["Rejeté"] = merged["Rejeté"].apply(_coerce_checkbox_value)
     return merged
+
+
+def _canonical_link_aliases(frame: pd.DataFrame, direct_links: dict[str, bool]) -> dict[str, set[str]]:
+    """Recognize historical links to the same canonical offer after its winning source changes."""
+    aliases = {}
+    for _, row in frame.iterrows():
+        key = url_key(_tracker_apply_link(row, direct_links))
+        if key:
+            links = [str(row.get(field) or "") for field in ("all_source_links", "all_direct_links")]
+            aliases[f"url:{key}"] = {f"url:{key}"} | {
+                f"url:{alias}" for link in "\n".join(links).splitlines() if (alias := url_key(link))
+            }
+    return aliases
 
 
 def _sort_tracker_for_export(frame: pd.DataFrame) -> pd.DataFrame:
@@ -219,17 +249,65 @@ def _tracker_row_allowed(
     include_terms: tuple[str, ...],
     exclude_terms: tuple[str, ...],
     location_allowed: Callable[[object | None], bool] | None = None,
+    excluded_title_patterns: tuple[str, ...] = (),
+    excluded_urls: set[str] | None = None,
 ) -> bool:
-    title = row.get("Intitulé")
-    if exclude_terms and has_excluded_contract_signal(title, row.get("Contrat"), "", exclude_terms):
+    if _is_meteojob_placeholder_tracker_row(row):
         return False
-    if include_terms and not contains_any_terms((title,), include_terms):
+    title = row.get("Intitulé")
+    if excluded_urls and any(
+        url_key(_extract_hyperlink_url(row.get(column))) in excluded_urls for column in LINK_COLUMNS
+    ):
+        return False
+    if exclude_terms and has_excluded_contract_signal(title, row.get("Contrat"), row.get("Description"), exclude_terms):
+        return False
+    if include_terms and not matches_job_title(title, include_terms, excluded_title_patterns):
         return False
     return location_allowed is None or location_allowed(row.get("Lieu"))
 
 
+def _offer_row_allowed(
+    row: pd.Series,
+    include_terms: tuple[str, ...],
+    exclude_terms: tuple[str, ...],
+    excluded_title_patterns: tuple[str, ...],
+    location_allowed: Callable[[object | None], bool] | None,
+) -> bool:
+    if exclude_terms and has_excluded_contract_signal(
+        row.get("title"), row.get("employment_type"), row.get("description"), exclude_terms
+    ):
+        return False
+    if include_terms and not matches_job_title(row.get("title"), include_terms, excluded_title_patterns):
+        return False
+    return location_allowed is None or location_allowed(row.get("location"))
+
+
+def _is_meteojob_placeholder_tracker_row(row: pd.Series) -> bool:
+    for column in LINK_COLUMNS:
+        if column not in row.index:
+            continue
+        url = _extract_hyperlink_url(row.get(column))
+        if not url or "meteojob.com" not in urlparse(url).netloc.lower():
+            continue
+        return is_placeholder_offer(
+            row.get("Intitulé"),
+            row.get("Entreprise"),
+            row.get("Publié le"),
+            has_jobposting=False,
+        )
+    return False
+
+
 def _normalize_previous_tracker_row(row: pd.Series) -> pd.Series:
     normalized = row.copy()
+    # Older Drive trackers used "Postulé" as the heading for the status dropdown.
+    legacy_status = normalized.get("Postulé")
+    if (
+        _is_blank(normalized.get("Statut"))
+        and isinstance(legacy_status, str)
+        and legacy_status.strip() in STATUS_OPTIONS
+    ):
+        normalized["Statut"] = legacy_status.strip()
     if "Statut" in normalized.index:
         normalized["Statut"] = _normalize_status(normalized.get("Statut"))
     if "Postulé" in normalized.index:
@@ -253,13 +331,13 @@ def _read_existing_tracker(excel_path: Path, csv_path: Path) -> pd.DataFrame:
     if excel_path.exists():
         try:
             return _read_existing_excel_tracker(excel_path)
-        except Exception:  # noqa: BLE001 - a corrupt/open workbook should not block a fresh export.
-            pass
+        except Exception as exc:  # noqa: BLE001 - a corrupt/open workbook should not block a fresh export.
+            log.warning("existing_excel_tracker_read_failed", path=str(excel_path), error=str(exc))
     if csv_path.exists():
         try:
             return pd.read_csv(csv_path, dtype=object).fillna("")
-        except Exception:  # noqa: BLE001 - fall back to a fresh export.
-            pass
+        except Exception as exc:  # noqa: BLE001 - fall back to a fresh export.
+            log.warning("existing_csv_tracker_read_failed", path=str(csv_path), error=str(exc))
     return pd.DataFrame()
 
 
@@ -291,6 +369,16 @@ def _preserve_tracker_state(current: pd.DataFrame, index: int, previous: pd.Seri
         current.at[index, "Postulé"] = _checkbox_value_from_previous(previous)
     if "Rejeté" in current.columns:
         current.at[index, "Rejeté"] = _coerce_checkbox_value(previous.get("Rejeté"))
+    if "À vérifier" in current.columns:
+        for note in str(previous.get("À vérifier") or "").split(" ; "):
+            if note.startswith("Statuts divergents entre doublons :"):
+                _append_review_note(current, index, note)
+
+
+def _append_review_note(frame: pd.DataFrame, index: int, note: str) -> None:
+    current = str(frame.at[index, "À vérifier"] or "")
+    if note not in current:
+        frame.at[index, "À vérifier"] = " ; ".join(part for part in (current, note) if part)
 
 
 def _tracker_row_key(row: pd.Series) -> str | None:
@@ -364,9 +452,11 @@ def _localized_job_tracker(
     frame: pd.DataFrame,
     repair_fields_enabled_by_default: bool = True,
     repair_fields_by_source: dict[str, bool] | None = None,
+    direct_links_enabled_by_source: dict[str, bool] | None = None,
 ) -> pd.DataFrame:
     records: list[dict[str, Any]] = []
     repair_fields_by_source = repair_fields_by_source or {}
+    direct_links_enabled_by_source = direct_links_enabled_by_source or {}
     for _, row in frame.iterrows():
         salary_min, salary_max = _salary_bounds(row)
         best_source = str(row.get("best_source") or "").strip()
@@ -383,13 +473,14 @@ def _localized_job_tracker(
             title = clean_text(row.get("title"))
             company = clean_text(row.get("company"))
             location = clean_text(row.get("location"))
+        apply_link = _tracker_apply_link(row, direct_links_enabled_by_source)
         records.append(
             {
                 "Postulé": False,
                 "Rejeté": False,
-                "Lien": _hyperlink(row.get("best_direct_url") or row.get("best_source_url")),
+                "Lien": _hyperlink(apply_link),
                 "Statut": DEFAULT_STATUS,
-                "Postuler": _hyperlink(row.get("best_direct_url") or row.get("best_source_url")),
+                "Postuler": _hyperlink(apply_link),
                 "Offre source": _hyperlink(row.get("best_source_url")),
                 "Autres liens": _compact_links(row.get("all_source_links"), row.get("all_direct_links")),
                 "Intitulé": title,
@@ -412,9 +503,17 @@ def _localized_job_tracker(
                 "Score complétude": row.get("completeness_score"),
                 "Vu le": _date_value(row.get("first_seen_at")),
                 "Dernière vue": _date_value(row.get("last_seen_at")),
+                "À vérifier": _review_note(row),
             }
         )
     return pd.DataFrame.from_records(records, columns=LOCALIZED_TRACKER_COLUMNS)
+
+
+def _tracker_apply_link(row: pd.Series, direct_links_enabled_by_source: dict[str, bool]) -> object | None:
+    source = str(row.get("best_source") or "").strip()
+    if direct_links_enabled_by_source.get(source, True) is False:
+        return row.get("best_source_url")
+    return row.get("best_direct_url") or row.get("best_source_url")
 
 
 def _select_tracker_columns(frame: pd.DataFrame, columns: Sequence[str]) -> pd.DataFrame:
@@ -481,6 +580,19 @@ def _format_jobs_sheet(writer: pd.ExcelWriter, sheet_name: str, frame: pd.DataFr
                 "error_message": "Choisissez En Attente, Postulé ou Refusé.",
             },
         )
+        if len(frame):
+            for status, background, foreground in (
+                ("En Attente", "#FFF2CC", "#7F6000"),
+                ("Postulé", "#E2F0D9", "#375623"),
+                ("Refusé", "#FCE4D6", "#9C0006"),
+            ):
+                worksheet.conditional_format(
+                    1, status_col - 1, len(frame), status_col - 1,
+                    {
+                        "type": "cell", "criteria": "==", "value": f'"{status}"',
+                        "format": workbook.add_format({"bg_color": background, "font_color": foreground}),
+                    },
+                )
 
     widths = {
         "Postulé": 10,
@@ -501,6 +613,7 @@ def _format_jobs_sheet(writer: pd.ExcelWriter, sheet_name: str, frame: pd.DataFr
         "Publié le": 14,
         "Sources": 24,
         "Description": 80,
+        "À vérifier": 76,
     }
     column_formats = {}
     if checkbox_col:
@@ -559,19 +672,20 @@ def _salary_bounds(row: pd.Series) -> tuple[int | None, int | None]:
     minimum = _number(row.get("min_amount"))
     maximum = _number(row.get("max_amount"))
     if minimum or maximum:
-        return _round_salary(minimum), _round_salary(maximum or minimum)
+        minimum, maximum = _annual_salary(minimum, maximum, row.get("interval"), row.get("currency"))
+        return _round_salary(minimum), _round_salary(maximum)
 
     salary_payload = _parse_salary_payload(row.get("salary"))
     if salary_payload:
         minimum, maximum = _bounds_from_monetary_amount(salary_payload)
         if minimum or maximum:
-            return _round_salary(minimum), _round_salary(maximum or minimum)
+            return _round_salary(minimum), _round_salary(maximum)
 
     raw_payload = _load_json(row.get("raw_json"))
     for payload in _salary_payloads_from_raw(raw_payload):
         minimum, maximum = _bounds_from_monetary_amount(payload)
         if minimum or maximum:
-            return _round_salary(minimum), _round_salary(maximum or minimum)
+            return _round_salary(minimum), _round_salary(maximum)
     return None, None
 
 
@@ -581,16 +695,43 @@ def _bounds_from_monetary_amount(payload: dict[str, Any]) -> tuple[float | None,
         minimum = _number(value.get("minValue"))
         maximum = _number(value.get("maxValue"))
         fixed = _number(value.get("value"))
-        unit = str(value.get("unitText") or "").upper()
+        unit = value.get("unitText") or payload.get("unitText")
         if fixed and not minimum and not maximum:
             minimum = maximum = fixed
-        if unit == "MONTH":
-            minimum = minimum * 12 if minimum else None
-            maximum = maximum * 12 if maximum else None
-        elif unit and unit not in {"YEAR", "ANNUAL"}:
-            return None, None
-        return minimum, maximum
+        return _annual_salary(minimum, maximum, unit, payload.get("currency"))
     return None, None
+
+
+def _annual_salary(
+    minimum: float | None, maximum: float | None, unit: Any, currency: Any
+) -> tuple[float | None, float | None]:
+    unit = str(unit or "").strip().lower()
+    currency = str(currency or "").strip().upper()
+    factors = {"month": 12, "monthly": 12, "year": 1, "yearly": 1, "annual": 1, "annually": 1}
+    if unit not in factors or currency not in {"", "EUR", "€"}:
+        return None, None
+    if any(value is not None and (not math.isfinite(value) or value <= 0) for value in (minimum, maximum)):
+        return None, None
+    if minimum is not None and maximum is not None and minimum > maximum:
+        return None, None
+    factor = factors[unit]
+    return (
+        minimum * factor if minimum is not None else None,
+        maximum * factor if maximum is not None else None,
+    )
+
+
+def _review_note(row: pd.Series) -> str:
+    """Surface weak evidence without turning low pay into a contract classification."""
+    notes = []
+    if contains_any_terms((row.get("description"),), ("nous recrutons des formateurs", "nous recherchons un formateur")):
+        notes.append("Missions de formation : vérifier l'adéquation du poste")
+    amount = _number(row.get("min_amount"))
+    unit = str(row.get("interval") or "").lower()
+    limits = {"monthly": 1000, "month": 1000, "hourly": 6, "hour": 6, "yearly": 12000, "year": 12000}
+    if amount is not None and unit in limits and 0 < amount < limits[unit]:
+        notes.append("Rémunération faible : vérifier stage/alternance ou temps partiel")
+    return " ; ".join(notes)
 
 
 def _salary_payloads_from_raw(payload: Any):
@@ -654,7 +795,7 @@ def _number(value: Any) -> float | None:
 def _round_salary(value: float | None) -> int | None:
     if value is None:
         return None
-    return int(round(value))
+    return round(value)
 
 
 def _salary_label(minimum: int | None, maximum: int | None) -> str:
@@ -751,54 +892,13 @@ def _clean_town_name(value: str) -> str:
 
 
 def _date_value(value: Any, today: date | None = None) -> date | None:
-    if value is None:
-        return None
-    try:
-        if pd.isna(value):
-            return None
-    except (TypeError, ValueError):
-        pass
-    if isinstance(value, pd.Timestamp):
-        return value.date()
-    if isinstance(value, datetime):
-        return value.date()
-    if isinstance(value, date):
-        return value
-
-    text = str(value or "").strip()
-    if not text or text.lower() in {"nat", "nan", "none"}:
-        return None
-    today = today or date.today()
-    relative = RELATIVE_DATE_RE.search(text)
-    if relative:
-        unit = relative.group("unit").lower()
-        count = int(relative.group("count"))
-        if unit.startswith("j"):
-            return today - timedelta(days=count)
-        return today
-    lowered = text.lower()
-    if "aujourd'hui" in lowered or "aujourdhui" in lowered:
-        return today
-    if re.search(r"\bhier\b", lowered):
-        return today - timedelta(days=1)
-    match = ISO_DATE_PREFIX_RE.match(text)
-    if match:
-        try:
-            return date.fromisoformat(match.group(0))
-        except ValueError:
-            return None
-    match = EU_DATE_RE.match(text)
-    if match:
-        try:
-            return date(int(match.group("year")), int(match.group("month")), int(match.group("day")))
-        except ValueError:
-            return None
-    match = NATURAL_LANGUAGE_DATE_RE.search(text)
-    if match:
-        parsed = _parse_french_date_match(match, today.year)
-        if parsed:
-            return parsed
-    return None
+    reference = (
+        datetime.combine(today, time(hour=12), tzinfo=UTC)
+        if today
+        else None
+    )
+    parsed = parse_posted_date(value, now=reference)
+    return parsed.day if parsed else None
 
 
 def _date_fr(value: Any, today: date | None = None) -> str:
@@ -809,19 +909,6 @@ def _date_fr(value: Any, today: date | None = None) -> str:
     if not text or text.lower() in {"nat", "nan", "none"}:
         return ""
     return clean_text(text) or ""
-
-
-def _parse_french_date_match(match: re.Match[str], default_year: int) -> date | None:
-    day = match.group("day")
-    month_name = match.group("month")
-    year = match.group("year") or str(default_year)
-    month = FRENCH_MONTHS.get(month_name.lower())
-    if not month:
-        return None
-    try:
-        return date(int(year), month, int(day))
-    except ValueError:
-        return None
 
 
 def _format_date(value: date) -> str:

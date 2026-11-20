@@ -4,12 +4,10 @@ import hashlib
 import html
 import re
 import unicodedata
-from collections.abc import Iterable
-from typing import Mapping
+from collections.abc import Iterable, Mapping
 from urllib.parse import parse_qs, unquote, urlparse
 
 from bs4 import BeautifulSoup
-
 
 SPACE_RE = re.compile(r"\s+")
 NON_WORD_RE = re.compile(r"[^a-z0-9]+")
@@ -22,19 +20,28 @@ EXCLUDED_CONTRACT_DESCRIPTION_PATTERNS = tuple(
     re.compile(pattern, re.IGNORECASE)
     for pattern in (
         r"\b(offre|poste|mission|recrutement|candidat(?:e)?|profil)\s+(?:de|en|pour)\s+stage\b",
-        r"\bstage\s+(?:de|d[’']|conventionne|a pourvoir|a partir|au sein)\b",
-        r"\bstagiaire\b",
-        r"\ben\s+alternance\b",
+        r"\bstage\s+(?:de|d |conventionne|a pourvoir|a partir|au sein)\b",
+        r"\b(?:recherch\w*|recrut\w*)\s+(?:un|une|notre)\s+(?:e\s+)?stagiaire\b",
+        r"\b(?:poste|offre|contrat|mission)\s+(?:est\s+|a pourvoir\s+)?en\s+alternance\b",
         r"\balternance\s+(?:de|niveau|bac|a pourvoir|au sein|rattache|rattachée)\b",
-        r"\brecherch\w*\s+(?:un|une|notre)?\s*(?:\(?e\)?\s*)?alternant(?:e)?\b",
+        r"\b(?:recherch\w*|cherch\w*|recrut\w*)\s+(?:un|une|notre)\s+(?:e\s+|futur\s+)?alternant(?:e)?\b",
         r"\balternant(?:e)?\s+(?:example|sample|demo|placeholder|role|specialist|coordinator|manager)\b",
-        r"\bcontrat\s+d[’']apprentissage\b",
+        r"\bcontrat\s+d\s+apprentissage\b",
         r"\bcontrat\s+de\s+professionnalisation\b",
         r"\bcontrat\s+professionnel\b",
         r"\bapprentissage\s+(?:de|niveau|bac|a pourvoir|au sein)\b",
         r"\bouvert\w*\s+(?:aux|a tous les)?\s*apprenti(?:s|es)?\b",
         r"\bmissions?\s+confiees?\s+au\s+stagiaire\b",
         r"\bmissions?\s+confiées?\s+au\s+stagiaire\b",
+        r"\b(?:type d alternance|type de contrat|contrat|emploi)\s+(?:en\s+)?(?:apprentissage|alternance|stage|internship|apprenticeship)\b",
+        r"\b(?:ce|le|un)\s+poste\s+(?:est\s+)?benevole\b",
+        r"\b(?:mission|poste|offre)\s+(?:de\s+|en\s+)?benevolat\b",
+        r"\b(?:this|the)\s+(?:role|position)\s+is\s+(?:an?\s+)?(?:internship|apprenticeship)\b",
+        r"\b(?:seeking|hiring|looking for)\s+(?:an?\s+)?(?:intern|apprentice)\b",
+        r"\b(?:ce stage est|lieu du stage|duree du stage|gratification de stage)\b",
+        r"(?<!y compris )\bdans le cadre d une alternance\b",
+        r"\balternance\s+(?:a compter|sur\s+\d+\s+ans?)\b",
+        r"^alternance\b",
     )
 )
 
@@ -122,7 +129,7 @@ def url_key(url: str | None) -> str | None:
     path = parsed.path.rstrip("/")
     query = parse_qs(parsed.query)
     relevant_params = []
-    for name in ("jk", "jl", "currentJobId", "jobId", "gh_jid"):
+    for name in ("jk", "jl", "currentJobId", "jobId", "gh_jid", "job", "offreId", "annonceId"):
         if query.get(name):
             relevant_params.append(f"{name}={query[name][0]}")
     compact_query = "&".join(relevant_params)
@@ -155,7 +162,24 @@ def has_excluded_contract_signal(
     description: object | None,
     exclude_terms: Iterable[str],
 ) -> bool:
-    if contains_excluded_terms((title, employment_type), exclude_terms):
+    terms = tuple(exclude_terms)
+    # Match inflections explicitly; substring matching would also reject "internal".
+    aliases = {
+        "benevole": ("benevolat", "benevoles"),
+        "volunteer": ("volunteering",),
+        "stage": ("stages", "stagiaires"),
+        "alternance": ("alternants", "alternantes"),
+        "apprenti": ("apprentis", "apprenties"),
+    }
+    expanded = terms + tuple(alias for term in terms for alias in aliases.get(_normalize_for_match(term), ()))
+    if contains_excluded_terms((title, employment_type), expanded):
+        return True
+    normalized_title = _normalize_for_match(title)
+    if "alternance" in {_normalize_for_match(term) for term in terms} and re.search(
+        r"(?:^alt\b|\ben alt\b|\b(?:bts|bachelor|master|mba)\b.*\balt\b)", normalized_title
+    ):
+        return True
+    if re.search(r"\b(?:job|emploi|contrat)\s+etudiant\b", normalized_title):
         return True
     normalized_description = _normalize_for_match(description)
     if not normalized_description:
@@ -170,6 +194,15 @@ def contains_any_terms(values: Iterable[object | None], include_terms: Iterable[
         if normalized and re.search(rf"(^|\s){re.escape(normalized)}($|\s)", haystack):
             return True
     return False
+
+
+def matches_job_title(
+    title: object | None, include_terms: Iterable[str], excluded_patterns: Iterable[str] = ()
+) -> bool:
+    """Require an included title term and reject configured, normalized title patterns."""
+    return contains_any_terms((title,), include_terms) and not any(
+        re.search(pattern, _normalize_for_match(title)) for pattern in excluded_patterns
+    )
 
 
 def _normalize_for_match(value: object | None) -> str:

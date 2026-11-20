@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 
@@ -33,5 +33,5 @@ class JobOffer:
 
     def to_record(self) -> dict[str, Any]:
         record = asdict(self)
-        record["scraped_at"] = record["scraped_at"] or datetime.now(timezone.utc).isoformat()
+        record["scraped_at"] = record["scraped_at"] or datetime.now(UTC).isoformat()
         return record
