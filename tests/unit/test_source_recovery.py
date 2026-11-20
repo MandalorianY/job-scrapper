@@ -110,10 +110,11 @@ def test_cadremploi_fallback_is_only_used_for_403(monkeypatch) -> None:
 def test_cadremploi_transport_closes_session(monkeypatch) -> None:
     session = Mock(headers={})
     session.get.return_value = Mock(status_code=200, text="jobs", headers={"Content-Type": "text/html"}, url="https://www.cadremploi.fr/emploi")
-    monkeypatch.setattr(cadremploi, "create_session", lambda: session)
+    monkeypatch.setattr(cadremploi, "TLSRotating", lambda: session)
     response = cadremploi._tls_get("https://www.cadremploi.fr/emploi", "test-agent")
     assert response.text == "jobs"
     assert response.headers["content-type"] == "text/html"
+    session.get.assert_called_once_with("https://www.cadremploi.fr/emploi", timeout=20, allow_redirects=True)
     session.close.assert_called_once()
 
 

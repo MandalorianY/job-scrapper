@@ -358,7 +358,7 @@ class JobStore:
                 raw_json
             FROM raw_offers
             """
-        ).fetchdf()
+        ).df()
         if frame.empty:
             return pd.DataFrame(
                 columns=[
@@ -582,12 +582,12 @@ class JobStore:
             FROM raw_offers
             ORDER BY last_seen_at DESC
             """
-        ).fetchdf()
+        ).df()
 
     def purge_excluded_offers(self, exclude_terms: tuple[str, ...]) -> int:
         frame = self.conn.execute(
             "SELECT offer_id, dedupe_key, description_key, title, employment_type, description FROM raw_offers"
-        ).fetchdf()
+        ).df()
         if frame.empty:
             return 0
         rejected = frame.apply(

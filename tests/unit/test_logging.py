@@ -45,6 +45,8 @@ def test_configure_logging_writes_structured_json(tmp_path, restore_logging) -> 
     assert record["logger"] == "scrapper.test"
     assert record["level"] == "info"
     assert record["timestamp"]
+    assert "_record" not in record
+    assert "_from_structlog" not in record
 
 
 def test_configure_logging_rejects_unknown_level(tmp_path, restore_logging) -> None:

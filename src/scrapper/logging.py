@@ -50,7 +50,10 @@ def configure_logging(
         structlog.processors.UnicodeDecoder(),
     ]
     formatter = structlog.stdlib.ProcessorFormatter(
-        processor=structlog.processors.JSONRenderer(),
+        processors=(
+            structlog.stdlib.ProcessorFormatter.remove_processors_meta,
+            structlog.processors.JSONRenderer(),
+        ),
         foreign_pre_chain=shared_processors,
     )
     root_logger = logging.getLogger()

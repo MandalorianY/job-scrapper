@@ -4,22 +4,17 @@ import logging
 import re
 from collections import defaultdict
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
-from urllib.parse import urlencode, urlparse
+from urllib.parse import urlparse
 
 import httpx
 import structlog
 from bs4 import BeautifulSoup
-from jobspy import scrape_jobs
-from jobspy.exception import GlassdoorException
-from jobspy.glassdoor import Glassdoor as JobSpyGlassdoor
-from jobspy.glassdoor.constant import headers as glassdoor_headers
-from jobspy.glassdoor.util import get_cursor_for_page, parse_compensation, parse_location
+from jobspy import SCRAPER_MAPPING, scrape_jobs
 from jobspy.linkedin import LinkedIn as JobSpyLinkedIn
-from jobspy.model import Country, JobPost, ScraperInput
+from jobspy.model import JobPost, ScraperInput, Site
 
 from scrapper.config import SearchConfig
 from scrapper.location_scope import location_is_in_scope
@@ -184,8 +179,8 @@ def _run_jobspy_plan(
     search_index: int,
     total_searches: int,
 ) -> dict[str, int]:
-    for site in plan.sites:
-        _prepare_site_call(site, config)
+    if "linkedin" in plan.sites:
+        _patch_linkedin_scraper()
     log.info(
         "jobspy_plan_started",
         sites=list(plan.sites),
@@ -212,7 +207,6 @@ def _run_jobspy_plan(
             results_wanted=plan.results_wanted,
             country_indeed=config.country,
             hours_old=plan.hours_old,
-            linkedin_fetch_description=True,
             description_format="markdown",
             user_agent=config.user_agent,
             verbose=_jobspy_verbose_for_sites(plan.sites),
@@ -243,6 +237,7 @@ def _run_jobspy_plan(
             progress,
             search_index,
             total_searches,
+            source_error=jobs.attrs.get("errors", {}).get(site),
         )
     return stored_by_site
 
@@ -258,8 +253,9 @@ def _finish_successful_site(
     progress: ProgressReporter | None,
     search_index: int,
     total_searches: int,
+    source_error: str | None = None,
 ) -> None:
-    error = _zero_rows_error(site, seen, config)
+    error = source_error or _zero_rows_error(site, seen, config)
     if error:
         store.finish_search(site, query, location, seen, error=error)
         log.warning(
@@ -275,7 +271,7 @@ def _finish_successful_site(
             progress(
                 f"JobSpy done [{search_index}/{total_searches}]: "
                 f"{site} | {query} | {location} "
-                f"(seen={seen}, stored={stored}, error=zero rows)"
+                f"(seen={seen}, stored={stored}, error={error if source_error else 'zero rows'})"
             )
         return
     store.finish_search(site, query, location, seen)
@@ -449,7 +445,7 @@ def _quiet_known_noisy_loggers(site: str):
     if site != "glassdoor":
         yield
         return
-    logger = logging.getLogger("JobSpy:Glassdoor")
+    logger = logging.getLogger("jobspy.glassdoor")
     original_level = logger.level
     logger.setLevel(logging.CRITICAL)
     try:
@@ -467,31 +463,17 @@ def _quiet_known_noisy_loggers_for_sites(sites: tuple[str, ...]):
         yield
 
 
-def _prepare_site_call(site: str, config: SearchConfig) -> None:
-    if site == "linkedin":
-        _patch_linkedin_scraper()
-        return
-    if site != "glassdoor":
-        return
-    _patch_glassdoor_scraper()
-    glassdoor_url = Country.from_string(config.country).get_glassdoor_url().rstrip("/")
-    glassdoor_domain = urlparse(glassdoor_url).netloc
-    glassdoor_headers["authority"] = glassdoor_domain
-    glassdoor_headers["origin"] = glassdoor_url
-    glassdoor_headers["referer"] = f"{glassdoor_url}/"
-
-
-def _patch_glassdoor_scraper() -> None:
-    scrape_jobs.__globals__["Glassdoor"] = TolerantGlassdoor
-
-
 def _patch_linkedin_scraper() -> None:
-    scrape_jobs.__globals__["LinkedIn"] = TolerantLinkedIn
+    SCRAPER_MAPPING[Site.LINKEDIN] = TolerantLinkedIn
 
 
 class TolerantLinkedIn(JobSpyLinkedIn):
-    def _process_job(self, job_card, job_id: str, full_descr: bool) -> JobPost | None:
-        job_post = super()._process_job(job_card, job_id, full_descr)
+    def scrape(self, scraper_input: ScraperInput) -> list[JobPost]:
+        # The batch shares its input across boards, so enable detail requests on LinkedIn only.
+        return super().scrape(scraper_input.model_copy(update={"fetch_description": True}))
+
+    def _process_job(self, job_card, job_id: str) -> JobPost:
+        job_post = super()._process_job(job_card, job_id)
         if job_post and not job_post.date_posted:
             job_post.date_posted = _linkedin_date_posted(job_card)
         return job_post
@@ -543,130 +525,6 @@ def _linkedin_relative_date(value: str | None, now: datetime | None = None) -> d
     else:
         return None
     return posted.date()
-
-
-class TolerantGlassdoor(JobSpyGlassdoor):
-    def _get_location(self, location: str, is_remote: bool) -> tuple[int, str]:
-        if not location or is_remote:
-            return super()._get_location(location, is_remote)
-        params = urlencode({
-            "locationTypeFilters": "CITY,STATE,COUNTRY",
-            "caller": "jobs",
-            "term": location,
-        })
-        response = self.session.get(f"{self.base_url}/autocomplete/location?{params}", timeout_seconds=15)
-        if response.status_code != 200:
-            raise GlassdoorException(f"Glassdoor location lookup returned HTTP {response.status_code}")
-        locations = response.json()
-        if not locations:
-            raise GlassdoorException("Glassdoor location lookup returned no matches")
-        match = locations[0]
-        location_type = {"C": "CITY", "S": "STATE", "N": "COUNTRY"}.get(match.get("locationType"))
-        if not location_type:
-            raise GlassdoorException("Glassdoor location lookup returned an unsupported location type")
-        return int(match["locationId"]), location_type
-
-    def _get_csrf_token(self):
-        # JobSpy 1.1.82 returns a trailing slash for country domains, while its
-        # request methods add another slash. Glassdoor rejects those URLs.
-        self.base_url = self.base_url.rstrip("/")
-        if self.user_agent:
-            self.session.headers["user-agent"] = self.user_agent
-        response = self.session.get(f"{self.base_url}/", timeout_seconds=15, allow_redirects=True)
-        if response.status_code != 200:
-            raise GlassdoorException(f"Glassdoor session initialization returned HTTP {response.status_code}")
-        match = re.search(r'"token"\s*:\s*"([^"]+)"', response.text.replace('\\"', '"'))
-        if not match:
-            raise GlassdoorException("Glassdoor session page did not contain a CSRF token")
-        return match.group(1)
-
-    def _fetch_jobs_page(
-        self,
-        scraper_input: ScraperInput,
-        location_id: int,
-        location_type: str,
-        page_num: int,
-        cursor: str | None,
-    ) -> tuple[list[JobPost], str | None]:
-        jobs = []
-        self.scraper_input = scraper_input
-        try:
-            payload = self._add_payload(location_id, location_type, page_num, cursor)
-            response = self.session.post(
-                f"{self.base_url}/graph",
-                timeout_seconds=15,
-                data=payload,
-            )
-            if response.status_code != 200:
-                raise GlassdoorException(f"bad response status code: {response.status_code}")
-            res_json = response.json()[0]
-            jobs_data = res_json.get("data", {}).get("jobListings", {}).get("jobListings")
-            if not jobs_data:
-                raise ValueError("Error encountered in API response")
-        except Exception as exc:  # noqa: BLE001 - tolerate malformed or failed Glassdoor pages.
-            logging.getLogger("JobSpy:Glassdoor").error("Glassdoor: %s", str(exc))
-            return jobs, None
-
-        with ThreadPoolExecutor(max_workers=self.jobs_per_page) as executor:
-            future_to_job_data = {
-                executor.submit(self._process_job, job): job for job in jobs_data
-            }
-            for future in as_completed(future_to_job_data):
-                try:
-                    job_post = future.result()
-                    if job_post:
-                        jobs.append(job_post)
-                except Exception as exc:
-                    raise GlassdoorException(f"Glassdoor generated an exception: {exc}") from exc
-
-        return jobs, get_cursor_for_page(
-            res_json["data"]["jobListings"].get("paginationCursors", []),
-            page_num + 1,
-        )
-
-    def _process_job(self, job_data):
-        job_id = job_data["jobview"]["job"]["listingId"]
-        job_url = f"{self.base_url.rstrip('/')}/job-listing/j?jl={job_id}"
-        if job_url in self.seen_urls:
-            return None
-        self.seen_urls.add(job_url)
-        job = job_data["jobview"]
-        title = job["job"]["jobTitleText"]
-        company_name = job["header"]["employerNameFromSearch"]
-        company_id = job["header"]["employer"]["id"]
-        location_name = job["header"].get("locationName", "")
-        location_type = job["header"].get("locationType", "")
-        age_in_days = job["header"].get("ageInDays")
-        is_remote, location = False, None
-        date_posted = (datetime.now(UTC) - timedelta(days=age_in_days)).date() if age_in_days is not None else None
-
-        if location_type == "S":
-            is_remote = True
-        else:
-            location = parse_location(location_name)
-
-        company_logo = job_data["jobview"].get("overview", {}).get("squareLogoUrl", None)
-        listing_type = (
-            job_data["jobview"]
-            .get("header", {})
-            .get("adOrderSponsorshipLevel", "")
-            .lower()
-        )
-        return JobPost(
-            id=f"gd-{job_id}",
-            title=title,
-            company_url=f"{self.base_url.rstrip('/')}/Overview/W-EI_IE{company_id}.htm" if company_id else None,
-            company_name=company_name,
-            date_posted=date_posted,
-            job_url=job_url,
-            location=location,
-            compensation=parse_compensation(job["header"]),
-            is_remote=is_remote,
-            description=None,
-            emails=None,
-            company_logo=company_logo,
-            listing_type=listing_type,
-        )
 
 
 def _site_location(site: str, location: str, config: SearchConfig) -> str:

@@ -39,7 +39,8 @@ class EnvironmentSettings(BaseSettings):
         env_file_encoding="utf-8",
         extra="ignore",
         case_sensitive=False,
-        populate_by_name=True,
+        validate_by_alias=True,
+        validate_by_name=True,
     )
 
 
@@ -279,7 +280,8 @@ class Settings(BaseSettings):
         yaml_file_encoding="utf-8",
         extra="ignore",
         case_sensitive=False,
-        populate_by_name=True,
+        validate_by_alias=True,
+        validate_by_name=True,
     )
 
     @classmethod

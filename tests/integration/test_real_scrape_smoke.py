@@ -97,8 +97,6 @@ def test_real_small_scrape_by_website(smoke_source: SmokeSource, tmp_path: Path)
     try:
         with warnings.catch_warnings():
             warnings.filterwarnings("ignore", message="Unverified HTTPS request.*")
-            warnings.filterwarnings("ignore", message=r"The 'text' argument to find\(\)-type methods is deprecated.*")
-            warnings.filterwarnings("ignore", message="The `dict` method is deprecated; use `model_dump` instead.*")
             counts = smoke_source.runner(config, store)
         search_state = store.conn.execute(
             """
