@@ -19,9 +19,7 @@ from scrapper.location_scope import location_is_in_scope
 from scrapper.logging import DEFAULT_LOG_LEVEL, LogLevel, configure_logging
 from scrapper.scrapers import (
     scrape_aggregators,
-    scrape_hellowork,
     scrape_jobspy_sources,
-    scrape_web_search,
     scrape_welcome_to_the_jungle,
 )
 from scrapper.storage import JobStore
@@ -57,7 +55,7 @@ def run(
         typer.Option("--refresh-known/--no-refresh-known", help="Re-open known custom detail pages instead of skipping them."),
     ] = None,
     skip_custom: Annotated[bool, typer.Option("--skip-custom", help="Only run JobSpy sources.")] = False,
-    skip_jobspy: Annotated[bool, typer.Option("--skip-jobspy", help="Only run custom Crawlee sources.")] = False,
+    skip_jobspy: Annotated[bool, typer.Option("--skip-jobspy", help="Only run custom sources.")] = False,
     replay_from: Annotated[
         Path | None, typer.Option(exists=True, dir_okay=False, help="Rebuild from a DuckDB observation archive offline.")
     ] = None,
@@ -145,8 +143,7 @@ def run(
             )
         elif not skip_custom:
             console.print(
-                "[bold]Running custom/free sources[/bold] "
-                "(HelloWork, Welcome to the Jungle, web search, aggregators)"
+                "[bold cyan]Running custom sources[/bold cyan] (Welcome to the Jungle and aggregators)"
             )
             custom_counts, custom_errors = asyncio.run(_run_custom_sources(config, store))
             counts.update(custom_counts)
@@ -231,14 +228,12 @@ def _print_summary(counts: dict[str, int], total: int, excel_path: Path, csv_pat
 async def _run_custom_sources(config: SearchConfig, store: JobStore) -> tuple[dict[str, int], dict[str, str]]:
     semaphore = asyncio.Semaphore(max(1, config.custom_source_concurrency))
     sources: list[tuple[str, Awaitable[int | dict[str, int]]]] = []
-    if config.is_source_enabled(config.hellowork.source):
-        sources.append(("hellowork", scrape_hellowork(config, store)))
-    if config.is_source_enabled(config.welcome_to_the_jungle.source):
-        sources.append(("welcome_to_the_jungle", scrape_welcome_to_the_jungle(config, store)))
-    if config.is_source_enabled(config.web_search.source):
-        sources.append(("web_search", scrape_web_search(config, store)))
-    if config.is_source_enabled(config.aggregators.source):
-        sources.append(("aggregators", scrape_aggregators(config, store)))
+    for source, scrape in (
+        (config.welcome_to_the_jungle.source, scrape_welcome_to_the_jungle),
+        (config.aggregators.source, scrape_aggregators),
+    ):
+        if config.is_custom_source_enabled(source):
+            sources.append((source, scrape(config, store)))
 
     async def run_source(source: str, scraper: Awaitable[int | dict[str, int]]) -> tuple[str, int | dict[str, int], str | None]:
         try:

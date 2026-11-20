@@ -15,9 +15,7 @@ from scrapper.config import SearchConfig
 from scrapper.export import export_jobs
 from scrapper.scrapers import (
     scrape_aggregators,
-    scrape_hellowork,
     scrape_jobspy_sources,
-    scrape_web_search,
     scrape_welcome_to_the_jungle,
 )
 from scrapper.storage import JobStore
@@ -62,9 +60,7 @@ def _site_search_source(source: str) -> SmokeSource:
 _SMOKE_CONFIG = SearchConfig()
 REAL_SMOKE_SOURCES = (
     *(_jobspy_source(source) for source in _SMOKE_CONFIG.jobspy_sites),
-    SmokeSource("hellowork", lambda config, store: asyncio.run(scrape_hellowork(config, store))),
     SmokeSource("welcome_to_the_jungle", lambda config, store: asyncio.run(scrape_welcome_to_the_jungle(config, store))),
-    SmokeSource("web_search", lambda config, store: asyncio.run(scrape_web_search(config, store))),
     *(_direct_aggregator_source(spec.source) for spec in _SMOKE_CONFIG.aggregators.direct_specs),
     *(_site_search_source(spec.source) for spec in _SMOKE_CONFIG.aggregators.site_search_sources),
 )
@@ -89,7 +85,6 @@ def test_real_small_scrape_by_website(smoke_source: SmokeSource, tmp_path: Path)
         custom_max_detail_pages=3,
         web_search_max_results_per_query=2,
         web_search_max_detail_pages=2,
-        request_delay_secs=0.2,
         database_path=tmp_path / "job_search.duckdb",
         export_dir=tmp_path / "exports",
     )

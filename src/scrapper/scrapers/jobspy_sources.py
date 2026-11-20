@@ -3,18 +3,22 @@ from __future__ import annotations
 import logging
 import re
 from collections import defaultdict
-from collections.abc import Callable
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
+from typing import SupportsFloat, SupportsIndex, cast
 from urllib.parse import urlparse
 
 import httpx
 import structlog
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, Tag
 from jobspy import SCRAPER_MAPPING, scrape_jobs
 from jobspy.linkedin import LinkedIn as JobSpyLinkedIn
-from jobspy.model import JobPost, ScraperInput, Site
+from jobspy.linkedin.util import criteria
+from jobspy.model import JobPost, JobType, ScraperInput, Site
+from jobspy.util import description_fields, get_enum_from_job_type
+from requests.exceptions import RequestException
 
 from scrapper.config import SearchConfig
 from scrapper.location_scope import location_is_in_scope
@@ -28,6 +32,8 @@ LINKEDIN_RELATIVE_DATE_RE = re.compile(
     re.IGNORECASE,
 )
 INDEED_EXPIRED_MESSAGE = "cette offre a expiré sur indeed"
+DETAIL_FETCH_SITES = {"glassdoor", "hellowork"}
+KM_PER_MILE = 1.609344
 ProgressReporter = Callable[[str], None]
 log = structlog.get_logger(__name__)
 
@@ -116,7 +122,9 @@ def scrape_jobspy_sources(
                             search_index=fallback_index,
                             total_searches=len(fallback_plans),
                         )
-                        _finish_failed_plan(fallback_plan, store, progress, fallback_index, len(fallback_plans), fallback_exc)
+                        _finish_failed_plan(
+                            fallback_plan, store, progress, fallback_index, len(fallback_plans), fallback_exc
+                        )
                 continue
             _finish_failed_plan(plan, store, progress, search_index, total_searches, exc)
     log.info("jobspy_scrape_completed", counts=counts)
@@ -136,7 +144,7 @@ def _jobspy_search_plans(
                 search_location = _site_location(site, configured_location, config)
                 hours_old = _hours_old(store, site, query, search_location, config)
                 results_wanted = _results_wanted(site, config)
-                if config.jobspy_batch_sites and site != "glassdoor":
+                if config.jobspy_batch_sites and site not in DETAIL_FETCH_SITES:
                     grouped_sites[(search_location, hours_old, results_wanted)].append(site)
                 else:
                     plans.append(
@@ -200,19 +208,23 @@ def _run_jobspy_plan(
             f"{plan.label} | {plan.query} | {plan.location} "
             f"(hours_old={plan.hours_old}, results_wanted={plan.results_wanted})"
         )
+    distance = config.distance_km
+    if plan.sites == ("hellowork",):
+        # JobSpy's HelloWork scraper converts its integer distance from miles.
+        distance = round(distance / KM_PER_MILE)
     with _quiet_known_noisy_loggers_for_sites(plan.sites):
         jobs = scrape_jobs(
             site_name=plan.sites[0] if len(plan.sites) == 1 else list(plan.sites),
             search_term=plan.query,
             google_search_term=_google_search_term_for_sites(plan.sites, plan.query, plan.location, config),
             location=plan.location,
-            distance=config.distance_km,
+            distance=distance,
             results_wanted=plan.results_wanted,
             country_indeed=config.country,
             hours_old=plan.hours_old,
             description_format="markdown",
-            user_agent=config.user_agent,
             verbose=_jobspy_verbose_for_sites(plan.sites),
+            fetch_description=len(plan.sites) == 1 and plan.sites[0] in DETAIL_FETCH_SITES,
         )
 
     seen_by_site = dict.fromkeys(plan.sites, 0)
@@ -331,14 +343,16 @@ def _zero_rows_error(site: str, seen: int, config: SearchConfig) -> str | None:
     return None
 
 
-def _row_site(row: dict, plan: JobSpySearchPlan) -> str:
+def _row_site(row: Mapping[str, object], plan: JobSpySearchPlan) -> str:
     if len(plan.sites) == 1:
         return plan.sites[0]
     value = _string_or_none(row.get("site"))
     return value.casefold() if value else ""
 
 
-def _row_to_offer(row: dict, site: str, query: str, search_location: str, config: SearchConfig) -> JobOffer:
+def _row_to_offer(
+    row: Mapping[str, object], site: str, query: str, search_location: str, config: SearchConfig
+) -> JobOffer:
     return JobOffer(
         source=site,
         source_id=_string_or_none(row.get("id")),
@@ -360,11 +374,11 @@ def _row_to_offer(row: dict, site: str, query: str, search_location: str, config
         emails=_string_or_none(row.get("emails")),
         search_query=query,
         search_location=search_location,
-        raw=row,
+        raw=dict(row),
     )
 
 
-def _offer_is_usable(offer: JobOffer, row: dict, site: str, config: SearchConfig) -> bool:
+def _offer_is_usable(offer: JobOffer, row: Mapping[str, object], site: str, config: SearchConfig) -> bool:
     if has_excluded_contract_signal(
         row.get("title"),
         row.get("job_type") or row.get("listing_type"),
@@ -404,7 +418,7 @@ def _short_error(exc: Exception, limit: int = 180) -> str:
 
 def _results_wanted(site: str, config: SearchConfig) -> int:
     if site == "glassdoor":
-        return config.jobspy.glassdoor_results_wanted_per_query
+        return min(config.jobspy.glassdoor_results_wanted_per_query, config.results_wanted_per_query)
     return config.results_wanted_per_query
 
 
@@ -412,7 +426,7 @@ def _is_expired_indeed_offer(offer: JobOffer, config: SearchConfig) -> bool:
     if offer.source != "indeed":
         return False
     for url in (offer.direct_url, offer.source_url):
-        if _is_indeed_url(url) and _indeed_url_is_expired(url, config):
+        if url and _is_indeed_url(url) and _indeed_url_is_expired(url, config):
             return True
     return False
 
@@ -444,7 +458,7 @@ def _indeed_html_is_expired(html: str) -> bool:
 
 
 @contextmanager
-def _quiet_known_noisy_loggers(site: str):
+def _quiet_known_noisy_loggers(site: str) -> Iterator[None]:
     if site != "glassdoor":
         yield
         return
@@ -458,7 +472,7 @@ def _quiet_known_noisy_loggers(site: str):
 
 
 @contextmanager
-def _quiet_known_noisy_loggers_for_sites(sites: tuple[str, ...]):
+def _quiet_known_noisy_loggers_for_sites(sites: tuple[str, ...]) -> Iterator[None]:
     if "glassdoor" not in sites:
         yield
         return
@@ -475,14 +489,43 @@ class TolerantLinkedIn(JobSpyLinkedIn):
         # The batch shares its input across boards, so enable detail requests on LinkedIn only.
         return super().scrape(scraper_input.model_copy(update={"fetch_description": True}))
 
-    def _process_job(self, job_card, job_id: str) -> JobPost:
+    def _process_job(self, job_card: Tag, job_id: str) -> JobPost:
         job_post = super()._process_job(job_card, job_id)
         if job_post and not job_post.date_posted:
             job_post.date_posted = _linkedin_date_posted(job_card)
         return job_post
 
+    def _fetch_details(self, job_id: str) -> dict[str, object]:
+        details = super()._fetch_details(job_id)
+        if details.get("description") and details.get("job_type"):
+            return details
+        try:
+            response = self.session.get(f"{self.base_url}/jobs-guest/jobs/api/jobPosting/{job_id}")
+            if response.status_code != 200:
+                return details
+        except RequestException:
+            return details
+        soup = BeautifulSoup(response.text, "lxml")
+        description = soup.select_one(".show-more-less-html__markup")
+        if not details.get("description") and description:
+            details.update(description_fields(str(description), self.scraper_input.description_format))
+        if not details.get("job_type"):
+            value = criteria(soup, "Employment type") or criteria(soup, "Type d")
+            localized = {
+                "temps plein": JobType.FULL_TIME,
+                "temps partiel": JobType.PART_TIME,
+                "intérim": JobType.TEMPORARY,
+                "contrat": JobType.CONTRACT,
+                "stage": JobType.INTERNSHIP,
+            }
+            label = (value or "").casefold()
+            job_type = localized.get(label) or get_enum_from_job_type(label.replace("-", "").replace(" ", ""))
+            if job_type:
+                details["job_type"] = [job_type]
+        return details
 
-def _linkedin_date_posted(job_card) -> date | None:
+
+def _linkedin_date_posted(job_card: Tag) -> date | None:
     metadata_card = job_card.find("div", class_="base-search-card__metadata")
     if not metadata_card:
         return None
@@ -493,7 +536,7 @@ def _linkedin_date_posted(job_card) -> date | None:
     if not datetime_tag:
         return None
     raw_datetime = datetime_tag.get("datetime")
-    if raw_datetime:
+    if isinstance(raw_datetime, str) and raw_datetime:
         try:
             return date.fromisoformat(raw_datetime[:10])
         except ValueError:
@@ -550,7 +593,7 @@ def _google_search_term(site: str, query: str, location: str, config: SearchConf
         return None
     excluded = " ".join(f"-{term}" for term in config.jobspy.google_query_exclude_terms)
     places = " OR ".join(config.jobspy.google_query_places) or f'"{location}"'
-    return f'{query} emploi ({places}) {excluded}'
+    return f"{query} emploi ({places}) {excluded}"
 
 
 def _google_search_term_for_sites(
@@ -579,7 +622,7 @@ def _float_or_none(value: object) -> float | None:
     try:
         if str(value).lower() == "nan":
             return None
-        return float(value)
+        return float(cast("str | bytes | bytearray | SupportsFloat | SupportsIndex", value))
     except (TypeError, ValueError):
         return None
 
