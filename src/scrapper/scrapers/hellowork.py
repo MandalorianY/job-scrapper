@@ -1,17 +1,29 @@
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import datetime, timedelta
 from urllib.parse import urlencode
 
+import structlog
 from crawlee import ConcurrencySettings, Request
 from crawlee.crawlers import BeautifulSoupCrawler, BeautifulSoupCrawlingContext
 
 from scrapper.config import SearchConfig
 from scrapper.location_scope import location_is_in_scope
 from scrapper.models import JobOffer
-from scrapper.scrapers.common import absolutize, apply_url, first_text, job_location, json_ld_jobposting, org_name
+from scrapper.scrapers.common import (
+    absolutize,
+    apply_url,
+    custom_search_cutoff,
+    first_text,
+    job_location,
+    json_ld_jobposting,
+    org_name,
+    posted_date_is_before_cutoff,
+)
 from scrapper.storage import JobStore
-from scrapper.text import clean_text, contains_any_terms, has_excluded_contract_signal
+from scrapper.text import clean_text, has_excluded_contract_signal
+
+log = structlog.get_logger(__name__)
 
 
 async def scrape_hellowork(config: SearchConfig, store: JobStore) -> int:
@@ -21,16 +33,28 @@ async def scrape_hellowork(config: SearchConfig, store: JobStore) -> int:
     discovered = set[str]()
     detail_enqueued = 0
     written = 0
+    log.info(
+        "custom_source_started",
+        source=config.hellowork.source,
+        queries=list(config.queries),
+        locations=list(config.search_locations),
+        max_pages=config.custom_max_pages,
+        max_detail_pages=config.custom_max_detail_pages,
+    )
 
     crawler = BeautifulSoupCrawler(
-        max_requests_per_crawl=max(1, len(config.queries) * config.custom_max_pages + config.custom_max_detail_pages),
+        max_requests_per_crawl=max(
+            1,
+            len(config.queries) * len(config.search_locations) * config.custom_max_pages
+            + config.custom_max_detail_pages,
+        ),
         max_request_retries=2,
         request_handler_timeout=timedelta(seconds=30),
         navigation_timeout=timedelta(seconds=30),
         concurrency_settings=ConcurrencySettings(
-            min_concurrency=1,
-            desired_concurrency=1,
-            max_concurrency=2,
+            min_concurrency=config.crawlee_min_concurrency,
+            desired_concurrency=config.crawlee_desired_concurrency,
+            max_concurrency=config.crawlee_max_concurrency,
             max_tasks_per_minute=max(1, int(60 / config.request_delay_secs)),
         ),
     )
@@ -39,10 +63,25 @@ async def scrape_hellowork(config: SearchConfig, store: JobStore) -> int:
     async def list_handler(context: BeautifulSoupCrawlingContext) -> None:
         nonlocal detail_enqueued
         request_query = context.request.user_data.get("query")
+        request_location = context.request.user_data.get("location")
+        page = int(context.request.user_data.get("page") or 1)
+        cutoff = custom_search_cutoff(
+            store,
+            config.hellowork.source,
+            request_query,
+            request_location,
+            config,
+        )
         links = []
         for anchor in context.soup.select('a[href*="/fr-fr/emplois/"][href$=".html"]'):
             if detail_enqueued >= config.custom_max_detail_pages:
                 break
+            title = first_text(anchor, ("h3", "h2")) or clean_text(anchor.get_text(" "))
+            if not config.title_is_allowed(title) or has_excluded_contract_signal(title, None, None, config.exclude_terms):
+                continue
+            listing_date = _listing_date(anchor)
+            if posted_date_is_before_cutoff(listing_date, cutoff):
+                continue
             url = absolutize(config.hellowork.base_url, anchor.get("href"))
             if not url or url in discovered:
                 continue
@@ -55,9 +94,13 @@ async def scrape_hellowork(config: SearchConfig, store: JobStore) -> int:
                     url,
                     label="DETAIL",
                     headers={"user-agent": config.user_agent, **config.extra_headers},
-                    user_data={"query": request_query, "location": context.request.user_data.get("location")},
+                    user_data={"query": request_query, "location": request_location, "cutoff": cutoff.isoformat()},
                 )
             )
+        if page < config.custom_max_pages:
+            next_page = _search_request(config, request_query, request_location, page + 1)
+            if next_page:
+                links.append(next_page)
         if links:
             await context.add_requests(links)
 
@@ -97,9 +140,16 @@ async def scrape_hellowork(config: SearchConfig, store: JobStore) -> int:
             soup,
             ("[data-cy*='contract']", "[data-testid*='contract']", "[class*='contract']"),
         )
+        date_posted = clean_text(job.get("datePosted"))
+        cutoff_text = context.request.user_data.get("cutoff")
+        cutoff = datetime.fromisoformat(cutoff_text) if cutoff_text else None
+        if cutoff and posted_date_is_before_cutoff(date_posted, cutoff):
+            return
         if has_excluded_contract_signal(title, employment_type, description, config.exclude_terms):
             return
-        if not contains_any_terms((title,), config.include_terms):
+        if not config.title_is_allowed(title):
+            return
+        if config.is_company_excluded(config.hellowork.source, company):
             return
         offer = JobOffer(
             source=config.hellowork.source,
@@ -109,7 +159,7 @@ async def scrape_hellowork(config: SearchConfig, store: JobStore) -> int:
             company=company,
             location=location,
             description=description,
-            date_posted=clean_text(job.get("datePosted")),
+            date_posted=date_posted,
             employment_type=employment_type,
             salary=clean_text(job.get("baseSalary")),
             search_query=context.request.user_data.get("query"),
@@ -126,27 +176,21 @@ async def scrape_hellowork(config: SearchConfig, store: JobStore) -> int:
     for query in config.queries:
         for search_location in config.search_locations:
             store.start_search(config.hellowork.source, query, search_location)
-            for page in range(1, config.custom_max_pages + 1):
-                params = {
-                    "k": query,
-                    "l": search_location,
-                    "ray": config.distance_km,
-                    "tri": "date",
-                    "p": page,
-                }
-                requests.append(
-                    Request.from_url(
-                        f"{config.hellowork.base_url}/fr-fr/emploi/recherche.html?{urlencode(params)}",
-                        label="LIST",
-                        headers={"user-agent": config.user_agent, **config.extra_headers},
-                        user_data={"query": query, "location": search_location},
-                    )
-                )
+            request = _search_request(config, query, search_location, 1)
+            if request:
+                requests.append(request)
     await crawler.run(requests)
     per_query_seen = len(discovered)
     for query in config.queries:
         for search_location in config.search_locations:
             store.finish_search(config.hellowork.source, query, search_location, per_query_seen)
+    log.info(
+        "custom_source_completed",
+        source=config.hellowork.source,
+        seen=per_query_seen,
+        enqueued=detail_enqueued,
+        stored=written,
+    )
     return written
 
 
@@ -154,3 +198,36 @@ def _employment_type(value) -> str | None:
     if isinstance(value, list):
         return ", ".join(filter(None, [clean_text(item) for item in value])) or None
     return clean_text(value)
+
+
+def _search_request(config: SearchConfig, query: str | None, search_location: str | None, page: int) -> Request | None:
+    if not query or not search_location:
+        return None
+    params = {
+        "k": query,
+        "l": search_location,
+        "ray": config.distance_km,
+        "tri": "date",
+        "p": page,
+    }
+    return Request.from_url(
+        f"{config.hellowork.base_url}/fr-fr/emploi/recherche.html?{urlencode(params)}",
+        label="LIST",
+        headers={"user-agent": config.user_agent, **config.extra_headers},
+        user_data={"query": query, "location": search_location, "page": page},
+    )
+
+
+def _listing_date(anchor) -> str | None:
+    for container in [anchor, *anchor.parents]:
+        if not getattr(container, "select_one", None):
+            continue
+        node = container.select_one("time[datetime], [datetime], [class*='date'], [data-testid*='date']")
+        if node:
+            return clean_text(node.get("datetime")) or clean_text(node.get_text(" "))
+        text = clean_text(container.get_text(" "))
+        if text and ("il y a" in text.lower() or "publié" in text.lower()):
+            return text
+        if getattr(container, "name", None) in {"article", "li"}:
+            break
+    return None

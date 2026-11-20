@@ -220,6 +220,12 @@ class Settings(BaseSettings):
     web_search_max_detail_pages: int
     refresh_known_details: bool
     request_delay_secs: float
+    crawlee_min_concurrency: int = 1
+    crawlee_desired_concurrency: int = 2
+    crawlee_max_concurrency: int = 4
+    http_max_connections: int = 12
+    http_per_host_concurrency: int = 2
+    http_request_delay_secs: float = 0.25
     user_agent: str
     extra_headers: dict[str, str] = Field(default_factory=dict)
     paths: PathsConfig
