@@ -2,13 +2,15 @@ from __future__ import annotations
 
 import os
 import re
+from collections.abc import Iterator
 from functools import lru_cache
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import AliasChoices, BaseModel, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import (
     BaseSettings,
+    InitSettingsSource,
     PydanticBaseSettingsSource,
     SettingsConfigDict,
     YamlConfigSettingsSource,
@@ -29,6 +31,30 @@ def _yaml_config_files(app_env: str) -> list[Path]:
     if os.getenv("SCRAPPER_DISABLE_LOCAL_CONFIG") not in {"1", "true", "TRUE", "yes", "YES"}:
         files.append(LOCAL_CONFIG_FILE)
     return files
+
+
+class _ConfigSources(InitSettingsSource):
+    def __init__(self, settings_cls: type[BaseSettings], sources: dict[str, str], result: dict[str, str]):
+        super().__init__(settings_cls, {})
+        self.sources = sources
+        self.result = result
+
+    def __call__(self) -> dict[str, Any]:
+        for name, label in self.sources.items():
+            for path in _leaf_paths(self.settings_sources_data[name]):
+                if path in {("SCRAPPER_APP_ENV",), ("APP_ENV",)}:
+                    path = ("app_env",)
+                self.result.setdefault(".".join(path), label)
+        return {}
+
+
+def _leaf_paths(values: dict[str, Any], prefix: tuple[str, ...] = ()) -> Iterator[tuple[str, ...]]:
+    for key, value in values.items():
+        path = (*prefix, key)
+        if isinstance(value, dict) and value:
+            yield from _leaf_paths(value, path)
+        else:
+            yield path
 
 
 class EnvironmentSettings(BaseSettings):
@@ -295,12 +321,33 @@ class Settings(BaseSettings):
     ) -> tuple[PydanticBaseSettingsSource, ...]:
         app_env = init_settings.init_kwargs.get("app_env") or EnvironmentSettings().app_env
         yaml_override = init_settings.init_kwargs.pop("yaml_file", None)
-        yaml_source = (
-            YamlConfigSettingsSource(settings_cls, yaml_file=yaml_override, deep_merge=True)
-            if yaml_override
-            else YamlConfigSettingsSource(settings_cls, yaml_file=_yaml_config_files(app_env), deep_merge=True)
-        )
-        return init_settings, env_settings, dotenv_settings, yaml_source
+        config_sources = init_settings.init_kwargs.pop("_config_sources", None)
+        yaml_files = yaml_override or _yaml_config_files(app_env)
+        if isinstance(yaml_files, (str, Path)):
+            yaml_files = [yaml_files]
+        sources = {
+            type(init_settings).__name__: "command line",
+            type(env_settings).__name__: "environment",
+            type(dotenv_settings).__name__: str(Path(".env").absolute()),
+        }
+        yaml_sources = []
+        for path in reversed(yaml_files):
+            path = Path(path).expanduser().absolute()
+            if path.is_file():
+                source = YamlConfigSettingsSource(settings_cls, yaml_file=path)
+                source.__name__ = str(path)
+                sources[source.__name__] = str(path)
+                yaml_sources.append(source)
+        settings_sources = (init_settings, env_settings, dotenv_settings, *yaml_sources)
+        if config_sources is None:
+            return settings_sources
+        return (*settings_sources, _ConfigSources(settings_cls, sources, config_sources))
+
+    def describe(self, sources: dict[str, str]) -> dict[str, Any]:
+        values = self.model_dump(mode="json")
+        values["extra_headers"] = dict.fromkeys(self.extra_headers, "**********")
+        paths = map(".".join, _leaf_paths(values))
+        return {"values": values, "sources": {path: sources.get(path, "default") for path in paths}}
 
     @property
     def database_path(self) -> Path:

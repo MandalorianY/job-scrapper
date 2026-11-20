@@ -284,16 +284,8 @@ jobspy:
   google_zero_results_error: "JobSpy Google returned 0 rows. Upstream issue #302 reports 'initial cursor not found' when Google does not return the expected Jobs payload."
   glassdoor_zero_results_error: "JobSpy Glassdoor returned 0 rows after using the city-only location fallback. Glassdoor may be blocking the Graph API or returning an unsupported payload."
   glassdoor_results_wanted_per_query: 5
-  google_query_places:
-    - Toulouse
-    - Grenoble
-    - Albertville
-    - Albertville
-    - Annecy
-    - '"Grand Toulouse"'
-    - '"Grenoble Alpes Métropole"'
-    - '"Grand Albertville"'
-    - '"Grand Annecy"'
+  # An empty list uses the location for each Google Jobs search.
+  google_query_places: []
   google_query_exclude_terms:
     - stage
     - alternance

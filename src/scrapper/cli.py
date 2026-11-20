@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 import uuid
 from collections.abc import Awaitable, Callable
@@ -63,7 +64,9 @@ def run(
     log_file: Annotated[Path | None, typer.Option("--log-file", help="Structured JSONL log path.")] = None,
     log_level: Annotated[LogLevel, typer.Option("--log-level", help="Minimum structured log level.")] = DEFAULT_LOG_LEVEL,
     log_console: Annotated[bool, typer.Option("--log-console", help="Also emit structured JSON logs to stderr.")] = False,
+    show_config: Annotated[bool, typer.Option("--show-config", help="Print effective settings and their sources, then exit.")] = False,
 ) -> None:
+    config_sources = {} if show_config else None
     config = _config_from_cli(
         query,
         locations,
@@ -74,7 +77,11 @@ def run(
         jobspy_hours_old,
         custom_pages,
         refresh_known,
+        config_sources,
     )
+    if config_sources is not None:
+        typer.echo(json.dumps(config.describe(config_sources), ensure_ascii=False, indent=2))
+        return
     configured_log_file = configure_logging(config.log_file, level=log_level, console=log_console)
     run_id = str(uuid.uuid4())
     structlog.contextvars.clear_contextvars()
@@ -315,22 +322,20 @@ def _config_from_cli(
     jobspy_hours_old: int | None,
     custom_pages: int | None,
     refresh_known: bool | None,
+    config_sources: dict[str, str] | None = None,
 ) -> SearchConfig:
-    config = SearchConfig()
-    overrides = {}
+    overrides = {"_config_sources": config_sources}
     if query is not None:
         overrides["queries"] = tuple(query)
     if locations is not None:
         overrides["locations"] = tuple(locations)
         overrides["location_label"] = " / ".join(locations)
-    paths = config.paths.model_copy()
-    if db is not None:
-        paths = paths.model_copy(update={"database_path": db})
-    if export_dir is not None:
-        paths = paths.model_copy(update={"export_dir": export_dir})
-    if log_file is not None:
-        paths = paths.model_copy(update={"log_file": log_file})
-    if db is not None or export_dir is not None or log_file is not None:
+    paths = {
+        name: path.absolute()
+        for name, path in (("database_path", db), ("export_dir", export_dir), ("log_file", log_file))
+        if path is not None
+    }
+    if paths:
         overrides["paths"] = paths
     if results_wanted is not None:
         overrides["results_wanted_per_query"] = results_wanted
@@ -340,7 +345,7 @@ def _config_from_cli(
         overrides["custom_max_pages"] = custom_pages
     if refresh_known is not None:
         overrides["refresh_known_details"] = refresh_known
-    return config.model_copy(update=overrides)
+    return SearchConfig(**overrides)
 
 
 if __name__ == "__main__":
