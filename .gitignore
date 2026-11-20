@@ -26,6 +26,8 @@ wheels/
 # Local scraper state and exports
 data/
 exports/
+/jobs.xlsx
+trouve-un-travail/
 .crawlee_storage/
 storage/
 
@@ -34,3 +36,5 @@ storage/
 !.env.example
 *.env.yaml
 src/scrapper/config/config.local.yaml
+src/scrapper/gdrive_sync.py
+/deploy/README.local.md

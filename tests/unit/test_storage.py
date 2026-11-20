@@ -224,8 +224,8 @@ def test_default_config_declares_dedupe_source_priorities() -> None:
     assert config.dedupe_source_priority["linkedin"] < config.dedupe_source_priority["welcome_to_the_jungle"]
     assert config.dedupe_source_priority["france_travail"] > config.dedupe_default_source_priority
     assert config.export.excel_columns[:6] == (
-        "Postulé",
-        "Rejeté",
+        "Statut",
+        "Publié le",
         "Lien",
         "Intitulé",
         "Entreprise",
