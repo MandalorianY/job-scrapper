@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Iterable
 import re
+from collections.abc import Iterable
+from datetime import UTC, datetime, timedelta
+from typing import Any
 from urllib.parse import urljoin, urlparse
 
 from bs4 import BeautifulSoup, Tag
 
+from scrapper.dates import parse_posted_date
 from scrapper.text import clean_text
 
 APPLY_SIGNAL_RE = re.compile(
@@ -17,20 +20,23 @@ NON_APPLY_SIGNAL_RE = re.compile(
     r"\b(?:share|partage|facebook|twitter|linkedin|whatsapp|mailto|alerte|alert|saved?|favori|login|connexion|onetap|bookmark)\b",
     re.IGNORECASE,
 )
-
-
 def absolutize(base_url: str, href: str | None) -> str | None:
     if not href:
         return None
-    if href.startswith("mailto:") or href.startswith("tel:"):
+    if href.startswith(("mailto:", "tel:")):
         return None
     return urljoin(base_url, href)
 
 
 def apply_url(soup: BeautifulSoup | Tag, page_url: str) -> str | None:
     candidates: list[tuple[int, str]] = []
-    for node in soup.select("a[href], form[action]"):
-        href = node.get("href") if node.name == "a" else node.get("action")
+    for node in soup.select("a[href], form[action], [data-redirect]"):
+        if node.has_attr("data-redirect"):
+            href = node.get("data-redirect")
+        elif node.name == "a":
+            href = node.get("href")
+        else:
+            href = node.get("action")
         url = absolutize(page_url, str(href) if href else None)
         if not url or not _is_candidate_apply_url(url):
             continue
@@ -157,3 +163,31 @@ def next_data(soup: BeautifulSoup) -> dict | None:
         return json.loads(node.string or node.get_text())
     except json.JSONDecodeError:
         return None
+
+
+def custom_search_cutoff(
+    store: Any,
+    source: str,
+    query: str,
+    location: str,
+    config: Any,
+    now: datetime | None = None,
+) -> datetime:
+    now = now or datetime.now(UTC)
+    last_success = store.get_last_success(source, query, location)
+    if not last_success:
+        return now - timedelta(hours=config.default_hours_old)
+    if last_success.tzinfo is None:
+        last_success = last_success.replace(tzinfo=UTC)
+    return last_success - timedelta(hours=config.overlap_hours)
+
+
+def posted_date_is_before_cutoff(value: Any, cutoff: datetime, now: datetime | None = None) -> bool:
+    parsed = parse_posted_date(value, now=now)
+    if not parsed:
+        return False
+    if cutoff.tzinfo is None:
+        cutoff = cutoff.replace(tzinfo=UTC)
+    if parsed.moment:
+        return parsed.moment < cutoff
+    return parsed.day < cutoff.date()

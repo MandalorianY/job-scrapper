@@ -2,29 +2,63 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import datetime, timezone
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from urllib.parse import urlencode
 
 import httpx
+import structlog
 
 from scrapper.config import SearchConfig
 from scrapper.location_scope import location_is_in_scope
 from scrapper.models import JobOffer
+from scrapper.scrapers.async_http import HostThrottle
+from scrapper.scrapers.common import custom_search_cutoff, posted_date_is_before_cutoff
 from scrapper.storage import JobStore
-from scrapper.text import clean_text, contains_any_terms, has_excluded_contract_signal
-
+from scrapper.text import clean_text, has_excluded_contract_signal
 
 PUBLIC_ALGOLIA_KEY_RE = re.compile(r'"ALGOLIA_API_KEY_CLIENT"\s*:\s*"([^"]+)"')
+WINDOW_ENV_MARKER_RE = re.compile(r"window\.env\s*=\s*")
+log = structlog.get_logger(__name__)
+
+
+@dataclass(frozen=True)
+class WttjAlgoliaConfig:
+    api_key: str
+    app_id: str
+    url: str
+    job_index: str
 
 
 async def scrape_welcome_to_the_jungle(config: SearchConfig, store: JobStore) -> int:
     if not config.is_source_enabled(config.welcome_to_the_jungle.source):
         return 0
 
+    log.info(
+        "wttj_scrape_started",
+        source=config.welcome_to_the_jungle.source,
+        queries=list(config.queries),
+        centers=[center_name for center_name, _center_lat_lng in _search_centers(config)],
+        max_pages=config.custom_max_pages,
+    )
     configured_key = config.welcome_to_the_jungle.algolia_api_key
     configured_value = configured_key.get_secret_value().strip() if configured_key else ""
-    algolia_api_key = configured_value or await _public_algolia_api_key(config)
-    if not algolia_api_key:
+    discovered = await _public_algolia_config(config)
+    algolia_api_key = configured_value or (discovered.api_key if discovered else "")
+    algolia_app_id = _configured_or_discovered(
+        config.welcome_to_the_jungle.algolia_app_id,
+        discovered.app_id if discovered else None,
+    )
+    algolia_url = _configured_or_discovered(
+        config.welcome_to_the_jungle.algolia_url,
+        discovered.url if discovered else None,
+    )
+    job_index = _configured_or_discovered(
+        config.welcome_to_the_jungle.job_index,
+        discovered.job_index if discovered else None,
+    )
+    if not (algolia_api_key and algolia_app_id and algolia_url and job_index):
+        error = "Welcome to the Jungle Algolia runtime config is not available."
         for query in config.queries:
             for center_name, _center_lat_lng in _search_centers(config):
                 store.start_search(config.welcome_to_the_jungle.source, query, center_name)
@@ -33,13 +67,14 @@ async def scrape_welcome_to_the_jungle(config: SearchConfig, store: JobStore) ->
                     query,
                     center_name,
                     0,
-                    error="Welcome to the Jungle Algolia API key is not configured.",
+                    error=error,
                 )
+        log.error("wttj_scrape_failed", source=config.welcome_to_the_jungle.source, error=error)
         return 0
 
     written = 0
     headers = {
-        "x-algolia-application-id": config.welcome_to_the_jungle.algolia_app_id,
+        "x-algolia-application-id": algolia_app_id,
         "x-algolia-api-key": algolia_api_key,
         "content-type": "application/x-www-form-urlencoded",
         "accept": "*/*",
@@ -47,17 +82,29 @@ async def scrape_welcome_to_the_jungle(config: SearchConfig, store: JobStore) ->
         "referer": f"{config.welcome_to_the_jungle.site_url}/",
         "user-agent": config.user_agent,
     }
-    async with httpx.AsyncClient(headers=headers, timeout=30, follow_redirects=True) as client:
+    limits = httpx.Limits(max_connections=config.http_max_connections, max_keepalive_connections=config.http_max_connections)
+    throttle = HostThrottle(config.http_per_host_concurrency, config.http_request_delay_secs)
+    async with httpx.AsyncClient(headers=headers, timeout=30, follow_redirects=True, limits=limits) as client:
         for query in config.queries:
             for center_name, center_lat_lng in _search_centers(config):
                 store.start_search(config.welcome_to_the_jungle.source, query, center_name)
                 seen = 0
                 try:
+                    cutoff = custom_search_cutoff(
+                        store,
+                        config.welcome_to_the_jungle.source,
+                        query,
+                        center_name,
+                        config,
+                    )
+                    reached_old_jobs = False
                     for page in range(config.custom_max_pages):
+                        if reached_old_jobs:
+                            break
                         payload = {
                             "requests": [
                                 {
-                                    "indexName": config.welcome_to_the_jungle.job_index,
+                                    "indexName": job_index,
                                     "params": urlencode(
                                         {
                                             "query": query,
@@ -72,7 +119,11 @@ async def scrape_welcome_to_the_jungle(config: SearchConfig, store: JobStore) ->
                                 }
                             ]
                         }
-                        response = await client.post(config.welcome_to_the_jungle.algolia_url, content=json.dumps(payload))
+                        response = await throttle.post(
+                            client,
+                            algolia_url,
+                            content=json.dumps(payload),
+                        )
                         response.raise_for_status()
                         result = response.json()["results"][0]
                         hits = result.get("hits", [])
@@ -80,6 +131,9 @@ async def scrape_welcome_to_the_jungle(config: SearchConfig, store: JobStore) ->
                             break
                         for hit in hits:
                             seen += 1
+                            if posted_date_is_before_cutoff(hit.get("published_at"), cutoff):
+                                reached_old_jobs = True
+                                break
                             offer = _hit_to_offer(hit, query, config)
                             offer.search_location = center_name
                             if not offer.source_url:
@@ -91,7 +145,9 @@ async def scrape_welcome_to_the_jungle(config: SearchConfig, store: JobStore) ->
                                 config.exclude_terms,
                             ):
                                 continue
-                            if not contains_any_terms((offer.title,), config.include_terms):
+                            if not config.title_is_allowed(offer.title):
+                                continue
+                            if config.is_company_excluded(config.welcome_to_the_jungle.source, offer.company):
                                 continue
                             if not location_is_in_scope(offer.location, config.location_scope):
                                 continue
@@ -103,7 +159,15 @@ async def scrape_welcome_to_the_jungle(config: SearchConfig, store: JobStore) ->
                             store.upsert_offer(offer)
                             written += 1
                     store.finish_search(config.welcome_to_the_jungle.source, query, center_name, seen)
-                except Exception as exc:  # noqa: BLE001 - keep the other sources running.
+                    log.info(
+                        "wttj_search_finished",
+                        source=config.welcome_to_the_jungle.source,
+                        query=query,
+                        location=center_name,
+                        seen=seen,
+                        stored=written,
+                    )
+                except Exception as exc:
                     store.finish_search(
                         config.welcome_to_the_jungle.source,
                         query,
@@ -111,6 +175,14 @@ async def scrape_welcome_to_the_jungle(config: SearchConfig, store: JobStore) ->
                         seen,
                         error=str(exc),
                     )
+                    log.exception(
+                        "wttj_search_failed",
+                        source=config.welcome_to_the_jungle.source,
+                        query=query,
+                        location=center_name,
+                        seen=seen,
+                    )
+    log.info("wttj_scrape_completed", source=config.welcome_to_the_jungle.source, stored=written)
     return written
 
 
@@ -124,9 +196,15 @@ def _search_centers(config: SearchConfig) -> tuple[tuple[str, str], ...]:
 
 
 async def _public_algolia_api_key(config: SearchConfig) -> str | None:
+    public_config = await _public_algolia_config(config)
+    return public_config.api_key if public_config else None
+
+
+async def _public_algolia_config(config: SearchConfig) -> WttjAlgoliaConfig | None:
     url = f"{config.welcome_to_the_jungle.site_url}/fr/sitemap.xml"
+    # Keep httpx's default user agent: the legacy bare Mozilla/5.0 header
+    # receives a 403 on the public runtime configuration page.
     headers = {
-        "user-agent": "Mozilla/5.0",
         "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     }
     async with httpx.AsyncClient(headers=headers, timeout=15, follow_redirects=True) as client:
@@ -135,8 +213,75 @@ async def _public_algolia_api_key(config: SearchConfig) -> str | None:
             response.raise_for_status()
         except httpx.HTTPError:
             return None
-    match = PUBLIC_ALGOLIA_KEY_RE.search(response.text)
-    return match.group(1) if match else None
+    env = _extract_window_env(response.text)
+    if not env:
+        match = PUBLIC_ALGOLIA_KEY_RE.search(response.text)
+        api_key = match.group(1) if match else None
+        app_id = None
+        jobs_prefix = None
+    else:
+        api_key = clean_text(env.get("ALGOLIA_API_KEY_CLIENT"))
+        app_id = clean_text(env.get("ALGOLIA_APPLICATION_ID"))
+        jobs_prefix = clean_text(env.get("ALGOLIA_JOBS_INDEX_PREFIX"))
+    if not (api_key and app_id and jobs_prefix):
+        return None
+    return WttjAlgoliaConfig(
+        api_key=api_key,
+        app_id=app_id,
+        url=(
+            f"https://{app_id}-dsn.algolia.net/1/indexes/*/queries"
+            "?x-algolia-agent=Algolia%20for%20JavaScript%20(4.20.0)%3B%20Browser"
+            "&search_origin=jobs_search_client"
+        ),
+        job_index=f"{jobs_prefix}_fr",
+    )
+
+
+def _extract_window_env(text: str) -> dict | None:
+    marker = WINDOW_ENV_MARKER_RE.search(text)
+    if not marker:
+        return None
+    start = text.find("{", marker.end())
+    if start < 0:
+        return None
+    depth = 0
+    in_string = False
+    escaped = False
+    for index, char in enumerate(text[start:], start=start):
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                try:
+                    parsed = json.loads(text[start : index + 1])
+                except json.JSONDecodeError:
+                    return None
+                return parsed if isinstance(parsed, dict) else None
+    return None
+
+
+def _configured_or_discovered(configured: str, discovered: str | None) -> str | None:
+    raw_value = str(configured or "")
+    value = clean_text(raw_value)
+    if value and not _is_placeholder(raw_value) and not _is_placeholder(value):
+        return value
+    return clean_text(discovered)
+
+
+def _is_placeholder(value: str) -> bool:
+    normalized = value.lower()
+    return "<" in value or ">" in value or normalized.startswith("example_")
 
 
 def _hit_to_offer(hit: dict, query: str, config: SearchConfig) -> JobOffer:
@@ -177,7 +322,7 @@ def _hit_to_offer(hit: dict, query: str, config: SearchConfig) -> JobOffer:
         company_description=company_description,
         search_query=query,
         search_location=config.location_label,
-        scraped_at=datetime.now(timezone.utc).isoformat(),
+        scraped_at=datetime.now(UTC).isoformat(),
         raw=hit,
     )
 

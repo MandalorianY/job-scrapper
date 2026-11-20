@@ -143,6 +143,12 @@ web_search_max_results_per_query: 8
 web_search_max_detail_pages: 50
 refresh_known_details: false
 request_delay_secs: 1.5
+crawlee_min_concurrency: 1
+crawlee_desired_concurrency: 2
+crawlee_max_concurrency: 4
+http_max_connections: 12
+http_per_host_concurrency: 2
+http_request_delay_secs: 0.25
 
 # =============================================================================
 # 4. Outputs And Runtime Paths

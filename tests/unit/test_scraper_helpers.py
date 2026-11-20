@@ -1,11 +1,20 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 from bs4 import BeautifulSoup
 
 from scrapper.config import SearchConfig
+from scrapper.dates import absolute_posted_date
 from scrapper.scrapers.aggregators import _company_from_domain as aggregator_company_from_domain
 from scrapper.scrapers.aggregators import _has_regional_signal, _infer_contract, _offer_is_usable
-from scrapper.scrapers.common import apply_url, json_ld_jobposting
+from scrapper.scrapers.common import (
+    apply_url,
+    custom_search_cutoff,
+    json_ld_jobposting,
+    parse_posted_date,
+    posted_date_is_before_cutoff,
+)
 from scrapper.scrapers.web_search import (
     _company_from_domain,
     _is_excluded_domain,
@@ -60,6 +69,60 @@ def test_apply_url_ignores_generic_one_tap_form() -> None:
     assert apply_url(soup, "https://www.hellowork.com/fr-fr/emplois/1.html") == (
         "https://www.hellowork.com/fr-fr/emplois/1.html#postuler"
     )
+
+
+def test_apply_url_reads_data_redirect_buttons() -> None:
+    soup = BeautifulSoup(
+        """
+        <html><body>
+          <span class="button-primary" data-redirect="/fr/redirect/offer/54/abc">Postuler</span>
+        </body></html>
+        """,
+        "lxml",
+    )
+
+    assert apply_url(soup, "https://www.jobijoba.com/fr/annonce/54/abc") == (
+        "https://www.jobijoba.com/fr/redirect/offer/54/abc"
+    )
+
+
+def test_parse_posted_date_handles_provider_formats() -> None:
+    now = datetime(2026, 6, 5, 12, 0, tzinfo=UTC)
+
+    assert parse_posted_date("2026-06-04T10:30:00Z", now=now).day.isoformat() == "2026-06-04"
+    assert parse_posted_date("Publié le 04/06/2026", now=now).day.isoformat() == "2026-06-04"
+    assert parse_posted_date("Il y a 10 h", now=now).moment == datetime(2026, 6, 5, 2, 0, tzinfo=UTC)
+    assert parse_posted_date("28 mai 2026", now=now).day.isoformat() == "2026-05-28"
+    assert absolute_posted_date("Il y a 19 h", now=now) == "2026-06-04T17:00:00+00:00"
+
+
+def test_posted_date_before_cutoff_respects_day_precision() -> None:
+    cutoff = datetime(2026, 6, 4, 15, 0, tzinfo=UTC)
+
+    assert not posted_date_is_before_cutoff("2026-06-04", cutoff)
+    assert posted_date_is_before_cutoff("2026-06-03", cutoff)
+    assert posted_date_is_before_cutoff("2026-06-04T14:00:00Z", cutoff)
+
+
+def test_custom_search_cutoff_uses_last_success_with_overlap() -> None:
+    class Store:
+        def get_last_success(self, source: str, query: str, location: str):
+            return datetime(2026, 6, 4, 12, 0, tzinfo=UTC)
+
+    class Config:
+        default_hours_old = 336
+        overlap_hours = 24
+
+    cutoff = custom_search_cutoff(
+        Store(),
+        "hellowork",
+        "communication",
+        "Toulouse, France",
+        Config(),
+        now=datetime(2026, 6, 5, 12, 0, tzinfo=UTC),
+    )
+
+    assert cutoff == datetime(2026, 6, 3, 12, 0, tzinfo=UTC)
 
 
 def test_web_search_url_and_page_classification_helpers() -> None:

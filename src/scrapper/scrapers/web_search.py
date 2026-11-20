@@ -1,18 +1,34 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+import asyncio
+import base64
+import binascii
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from urllib.parse import parse_qs, unquote, urljoin, urlparse
 
 import httpx
+import structlog
 from bs4 import BeautifulSoup
 
 from scrapper.config import SearchConfig
 from scrapper.location_scope import location_is_in_scope
 from scrapper.models import JobOffer
-from scrapper.scrapers.common import apply_url, first_text, job_location, json_ld_jobposting, meta_content, org_name
+from scrapper.scrapers.async_http import HostThrottle
+from scrapper.scrapers.common import (
+    apply_url,
+    custom_search_cutoff,
+    first_text,
+    job_location,
+    json_ld_jobposting,
+    meta_content,
+    org_name,
+    posted_date_is_before_cutoff,
+)
 from scrapper.storage import JobStore
-from scrapper.text import clean_text, contains_any_terms, has_excluded_contract_signal
+from scrapper.text import clean_text, has_excluded_contract_signal
+
+log = structlog.get_logger(__name__)
 
 
 @dataclass(frozen=True)
@@ -22,6 +38,10 @@ class SearchResult:
     snippet: str | None
 
 
+class SearchUnavailableError(RuntimeError):
+    """Every usable free discovery path failed, rather than returning no jobs."""
+
+
 async def scrape_web_search(config: SearchConfig, store: JobStore) -> int:
     if not config.is_source_enabled(config.web_search.source):
         return 0
@@ -29,15 +49,27 @@ async def scrape_web_search(config: SearchConfig, store: JobStore) -> int:
     written = 0
     seen_urls: set[str] = set()
     details_checked = 0
+    log.info(
+        "web_search_started",
+        source=config.web_search.source,
+        queries=list(config.queries),
+        locations=list(config.search_locations),
+        max_results_per_query=config.web_search_max_results_per_query,
+        max_detail_pages=config.web_search_max_detail_pages,
+    )
     headers = {"user-agent": config.user_agent, "accept-language": config.http.accept_language}
-    async with httpx.AsyncClient(headers=headers, timeout=25, follow_redirects=True) as client:
+    limits = httpx.Limits(max_connections=config.http_max_connections, max_keepalive_connections=config.http_max_connections)
+    throttle = HostThrottle(config.http_per_host_concurrency, config.http_request_delay_secs)
+    async with httpx.AsyncClient(headers=headers, timeout=25, follow_redirects=True, limits=limits) as client:
         for query in config.queries:
             for search_location in config.search_locations:
                 search_query = _search_query(query, search_location, config)
                 store.start_search(config.web_search.source, search_query, search_location)
                 seen = 0
                 try:
+                    cutoff = custom_search_cutoff(store, config.web_search.source, search_query, search_location, config)
                     results = await _search(client, search_query, config.web_search_max_results_per_query, config)
+                    candidates: list[SearchResult] = []
                     for result in results:
                         seen += 1
                         if details_checked >= config.web_search_max_detail_pages:
@@ -51,8 +83,17 @@ async def scrape_web_search(config: SearchConfig, store: JobStore) -> int:
                             continue
                         seen_urls.add(result.url)
                         details_checked += 1
-                        offer = await _extract_offer(client, result, search_query, search_location, config)
+                        candidates.append(result)
+                    offers = await asyncio.gather(
+                        *(
+                            _extract_offer(client, result, search_query, search_location, config, throttle=throttle)
+                            for result in candidates
+                        )
+                    )
+                    for offer in offers:
                         if not offer:
+                            continue
+                        if posted_date_is_before_cutoff(offer.date_posted, cutoff):
                             continue
                         if has_excluded_contract_signal(
                             offer.title,
@@ -61,13 +102,32 @@ async def scrape_web_search(config: SearchConfig, store: JobStore) -> int:
                             config.exclude_terms,
                         ):
                             continue
-                        if not contains_any_terms((offer.title,), config.include_terms):
+                        if not config.title_is_allowed(offer.title):
+                            continue
+                        if config.is_company_excluded(offer.source, offer.company):
                             continue
                         store.upsert_offer(offer)
                         written += 1
                     store.finish_search(config.web_search.source, search_query, search_location, seen)
-                except Exception as exc:  # noqa: BLE001 - web search should not block the main job boards.
+                    log.info(
+                        "web_search_finished",
+                        source=config.web_search.source,
+                        query=search_query,
+                        location=search_location,
+                        seen=seen,
+                        candidates=len(candidates),
+                        stored=written,
+                    )
+                except Exception as exc:
                     store.finish_search(config.web_search.source, search_query, search_location, seen, error=str(exc))
+                    log.exception(
+                        "web_search_failed",
+                        source=config.web_search.source,
+                        query=search_query,
+                        location=search_location,
+                        seen=seen,
+                    )
+    log.info("web_search_completed", source=config.web_search.source, stored=written)
     return written
 
 
@@ -75,19 +135,26 @@ async def _search(client: httpx.AsyncClient, query: str, limit: int, config: Sea
     if config is None:
         config = SearchConfig()
     results: list[SearchResult] = []
+    failures: list[str] = []
     for search in (_search_google, _search_duckduckgo, _search_bing):
         try:
             results.extend(await search(client, query, limit, config))
-        except httpx.HTTPError:
+        except (httpx.HTTPError, SearchUnavailableError) as exc:
+            reason = f"HTTP {exc.response.status_code}" if isinstance(exc, httpx.HTTPStatusError) else type(exc).__name__
+            failures.append(f"{search.__name__.removeprefix('_search_')}: {reason}")
             continue
         if len(_dedupe_results(results)) >= limit:
             break
+    if len(failures) == 3:
+        raise SearchUnavailableError("All free search providers failed: " + "; ".join(failures))
     return _dedupe_results(results)[:limit]
 
 
 async def _search_duckduckgo(client: httpx.AsyncClient, query: str, limit: int, config: SearchConfig) -> list[SearchResult]:
     response = await client.get(config.web_search.duckduckgo_html_url, params={"q": query})
     response.raise_for_status()
+    if response.status_code == 202 or "challenge-form" in response.text:
+        raise SearchUnavailableError("DuckDuckGo returned a challenge page")
     soup = BeautifulSoup(response.text, "lxml")
     results: list[SearchResult] = []
     for result in soup.select(".result"):
@@ -123,7 +190,7 @@ async def _search_google(client: httpx.AsyncClient, query: str, limit: int, conf
     )
     response.raise_for_status()
     if "google.com/sorry" in str(response.url):
-        return []
+        raise SearchUnavailableError("Google returned a challenge page")
     soup = BeautifulSoup(response.text, "lxml")
     results: list[SearchResult] = []
     for heading in soup.select("h3"):
@@ -156,11 +223,11 @@ async def _search_bing(client: httpx.AsyncClient, query: str, limit: int, config
     response.raise_for_status()
     soup = BeautifulSoup(response.text, "lxml")
     if "Veuillez résoudre le défi" in soup.get_text(" ", strip=True):
-        return []
+        raise SearchUnavailableError("Bing returned a challenge page")
     results: list[SearchResult] = []
     for item in soup.select("li.b_algo"):
         anchor = item.select_one("h2 a[href]")
-        url = _valid_result_url(anchor.get("href") if anchor else None)
+        url = _unwrap_bing(anchor.get("href") if anchor else None)
         if not url or any(existing.url == url for existing in results):
             continue
         snippet = item.select_one(".b_caption p, p")
@@ -190,12 +257,15 @@ async def _extract_offer(
     search_query: str,
     search_location: str,
     config: SearchConfig,
+    throttle: HostThrottle | None = None,
 ) -> JobOffer | None:
     url = result.url
+    if _is_info_page(url, config):
+        return None
     soup = None
     job = None
     try:
-        response = await client.get(url)
+        response = await throttle.get(client, url) if throttle else await client.get(url)
         if response.status_code < 400 and "text/html" in response.headers.get("content-type", ""):
             soup = BeautifulSoup(response.text, "lxml")
             job = json_ld_jobposting(soup)
@@ -226,6 +296,17 @@ async def _extract_offer(
 
     if not title or not _looks_like_job(title, description, config):
         return None
+    if not job:
+        # Search snippets and general articles can mention both a city and CDI.
+        # Require a listing URL or an explicit invitation to apply as well.
+        listing_path = any(part in urlparse(url).path.lower() for part in (
+            "/jobs/", "/job/", "/emplois/", "/emploi/", "/offres/", "/offre/", "/careers/",
+        ))
+        application_signal = any(term in (description or "").casefold() for term in (
+            "postulez", "envoyez votre candidature", "déposer votre candidature", "apply for this job",
+        ))
+        if not listing_path and not application_signal:
+            return None
     if not _looks_regional(location, description, config):
         return None
 
@@ -244,7 +325,7 @@ async def _extract_offer(
         company_url=_site_root(url),
         search_query=search_query,
         search_location=search_location,
-        scraped_at=datetime.now(timezone.utc).isoformat(),
+        scraped_at=datetime.now(UTC).isoformat(),
         raw={"json_ld": job, "discovered_url": url} if job else {"discovered_url": url},
     )
 
@@ -278,6 +359,22 @@ def _unwrap_google(href: str | None) -> str | None:
     return _valid_result_url(urljoin("https://www.google.com", href))
 
 
+def _unwrap_bing(href: str | None) -> str | None:
+    if not href:
+        return None
+    parsed = urlparse(href)
+    if parsed.hostname in {"bing.com", "www.bing.com"} and parsed.path == "/ck/a":
+        target = parse_qs(parsed.query).get("u", [""])[0]
+        if target.startswith("a1"):
+            encoded = target[2:]
+            try:
+                target = base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4)).decode("utf-8")
+            except (ValueError, binascii.Error):
+                return None
+        return _valid_result_url(target)
+    return _valid_result_url(href)
+
+
 def _valid_result_url(url: str | None) -> str | None:
     if not url:
         return None
@@ -301,7 +398,7 @@ def _is_info_page(url: str, config: SearchConfig | None = None) -> bool:
     if config is None:
         config = SearchConfig()
     path = urlparse(url).path.lower()
-    return any(marker in path for marker in config.web_search.info_path_markers)
+    return path.startswith("/wiki/") or any(marker in path for marker in config.web_search.info_path_markers)
 
 
 def _company_from_domain(url: str) -> str | None:
