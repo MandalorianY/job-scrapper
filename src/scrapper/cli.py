@@ -8,12 +8,15 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Annotated
 
+import httpx
 import structlog
 import typer
 from rich.console import Console
 from rich.table import Table
+from rich.text import Text
 
 from scrapper.config import SearchConfig
+from scrapper.config.settings import _leaf_values
 from scrapper.export import export_jobs
 from scrapper.location_scope import location_is_in_scope
 from scrapper.logging import DEFAULT_LOG_LEVEL, LogLevel, configure_logging
@@ -22,9 +25,10 @@ from scrapper.scrapers import (
     scrape_jobspy_sources,
     scrape_welcome_to_the_jungle,
 )
+from scrapper.search_regions import route_location_overrides
 from scrapper.storage import JobStore
 
-app = typer.Typer(help="Scrape example role jobs and export deduped CSV/XLSX files.")
+app = typer.Typer()
 console = Console()
 log = structlog.get_logger(__name__)
 TrackerFetch = Callable[[SearchConfig], Path | None]
@@ -32,7 +36,7 @@ TrackerSync = Callable[[Path], Path | None]
 ProgressReporter = Callable[[str], None]
 
 
-@app.command()
+@app.command(help="[bold cyan]Scrape example role jobs and export deduped CSV/XLSX files.[/bold cyan]")
 def run(
     query: Annotated[
         list[str] | None,
@@ -45,29 +49,35 @@ def run(
     db: Annotated[Path | None, typer.Option("--db", help="DuckDB storage path.")] = None,
     export_dir: Annotated[Path | None, typer.Option("--export-dir", help="Folder for CSV and Excel exports.")] = None,
     results_wanted: Annotated[int | None, typer.Option("--results-wanted", min=1)] = None,
-    jobspy_hours_old: Annotated[
-        int | None,
-        typer.Option("--jobspy-hours-old", min=1, help="Force JobSpy to search this many past hours, ignoring incremental state."),
-    ] = None,
     custom_pages: Annotated[int | None, typer.Option("--custom-pages", min=1)] = None,
-    refresh_known: Annotated[
-        bool | None,
-        typer.Option("--refresh-known/--no-refresh-known", help="Re-open known custom detail pages instead of skipping them."),
-    ] = None,
+    export_only: Annotated[
+        bool, typer.Option("--export-only", help="Regenerate local exports from DuckDB without scraping or syncing.")
+    ] = False,
     skip_custom: Annotated[bool, typer.Option("--skip-custom", help="Only run JobSpy sources.")] = False,
     skip_jobspy: Annotated[bool, typer.Option("--skip-jobspy", help="Only run custom sources.")] = False,
     replay_from: Annotated[
-        Path | None, typer.Option(exists=True, dir_okay=False, help="Rebuild from a DuckDB observation archive offline.")
+        Path | None,
+        typer.Option(exists=True, dir_okay=False, help="Rebuild from a DuckDB observation archive offline."),
     ] = None,
-    tracker_sync: Annotated[
-        bool, typer.Option("--tracker-sync/--no-tracker-sync", help="Fetch and publish the remote tracker.")
-    ] = True,
+    no_tracker_sync: Annotated[
+        bool, typer.Option("--no-tracker-sync", help="Skip fetching and publishing the remote tracker.")
+    ] = False,
     log_file: Annotated[Path | None, typer.Option("--log-file", help="Structured JSONL log path.")] = None,
-    log_level: Annotated[LogLevel, typer.Option("--log-level", help="Minimum structured log level.")] = DEFAULT_LOG_LEVEL,
-    log_console: Annotated[bool, typer.Option("--log-console", help="Also emit structured JSON logs to stderr.")] = False,
-    show_config: Annotated[bool, typer.Option("--show-config", help="Print effective settings and their sources, then exit.")] = False,
+    log_level: Annotated[
+        LogLevel, typer.Option("--log-level", help="Minimum structured log level.")
+    ] = DEFAULT_LOG_LEVEL,
+    show_config: Annotated[
+        bool, typer.Option("--show-config", help="Print effective settings and their sources, then exit.")
+    ] = False,
+    status: Annotated[
+        bool, typer.Option("--status", help="Show search scope, filters, overrides, and sources, then exit.")
+    ] = False,
 ) -> None:
-    config_sources = {} if show_config else None
+    if export_only:
+        skip_custom = True
+        skip_jobspy = True
+        no_tracker_sync = True
+    config_sources = {} if show_config or status else None
     config = _config_from_cli(
         query,
         locations,
@@ -75,15 +85,34 @@ def run(
         export_dir,
         log_file,
         results_wanted,
-        jobspy_hours_old,
         custom_pages,
-        refresh_known,
         config_sources,
     )
+    if locations is not None and replay_from is None and not (skip_jobspy and skip_custom):
+        before_routing = dict(_leaf_values(config.model_dump())) if config_sources is not None else {}
+        try:
+            config = route_location_overrides(config)
+        except (httpx.HTTPError, ValueError) as exc:
+            raise typer.BadParameter(
+                f"Could not route the requested locations: {exc}", param_hint="--location"
+            ) from exc
+        if config_sources is not None:
+            for key, value in _leaf_values(config.model_dump()):
+                if key not in before_routing or before_routing[key] != value:
+                    config_sources[".".join(key)] = "resolved from --location"
     if config_sources is not None:
-        typer.echo(json.dumps(config.describe(config_sources), ensure_ascii=False, indent=2))
+        report = config.describe(config_sources)
+        if show_config:
+            typer.echo(json.dumps(report, ensure_ascii=False, indent=2))
+        else:
+            _print_search_status(config, report["sources"])
+            _print_source_status(
+                config,
+                skip_jobspy=skip_jobspy or replay_from is not None,
+                skip_custom=skip_custom or replay_from is not None,
+            )
         return
-    configured_log_file = configure_logging(config.log_file, level=log_level, console=log_console)
+    configured_log_file = configure_logging(config.log_file, level=log_level)
     run_id = str(uuid.uuid4())
     structlog.contextvars.clear_contextvars()
     structlog.contextvars.bind_contextvars(
@@ -102,7 +131,7 @@ def run(
         refresh_known_details=config.refresh_known_details,
         log_file=str(configured_log_file) if configured_log_file else None,
     )
-    tracker_sync_hooks = _tracker_sync_hooks() if tracker_sync and replay_from is None else None
+    tracker_sync_hooks = _tracker_sync_hooks() if not no_tracker_sync and replay_from is None else None
     sync_exported_tracker: TrackerSync | None = None
     if tracker_sync_hooks:
         fetch_remote_tracker, sync_exported_tracker = tracker_sync_hooks
@@ -116,40 +145,33 @@ def run(
             counts["observations_replayed"] = store.replay_observations(replay_from)
         elif not skip_jobspy and not skip_custom:
             console.print(
-                "[bold]Running JobSpy and custom/free sources in parallel[/bold] "
-                "(separate DuckDB connections)"
+                "[bold cyan]Running JobSpy and custom sources in parallel[/bold cyan] (separate DuckDB connections)"
             )
             source_counts, source_errors = asyncio.run(
                 _run_all_sources_parallel(
                     config,
                     store,
-                    progress=lambda message: console.print(message, markup=False),
+                    progress=_print_jobspy_progress,
                 )
             )
             counts.update(source_counts)
-            for source, error in source_errors.items():
-                console.print(f"[red]{source} failed:[/red] {error}")
-                log.error("source_failed", source=source, error=error)
+            _report_source_errors(source_errors)
             store.close()
             store = _job_store(config, run_id)
         elif not skip_jobspy:
-            console.print("[bold]Running JobSpy sources[/bold] (Indeed, LinkedIn, Glassdoor, Google Jobs)")
+            console.print("[bold cyan]Running JobSpy sources[/bold cyan]")
             counts.update(
                 scrape_jobspy_sources(
                     config,
                     store,
-                    progress=lambda message: console.print(message, markup=False),
+                    progress=_print_jobspy_progress,
                 )
             )
         elif not skip_custom:
-            console.print(
-                "[bold cyan]Running custom sources[/bold cyan] (Welcome to the Jungle and aggregators)"
-            )
+            console.print("[bold cyan]Running custom sources[/bold cyan] (Welcome to the Jungle and aggregators)")
             custom_counts, custom_errors = asyncio.run(_run_custom_sources(config, store))
             counts.update(custom_counts)
-            for source, error in custom_errors.items():
-                console.print(f"[red]{source} failed:[/red] {error}")
-                log.error("source_failed", source=source, error=error)
+            _report_source_errors(custom_errors)
 
         purged = store.purge_excluded_offers(config.exclude_terms)
         if purged:
@@ -160,11 +182,12 @@ def run(
         purged_companies = store.purge_excluded_companies(config.excluded_companies_by_source)
         if purged_companies:
             counts["excluded_companies_removed"] = purged_companies
-        purged_out_of_scope = store.purge_out_of_scope_offers(
-            lambda location: location_is_in_scope(location, config.location_scope)
-        )
-        if purged_out_of_scope:
-            counts["out_of_scope_removed"] = purged_out_of_scope
+        if locations is None:
+            purged_out_of_scope = store.purge_out_of_scope_offers(
+                lambda location: location_is_in_scope(location, config.location_scope)
+            )
+            if purged_out_of_scope:
+                counts["out_of_scope_removed"] = purged_out_of_scope
         excel_path, csv_path, raw_csv_path, total = export_jobs(
             store,
             config.export_dir,
@@ -180,7 +203,7 @@ def run(
         synced_excel_path = sync_exported_tracker(excel_path) if sync_exported_tracker else None
         _print_summary(counts, total, excel_path, csv_path, raw_csv_path)
         if synced_excel_path:
-            console.print(f"Synced Excel: [green]{synced_excel_path}[/green]")
+            console.print(Text.assemble(("Synced Excel: ", "bold cyan"), (str(synced_excel_path), "green")))
         log.info(
             "scrape_run_completed",
             counts=counts,
@@ -211,18 +234,117 @@ def _job_store(config: SearchConfig, run_id: str) -> JobStore:
     )
 
 
+def _print_jobspy_progress(message: str) -> None:
+    label, separator, detail = message.partition(": ")
+    style = "bold cyan"
+    if label.startswith("JobSpy failed "):
+        style = "bold red"
+    elif label.startswith("JobSpy batch failed ") or ", error=" in detail.rpartition(" (seen=")[2]:
+        style = "bold yellow"
+    elif label.startswith("JobSpy done "):
+        style = "bold green"
+    console.print(Text.assemble((label + separator, style), detail))
+
+
+def _report_source_errors(errors: dict[str, str]) -> None:
+    for source, error in errors.items():
+        console.print(Text.assemble((f"{source} failed: ", "bold red"), error))
+        log.error("source_failed", source=source, error=error)
+
+
+def _print_search_status(config: SearchConfig, setting_sources: dict[str, str]) -> None:
+    scope = config.location_scope
+    centers = ", ".join(center.name for center in scope.centers) or "no configured centers"
+    location_filter = f"{scope.radius_km:g} km around {centers}" if scope.enabled else "Disabled"
+    company_exclusions = "\n".join(
+        f"{source}: {', '.join(companies)}"
+        for source, companies in config.excluded_companies_by_source.items()
+        if companies
+    )
+    search_limits = (
+        f"{config.results_wanted_per_query} results per query, {config.custom_max_pages} custom list pages, "
+        f"{config.custom_max_detail_pages} custom detail pages"
+    )
+    overrides: dict[str, set[str]] = {}
+    for setting, source in setting_sources.items():
+        name = Path(source).name
+        if name not in {"default", "config.yaml"}:
+            overrides.setdefault(name, set()).add(setting.split(".", 1)[0])
+
+    sections = (
+        (
+            "Search scope",
+            (
+                ("Profile", config.app_env),
+                ("Search locations", ", ".join(config.search_locations)),
+                ("Search radius", f"{config.distance_km} km"),
+                ("Location filter", location_filter),
+                ("Direct search regions", ", ".join(config.aggregators.direct_locations)),
+                ("Queries", ", ".join(config.queries)),
+                ("Search limits", search_limits),
+            ),
+        ),
+        (
+            "Filters",
+            (
+                ("Include terms", ", ".join(config.include_terms)),
+                ("Exclude terms", ", ".join(config.exclude_terms)),
+                ("Excluded companies", company_exclusions),
+                ("Excluded titles", "\n".join(config.excluded_title_patterns)),
+            ),
+        ),
+    )
+    width = min(console.width, 96)
+    for heading, rows in sections:
+        console.print(heading, style="bold cyan")
+        table = Table.grid(padding=(0, 2))
+        table.add_column(min_width=21)
+        table.add_column()
+        for label, value in rows:
+            table.add_row(label, Text(value or "None"))
+        console.print(table, width=width)
+        console.print()
+
+    console.print("Configuration overrides", style="bold cyan")
+    override_lines = "\n".join(f"{name}: {', '.join(sorted(fields))}" for name, fields in overrides.items())
+    console.print(Text(override_lines or "None"), width=width)
+    console.print()
+
+
+def _print_source_status(config: SearchConfig, *, skip_jobspy: bool, skip_custom: bool) -> None:
+    aggregators = config.aggregators
+    groups = (
+        ("JobSpy", config.jobspy_sites, not skip_jobspy),
+        ("Custom", (config.welcome_to_the_jungle.source,), not skip_custom),
+        (
+            "Aggregator",
+            tuple(spec.source for spec in (*aggregators.direct_specs, *aggregators.site_search_sources)),
+            not skip_custom and config.is_custom_source_enabled(aggregators.source),
+        ),
+    )
+    table = Table("Source", "Group", "Status", title="Job sources", title_style="bold cyan", header_style="bold cyan")
+    for group, sources, group_enabled in groups:
+        for source in sources:
+            enabled = group_enabled and config.is_source_enabled(source)
+            if group == "Custom":
+                enabled = group_enabled and config.is_custom_source_enabled(source)
+            status = Text("Enabled", style="bold green") if enabled else Text("Disabled", style="bold yellow")
+            table.add_row(Text(source), group, status)
+    console.print(table)
+
+
 def _print_summary(counts: dict[str, int], total: int, excel_path: Path, csv_path: Path, raw_csv_path: Path) -> None:
-    table = Table(title="Job search export")
+    table = Table(title="Job search export", title_style="bold cyan", header_style="bold cyan")
     table.add_column("Source")
     table.add_column("Stored / updated", justify="right")
     for source, count in counts.items():
-        table.add_row(source, str(count))
+        style = "yellow" if source.endswith("_removed") else "green" if count else "dim"
+        table.add_row(Text(source), Text(str(count), style=style))
     table.add_section()
-    table.add_row("Deduped total", str(total))
+    table.add_row("Deduped total", str(total), style="bold green" if total else "bold yellow")
     console.print(table)
-    console.print(f"Excel: [green]{excel_path}[/green]")
-    console.print(f"CSV:   [green]{csv_path}[/green]")
-    console.print(f"Raw:   [green]{raw_csv_path}[/green]")
+    for label, path in (("Excel: ", excel_path), ("CSV:   ", csv_path), ("Raw:   ", raw_csv_path)):
+        console.print(Text.assemble((label, "bold cyan"), (str(path), "green")))
 
 
 async def _run_custom_sources(config: SearchConfig, store: JobStore) -> tuple[dict[str, int], dict[str, str]]:
@@ -235,7 +357,9 @@ async def _run_custom_sources(config: SearchConfig, store: JobStore) -> tuple[di
         if config.is_custom_source_enabled(source):
             sources.append((source, scrape(config, store)))
 
-    async def run_source(source: str, scraper: Awaitable[int | dict[str, int]]) -> tuple[str, int | dict[str, int], str | None]:
+    async def run_source(
+        source: str, scraper: Awaitable[int | dict[str, int]]
+    ) -> tuple[str, int | dict[str, int], str | None]:
         try:
             async with semaphore:
                 log.info("custom_source_group_started", source=source)
@@ -323,12 +447,10 @@ def _config_from_cli(
     export_dir: Path | None,
     log_file: Path | None,
     results_wanted: int | None,
-    jobspy_hours_old: int | None,
     custom_pages: int | None,
-    refresh_known: bool | None,
     config_sources: dict[str, str] | None = None,
 ) -> SearchConfig:
-    overrides = {"_config_sources": config_sources}
+    overrides: dict[str, object] = {"_config_sources": config_sources}
     if query is not None:
         overrides["queries"] = tuple(query)
     if locations is not None:
@@ -343,12 +465,8 @@ def _config_from_cli(
         overrides["paths"] = paths
     if results_wanted is not None:
         overrides["results_wanted_per_query"] = results_wanted
-    if jobspy_hours_old is not None:
-        overrides["jobspy_hours_old_override"] = jobspy_hours_old
     if custom_pages is not None:
         overrides["custom_max_pages"] = custom_pages
-    if refresh_known is not None:
-        overrides["refresh_known_details"] = refresh_known
     return SearchConfig(**overrides)
 
 
