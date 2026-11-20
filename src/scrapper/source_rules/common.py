@@ -4,7 +4,6 @@ import re
 
 from scrapper.text import clean_text
 
-
 OFFER_REFERENCE_PREFIX_RE = re.compile(r"^(?:Offre\s+n[°o]\s*)?(?:[A-Z0-9]{6,8}|\d{7})\s+")
 OFFER_LABEL_PREFIX_RE = re.compile(r"^offre\s+d[’']emploi\s*-\s*", re.IGNORECASE)
 TRAILING_CATEGORY_RE = re.compile(

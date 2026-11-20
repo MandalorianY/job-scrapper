@@ -434,19 +434,19 @@ aggregators:
       use_direct_locations: true
     - source: emploi_territorial
       search_url_templates:
-        - https://www.emploi-territorial.fr/recherche_emploi_mobilite/?search-col={query}
+        - https://www.emploi-territorial.fr/rechercher?adv-search={query}
       link_prefixes:
         - /offre/
       base_url: https://www.emploi-territorial.fr
       max_links: 20
     - source: meteojob
       search_url_templates:
-        - https://www.meteojob.com/Auvergne-Rh%C3%B4ne-Alpes-Emploi-{query}
+        - https://www.meteojob.com/jobsearch/offers?what={query}&where=Auvergne-Rh%C3%B4ne-Alpes
       link_prefixes:
         - /jobs/
       base_url: https://www.meteojob.com
       max_links: 18
-      query_style: title_slug
+      query_style: quote_plus
     - source: jobijoba
       search_url_templates:
         - https://www.jobijoba.com/fr/emploi/{query}/Auvergne-Rhone-Alpes
@@ -454,13 +454,16 @@ aggregators:
         - /fr/annonce/
       base_url: https://www.jobijoba.com
       max_links: 18
+      blocked_direct_hosts:
+        - jobleads.com
+      blocked_provider_terms:
+        - jobleads
     - source: makesense
       search_url_templates:
         - https://jobs.makesense.org/fr/s/jobs/all/example-role/cdi?sortBy=relevance
         - https://jobs.makesense.org/fr/s/jobs/all/all/cdi?contracts=cdd&sortBy=relevance
       link_prefixes:
         - /fr/jobs/
-        - /fr/s/jobs/
       base_url: https://jobs.makesense.org
       max_links: 12
   site_search_sources:
