@@ -6,7 +6,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from pydantic import AliasChoices, BaseModel, Field, SecretStr, field_validator
+from pydantic import AliasChoices, BaseModel, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import (
     BaseSettings,
     PydanticBaseSettingsSource,
@@ -17,6 +17,7 @@ from pydantic_settings import (
 from scrapper.text import matches_job_title, normalize_text
 
 PACKAGE_CONFIG_DIR = Path(__file__).resolve().parent
+PROJECT_ROOT = PACKAGE_CONFIG_DIR.parents[2]
 LOCAL_CONFIG_FILE = PACKAGE_CONFIG_DIR / "config.local.yaml"
 
 
@@ -132,6 +133,15 @@ class AggregatorConfig(BaseModel):
 class PathsConfig(BaseModel):
     database_path: Path
     export_dir: Path
+    log_file: Path = Path("data/job-scrapper.jsonl")
+
+    @model_validator(mode="after")
+    def resolve_project_relative_paths(self) -> PathsConfig:
+        for field_name in ("database_path", "export_dir", "log_file"):
+            path = getattr(self, field_name)
+            if not path.is_absolute():
+                setattr(self, field_name, PROJECT_ROOT / path)
+        return self
 
     @property
     def excel_path(self) -> Path:
@@ -213,8 +223,8 @@ class Settings(BaseSettings):
     dedupe_source_priority: dict[str, int] = Field(default_factory=dict)
     dedupe_default_source_priority: int = 100
     default_hours_old: int
-    jobspy_batch_sites: bool = True
     jobspy_hours_old_override: int | None = None
+    jobspy_batch_sites: bool = True
     overlap_hours: int
     results_wanted_per_query: int
     custom_max_pages: int
@@ -223,6 +233,7 @@ class Settings(BaseSettings):
     web_search_max_detail_pages: int
     refresh_known_details: bool
     request_delay_secs: float
+    custom_source_concurrency: int = 4
     crawlee_min_concurrency: int = 1
     crawlee_desired_concurrency: int = 2
     crawlee_max_concurrency: int = 4
@@ -252,7 +263,7 @@ class Settings(BaseSettings):
         if "app_env" in data and "yaml_file" not in data:
             data["yaml_file"] = _yaml_config_files(str(data["app_env"]))
         paths = dict(data.get("paths") or {})
-        for field_name in ("database_path", "export_dir"):
+        for field_name in ("database_path", "export_dir", "log_file"):
             if field_name in data:
                 paths[field_name] = data.pop(field_name)
         if paths:
@@ -296,6 +307,10 @@ class Settings(BaseSettings):
     @property
     def export_dir(self) -> Path:
         return self.paths.export_dir
+
+    @property
+    def log_file(self) -> Path:
+        return self.paths.log_file
 
     @property
     def excel_path(self) -> Path:
