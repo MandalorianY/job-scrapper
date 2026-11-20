@@ -4,11 +4,12 @@ import json
 import re
 from collections.abc import Iterable
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Protocol
 from urllib.parse import urldefrag, urljoin, urlparse
 
 from bs4 import BeautifulSoup, Tag
 
+from scrapper.config import SearchConfig
 from scrapper.dates import parse_posted_date
 from scrapper.text import clean_text, is_application_destination
 
@@ -48,9 +49,7 @@ def apply_url(soup: BeautifulSoup | Tag, page_url: str) -> str | None:
         path = urlparse(url).path
         if NON_APPLY_SIGNAL_RE.search(f"{signal} {path}"):
             continue
-        if not APPLY_SIGNAL_RE.search(signal) and not (
-            node.name == "form" and APPLY_SIGNAL_RE.search(path)
-        ):
+        if not APPLY_SIGNAL_RE.search(signal) and not (node.name == "form" and APPLY_SIGNAL_RE.search(path)):
             continue
         score = _apply_score(url, page_url)
         if node.name == "a":
@@ -97,7 +96,7 @@ def meta_content(soup: BeautifulSoup, *names: str) -> str | None:
     return None
 
 
-def json_ld_jobposting(soup: BeautifulSoup) -> dict | None:
+def json_ld_jobposting(soup: BeautifulSoup) -> dict[str, object] | None:
     for script in soup.select('script[type="application/ld+json"]'):
         raw = script.string or script.get_text()
         if not raw:
@@ -112,7 +111,7 @@ def json_ld_jobposting(soup: BeautifulSoup) -> dict | None:
     return None
 
 
-def _find_jobposting(payload) -> dict | None:
+def _find_jobposting(payload: object) -> dict[str, object] | None:
     if isinstance(payload, dict):
         kind = payload.get("@type")
         if kind == "JobPosting" or (isinstance(kind, list) and "JobPosting" in kind):
@@ -129,13 +128,13 @@ def _find_jobposting(payload) -> dict | None:
     return None
 
 
-def org_name(value) -> str | None:
+def org_name(value: object) -> str | None:
     if isinstance(value, dict):
         return clean_text(value.get("name"))
     return clean_text(value)
 
 
-def job_location(value) -> str | None:
+def job_location(value: object) -> str | None:
     if isinstance(value, list):
         return " / ".join(filter(None, [job_location(item) for item in value])) or None
     if isinstance(value, dict):
@@ -151,22 +150,27 @@ def job_location(value) -> str | None:
     return clean_text(value)
 
 
-def next_data(soup: BeautifulSoup) -> dict | None:
+def next_data(soup: BeautifulSoup) -> dict[str, object] | None:
     node = soup.select_one("script#__NEXT_DATA__")
     if not node:
         return None
     try:
-        return json.loads(node.string or node.get_text())
+        payload: object = json.loads(node.string or node.get_text())
     except json.JSONDecodeError:
         return None
+    return payload if isinstance(payload, dict) else None
+
+
+class SearchHistory(Protocol):
+    def get_last_success(self, source: str, query: str, location: str) -> datetime | None: ...
 
 
 def custom_search_cutoff(
-    store: Any,
+    store: SearchHistory,
     source: str,
     query: str,
     location: str,
-    config: Any,
+    config: SearchConfig,
     now: datetime | None = None,
 ) -> datetime:
     now = now or datetime.now(UTC)
@@ -178,7 +182,7 @@ def custom_search_cutoff(
     return last_success - timedelta(hours=config.overlap_hours)
 
 
-def posted_date_is_before_cutoff(value: Any, cutoff: datetime, now: datetime | None = None) -> bool:
+def posted_date_is_before_cutoff(value: object, cutoff: datetime, now: datetime | None = None) -> bool:
     parsed = parse_posted_date(value, now=now)
     if not parsed:
         return False

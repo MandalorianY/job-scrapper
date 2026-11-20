@@ -2,10 +2,14 @@ from __future__ import annotations
 
 import asyncio
 from collections import defaultdict
-from typing import Any
+from typing import Protocol
 from urllib.parse import urlparse
 
 import httpx
+
+
+class _GetClient(Protocol):
+    async def get(self, url: str, /) -> httpx.Response: ...
 
 
 class HostThrottle:
@@ -20,13 +24,13 @@ class HostThrottle:
         self._delay_locks: defaultdict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
         self._next_start_by_host: defaultdict[str, float] = defaultdict(float)
 
-    async def get(self, client: httpx.AsyncClient, url: str, **kwargs: Any) -> httpx.Response:
+    async def get(self, client: _GetClient, url: str, **kwargs: object) -> httpx.Response:
         return await self.request(client, "get", url, **kwargs)
 
-    async def post(self, client: httpx.AsyncClient, url: str, **kwargs: Any) -> httpx.Response:
+    async def post(self, client: httpx.AsyncClient, url: str, **kwargs: object) -> httpx.Response:
         return await self.request(client, "post", url, **kwargs)
 
-    async def request(self, client: httpx.AsyncClient, method: str, url: str, **kwargs: Any) -> httpx.Response:
+    async def request(self, client: _GetClient, method: str, url: str, **kwargs: object) -> httpx.Response:
         host = _host_key(url)
         async with self._semaphores[host]:
             await self._wait_turn(host)

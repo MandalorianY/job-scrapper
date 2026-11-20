@@ -4,18 +4,20 @@ import json
 import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import SupportsFloat, SupportsIndex, cast
 from urllib.parse import urlencode
 
 import httpx
 import structlog
+from bs4 import BeautifulSoup
 
 from scrapper.config import SearchConfig
 from scrapper.location_scope import location_is_in_scope
 from scrapper.models import JobOffer
 from scrapper.scrapers.async_http import HostThrottle
-from scrapper.scrapers.common import custom_search_cutoff, posted_date_is_before_cutoff
+from scrapper.scrapers.common import apply_url, custom_search_cutoff, json_ld_jobposting, posted_date_is_before_cutoff
 from scrapper.storage import JobStore
-from scrapper.text import clean_text, has_excluded_contract_signal
+from scrapper.text import clean_text, has_excluded_contract_signal, is_application_destination
 
 PUBLIC_ALGOLIA_KEY_RE = re.compile(r'"ALGOLIA_API_KEY_CLIENT"\s*:\s*"([^"]+)"')
 WINDOW_ENV_MARKER_RE = re.compile(r"window\.env\s*=\s*")
@@ -82,9 +84,14 @@ async def scrape_welcome_to_the_jungle(config: SearchConfig, store: JobStore) ->
         "referer": f"{config.welcome_to_the_jungle.site_url}/",
         "user-agent": config.user_agent,
     }
-    limits = httpx.Limits(max_connections=config.http_max_connections, max_keepalive_connections=config.http_max_connections)
+    limits = httpx.Limits(
+        max_connections=config.http_max_connections, max_keepalive_connections=config.http_max_connections
+    )
     throttle = HostThrottle(config.http_per_host_concurrency, config.http_request_delay_secs)
-    async with httpx.AsyncClient(headers=headers, timeout=30, follow_redirects=True, limits=limits) as client:
+    async with (
+        httpx.AsyncClient(headers=headers, timeout=30, follow_redirects=True, limits=limits) as client,
+        httpx.AsyncClient(timeout=15, follow_redirects=True) as detail_client,
+    ):
         for query in config.queries:
             for center_name, center_lat_lng in _search_centers(config):
                 store.start_search(config.welcome_to_the_jungle.source, query, center_name)
@@ -97,10 +104,7 @@ async def scrape_welcome_to_the_jungle(config: SearchConfig, store: JobStore) ->
                         center_name,
                         config,
                     )
-                    reached_old_jobs = False
                     for page in range(config.custom_max_pages):
-                        if reached_old_jobs:
-                            break
                         payload = {
                             "requests": [
                                 {
@@ -111,7 +115,8 @@ async def scrape_welcome_to_the_jungle(config: SearchConfig, store: JobStore) ->
                                             "hitsPerPage": min(config.results_wanted_per_query, 50),
                                             "page": page,
                                             "aroundLatLng": center_lat_lng,
-                                            "aroundRadius": config.welcome_to_the_jungle.around_radius,
+                                            "aroundRadius": config.welcome_to_the_jungle.around_radius
+                                            or config.distance_km * 1000,
                                             "facetFilters": config.welcome_to_the_jungle.office_country_filter,
                                         },
                                         safe=':,/[]"',
@@ -132,8 +137,8 @@ async def scrape_welcome_to_the_jungle(config: SearchConfig, store: JobStore) ->
                         for hit in hits:
                             seen += 1
                             if posted_date_is_before_cutoff(hit.get("published_at"), cutoff):
-                                reached_old_jobs = True
-                                break
+                                # Algolia ranks by relevance, so later hits can still be recent.
+                                continue
                             offer = _hit_to_offer(hit, query, config)
                             offer.search_location = center_name
                             if not offer.source_url:
@@ -151,9 +156,16 @@ async def scrape_welcome_to_the_jungle(config: SearchConfig, store: JobStore) ->
                                 continue
                             if not location_is_in_scope(offer.location, config.location_scope):
                                 continue
-                            if (
-                                not config.refresh_known_details
-                                and store.source_url_seen(config.welcome_to_the_jungle.source, offer.source_url)
+                            if not config.refresh_known_details and store.source_url_seen(
+                                config.welcome_to_the_jungle.source, offer.source_url
+                            ):
+                                continue
+                            await _enrich_public_detail(detail_client, throttle, offer)
+                            if has_excluded_contract_signal(
+                                offer.title,
+                                offer.employment_type,
+                                offer.description,
+                                config.exclude_terms,
                             ):
                                 continue
                             store.upsert_offer(offer)
@@ -188,10 +200,7 @@ async def scrape_welcome_to_the_jungle(config: SearchConfig, store: JobStore) ->
 
 def _search_centers(config: SearchConfig) -> tuple[tuple[str, str], ...]:
     if config.location_scope.enabled and config.location_scope.centers:
-        return tuple(
-            (center.name, f"{center.latitude},{center.longitude}")
-            for center in config.location_scope.centers
-        )
+        return tuple((center.name, f"{center.latitude},{center.longitude}") for center in config.location_scope.centers)
     return ((config.location_label, config.welcome_to_the_jungle.around_lat_lng),)
 
 
@@ -237,7 +246,7 @@ async def _public_algolia_config(config: SearchConfig) -> WttjAlgoliaConfig | No
     )
 
 
-def _extract_window_env(text: str) -> dict | None:
+def _extract_window_env(text: str) -> dict[str, object] | None:
     marker = WINDOW_ENV_MARKER_RE.search(text)
     if not marker:
         return None
@@ -284,9 +293,14 @@ def _is_placeholder(value: str) -> bool:
     return "<" in value or ">" in value or normalized.startswith("example_")
 
 
-def _hit_to_offer(hit: dict, query: str, config: SearchConfig) -> JobOffer:
-    org = hit.get("organization") or {}
-    office = hit.get("office") or _first(hit.get("offices")) or {}
+def _hit_to_offer(hit: dict[str, object], query: str, config: SearchConfig) -> JobOffer:
+    org = hit.get("organization")
+    org = org if isinstance(org, dict) else {}
+    office = hit.get("office")
+    offices = hit.get("offices")
+    if not office and isinstance(offices, list) and offices:
+        office = offices[0]
+    office = office if isinstance(office, dict) else {}
     org_slug = org.get("slug") or ""
     job_slug = hit.get("slug") or ""
     source_url = (
@@ -294,13 +308,24 @@ def _hit_to_offer(hit: dict, query: str, config: SearchConfig) -> JobOffer:
         if org_slug and job_slug
         else ""
     )
-    contract_names = hit.get("contract_type_names") or {}
+    contract_names = hit.get("contract_type_names")
+    contract_names = contract_names if isinstance(contract_names, dict) else {}
     salary = _salary(hit)
     company_description = _localized((org.get("descriptions") or {}), "fr") or _localized(
         (org.get("descriptions") or {}),
         "en",
     )
-    description = clean_text(hit.get("profile")) or company_description
+    missions = hit.get("key_missions") or ()
+    if isinstance(missions, str):
+        missions = (missions,)
+    elif not isinstance(missions, (list, tuple)):
+        missions = ()
+    description_parts = (
+        clean_text(hit.get("summary")),
+        *(clean_text(mission) for mission in missions),
+        clean_text(hit.get("profile")),
+    )
+    description = "\n\n".join(dict.fromkeys(filter(None, description_parts))) or None
     return JobOffer(
         source=config.welcome_to_the_jungle.source,
         source_id=clean_text(hit.get("objectID") or hit.get("reference")),
@@ -327,22 +352,36 @@ def _hit_to_offer(hit: dict, query: str, config: SearchConfig) -> JobOffer:
     )
 
 
-def _localized(value: dict, locale: str) -> str | None:
-    localized = value.get(locale)
+async def _enrich_public_detail(client: httpx.AsyncClient, throttle: HostThrottle, offer: JobOffer) -> None:
+    try:
+        response = await throttle.get(client, offer.source_url)
+    except httpx.HTTPError:
+        return
+    if response.status_code != 200 or "text/html" not in response.headers.get("content-type", ""):
+        return
+    soup = BeautifulSoup(response.text, "lxml")
+    job = json_ld_jobposting(soup)
+    if job:
+        offer.description = clean_text(job.get("description")) or offer.description
+        offer.direct_url = offer.direct_url or apply_url(soup, offer.source_url)
+
+
+def _localized(value: object, locale: str) -> str | None:
+    localized = value.get(locale) if isinstance(value, dict) else None
     if isinstance(localized, dict):
         return clean_text(localized.get("body") or localized.get("text"))
     return clean_text(localized)
 
 
-def _direct_url(hit: dict) -> str | None:
-    for key in ("apply_url", "application_url", "external_apply_url", "redirect_url", "website"):
+def _direct_url(hit: dict[str, object]) -> str | None:
+    for key in ("apply_url", "application_url", "external_apply_url", "redirect_url"):
         value = clean_text(hit.get(key))
-        if value and value.startswith(("http://", "https://")):
+        if is_application_destination(value):
             return value
     return None
 
 
-def _location(office: dict) -> str | None:
+def _location(office: dict[str, object]) -> str | None:
     return clean_text(
         ", ".join(
             str(part)
@@ -357,7 +396,7 @@ def _location(office: dict) -> str | None:
     )
 
 
-def _salary(hit: dict) -> str | None:
+def _salary(hit: dict[str, object]) -> str | None:
     minimum = hit.get("salary_minimum") or hit.get("salary_yearly_minimum")
     maximum = hit.get("salary_maximum")
     currency = hit.get("salary_currency")
@@ -369,22 +408,18 @@ def _salary(hit: dict) -> str | None:
     return None
 
 
-def _number(value) -> float | None:
+def _number(value: object) -> float | None:
     if value in (None, ""):
         return None
     try:
-        return float(value)
+        return float(cast("str | bytes | bytearray | SupportsFloat | SupportsIndex", value))
     except (TypeError, ValueError):
         return None
 
 
-def _first(value):
-    if isinstance(value, list) and value:
-        return value[0]
-    return None
-
-
-def _is_remote(value) -> bool | None:
+def _is_remote(value: object) -> bool | None:
+    if not isinstance(value, str):
+        return None
     if value in {"fulltime", "partial", "punctual"}:
         return True
     if value == "no":

@@ -111,7 +111,7 @@ class WelcomeToTheJungleConfig(BaseModel):
     algolia_api_key: SecretStr | None = None
     job_index: str
     around_lat_lng: str
-    around_radius: int
+    around_radius: int | None = Field(default=None, gt=0)
     office_country_filter: str
 
 
