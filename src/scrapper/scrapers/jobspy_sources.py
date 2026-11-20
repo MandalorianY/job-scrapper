@@ -85,6 +85,8 @@ def scrape_jobspy_sources(
                 total_searches=total_searches,
             )
             if len(plan.sites) > 1:
+                for site in plan.sites:
+                    store.finish_search(site, plan.query, plan.location, 0, error=str(exc))
                 if progress:
                     progress(
                         f"JobSpy batch failed [{search_index}/{total_searches}]: "
@@ -93,6 +95,7 @@ def scrape_jobspy_sources(
                     )
                 fallback_plans = [plan_for_site for plan_for_site in _solo_plans(plan)]
                 for fallback_index, fallback_plan in enumerate(fallback_plans, start=1):
+                    store.start_search(fallback_plan.sites[0], fallback_plan.query, fallback_plan.location)
                     try:
                         plan_counts = _run_jobspy_plan(
                             fallback_plan,

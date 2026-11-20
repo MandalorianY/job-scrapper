@@ -58,6 +58,9 @@ def run(
     ] = None,
     skip_custom: Annotated[bool, typer.Option("--skip-custom", help="Only run JobSpy sources.")] = False,
     skip_jobspy: Annotated[bool, typer.Option("--skip-jobspy", help="Only run custom Crawlee sources.")] = False,
+    replay_from: Annotated[
+        Path | None, typer.Option(exists=True, dir_okay=False, help="Rebuild from a DuckDB observation archive offline.")
+    ] = None,
     tracker_sync: Annotated[
         bool, typer.Option("--tracker-sync/--no-tracker-sync", help="Fetch and publish the remote tracker.")
     ] = True,
@@ -101,15 +104,19 @@ def run(
         refresh_known_details=config.refresh_known_details,
         log_file=str(configured_log_file) if configured_log_file else None,
     )
-    tracker_sync_hooks = _tracker_sync_hooks() if tracker_sync else None
+    tracker_sync_hooks = _tracker_sync_hooks() if tracker_sync and replay_from is None else None
     sync_exported_tracker: TrackerSync | None = None
     if tracker_sync_hooks:
         fetch_remote_tracker, sync_exported_tracker = tracker_sync_hooks
         fetch_remote_tracker(config)
-    store = _job_store(config)
+    store = _job_store(config, run_id)
     try:
         counts: dict[str, int] = {}
-        if not skip_jobspy and not skip_custom:
+        if replay_from is None and not (skip_jobspy and skip_custom):
+            store.prune_observations()
+        if replay_from is not None:
+            counts["observations_replayed"] = store.replay_observations(replay_from)
+        elif not skip_jobspy and not skip_custom:
             console.print(
                 "[bold]Running JobSpy and custom/free sources in parallel[/bold] "
                 "(separate DuckDB connections)"
@@ -126,7 +133,7 @@ def run(
                 console.print(f"[red]{source} failed:[/red] {error}")
                 log.error("source_failed", source=source, error=error)
             store.close()
-            store = _job_store(config)
+            store = _job_store(config, run_id)
         elif not skip_jobspy:
             console.print("[bold]Running JobSpy sources[/bold] (Indeed, LinkedIn, Glassdoor, Google Jobs)")
             counts.update(
@@ -195,7 +202,7 @@ def run(
         store.close()
 
 
-def _job_store(config: SearchConfig) -> JobStore:
+def _job_store(config: SearchConfig, run_id: str) -> JobStore:
     return JobStore(
         config.database_path,
         source_priority=config.dedupe_source_priority,
@@ -203,6 +210,7 @@ def _job_store(config: SearchConfig) -> JobStore:
         dedupe_primary_fields=config.dedupe_fields.primary,
         dedupe_fallback_fields=config.dedupe_fields.fallback,
         dedupe_description_fields=config.dedupe_fields.description,
+        run_id=run_id,
     )
 
 
@@ -262,7 +270,7 @@ async def _run_all_sources_parallel(
     custom_store: JobStore,
     progress: ProgressReporter | None = None,
 ) -> tuple[dict[str, int], dict[str, str]]:
-    jobspy_task = asyncio.to_thread(_run_jobspy_sources_with_own_store, config, progress)
+    jobspy_task = asyncio.to_thread(_run_jobspy_sources_with_own_store, config, custom_store.run_id, progress)
     custom_task = _run_custom_sources(config, custom_store)
     jobspy_result, custom_result = await asyncio.gather(
         _capture_source_group("jobspy", jobspy_task),
@@ -293,9 +301,10 @@ async def _capture_source_group(
 
 def _run_jobspy_sources_with_own_store(
     config: SearchConfig,
+    run_id: str,
     progress: ProgressReporter | None = None,
 ) -> dict[str, int]:
-    store = _job_store(config)
+    store = _job_store(config, run_id)
     try:
         return scrape_jobspy_sources(config, store, progress=progress)
     finally:
