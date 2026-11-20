@@ -15,14 +15,7 @@ from scrapper.scrapers.common import (
     parse_posted_date,
     posted_date_is_before_cutoff,
 )
-from scrapper.scrapers.web_search import (
-    _company_from_domain,
-    _is_excluded_domain,
-    _is_info_page,
-    _looks_like_job,
-    _looks_regional,
-    _unwrap_ddg,
-)
+from scrapper.scrapers.web_search import _unwrap_ddg
 
 
 def test_json_ld_jobposting_finds_nested_graph_payload() -> None:
@@ -55,20 +48,23 @@ def test_apply_url_prefers_apply_link_and_ignores_share_links() -> None:
     assert apply_url(soup, "https://jobs.example/jobs/1") == "https://ats.example/apply/1"
 
 
-def test_apply_url_ignores_generic_one_tap_form() -> None:
+def test_apply_url_ignores_generic_one_tap_form_and_listing_anchor() -> None:
     soup = BeautifulSoup(
         """
         <html><body>
           <form id="formCustomOneTap" action="/fr-fr/candidat/onetapturbocustom"></form>
+          <form action="/fr-fr/candidat/tooglebookmark">Postuler</form>
           <a href="#postuler">Postuler</a>
+          <a href="/editorial/conseils-candidature/cv.html">Conseils de candidature</a>
+          <a href="/fr/media/guide-candidat">Guide de candidature</a>
+          <a href="/candidat/offres/offre-d-emploi-autre">Assistante marketing</a>
+          <a href="https://company.example/">Voir l'entreprise</a>
         </body></html>
         """,
         "lxml",
     )
 
-    assert apply_url(soup, "https://www.hellowork.com/fr-fr/emplois/1.html") == (
-        "https://www.hellowork.com/fr-fr/emplois/1.html#postuler"
-    )
+    assert apply_url(soup, "https://www.hellowork.com/fr-fr/emplois/1.html") is None
 
 
 def test_apply_url_reads_data_redirect_buttons() -> None:
@@ -125,16 +121,11 @@ def test_custom_search_cutoff_uses_last_success_with_overlap() -> None:
     assert cutoff == datetime(2026, 6, 3, 12, 0, tzinfo=UTC)
 
 
-def test_web_search_url_and_page_classification_helpers() -> None:
+def test_duckduckgo_unwraps_result_redirect() -> None:
     assert (
         _unwrap_ddg("https://duckduckgo.com/l/?uddg=https%3A%2F%2Fcompany.example%2Fjobs%2F1")
         == "https://company.example/jobs/1"
     )
-    assert _is_excluded_domain("https://www.linkedin.com/jobs/view/1")
-    assert _is_info_page("https://example.com/fiches-metier/example-role")
-    assert _company_from_domain("https://jobs.my-company.example/offres/1") == "My Company"
-    assert _looks_like_job("Example coordinator full-time", None)
-    assert _looks_regional(None, "Role based in Grand Toulouse")
 
 
 def test_aggregator_offer_usability_requires_title_contract_and_region() -> None:

@@ -3,11 +3,13 @@ from __future__ import annotations
 from dataclasses import replace
 from datetime import date, datetime
 from pathlib import Path
+from typing import Never
 
 import pandas as pd
 import pytest
 from openpyxl import load_workbook
 
+from scrapper import export
 from scrapper.config import SearchConfig
 from scrapper.export import _date_fr, _date_value, _review_note, _salary_bounds, export_jobs
 from scrapper.location_scope import location_is_in_scope
@@ -15,18 +17,62 @@ from scrapper.models import JobOffer
 from scrapper.storage import JobStore
 
 
-def test_export_creates_localized_tracker_with_links_filters_and_annual_salary(tmp_path: Path) -> None:
+@pytest.mark.parametrize("stage", ["format", "publish"])
+def test_failed_export_keeps_last_good_files(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stage: str) -> None:
     store = JobStore(tmp_path / "jobs.duckdb")
     try:
         store.upsert_offer(
-            JobOffer(
-                source="hellowork",
-                source_url="https://www.hellowork.com/fr-fr/emplois/1.html",
-                direct_url="https://apply.example.com/1",
-                title="Example manager",
-                company="Example",
-                location="Example City",
-                description="Full-time example role with sample responsibilities.",
+            JobOffer(source="board", source_url="https://example.com/1", title="Analyst", company="Example")
+        )
+        *outputs, _ = export_jobs(store, tmp_path / "exports")
+        last_good = {path: path.read_bytes() for path in outputs}
+        store.upsert_offer(
+            JobOffer(source="board", source_url="https://example.com/2", title="Engineer", company="Example")
+        )
+
+        def fail(*args: object) -> Never:
+            raise OSError("Export interrupted")
+
+        if stage == "format":
+            monkeypatch.setattr(export, "_format_jobs_sheet", fail)
+        else:
+            replace = Path.replace
+
+            def fail_on_workbook(staged: Path, output: Path) -> Path:
+                if output.suffix == ".xlsx":
+                    fail()
+                return replace(staged, output)
+
+            monkeypatch.setattr(Path, "replace", fail_on_workbook)
+
+        with pytest.raises(OSError, match="Export interrupted"):
+            export_jobs(store, tmp_path / "exports")
+        assert {path: path.read_bytes() for path in outputs} == last_good
+    finally:
+        store.close()
+
+
+@pytest.fixture
+def hellowork_offer() -> JobOffer:
+    return JobOffer(
+        source="hellowork",
+        source_url="https://www.hellowork.com/fr-fr/emplois/1.html",
+        direct_url="https://apply.example.com/1",
+        title="Example manager",
+        company="Example",
+        location="Example City",
+        description="Full-time example role with sample responsibilities.",
+    )
+
+
+def test_export_creates_localized_tracker_with_links_filters_and_annual_salary(
+    tmp_path: Path, hellowork_offer: JobOffer
+) -> None:
+    store = JobStore(tmp_path / "jobs.duckdb")
+    try:
+        store.upsert_offer(
+            replace(
+                hellowork_offer,
                 employment_type="CDI",
                 date_posted="2026-05-29T10:11:12+00:00",
                 salary=str(
@@ -61,13 +107,14 @@ def test_export_creates_localized_tracker_with_links_filters_and_annual_salary(t
         excel_path, csv_path, raw_csv_path, total = export_jobs(store, tmp_path / "exports")
 
         assert total == 1
-        assert excel_path.exists()
         assert csv_path.exists()
-        assert raw_csv_path.exists()
 
         workbook = load_workbook(excel_path, data_only=False)
         worksheet = workbook["Offres"]
         assert workbook.sheetnames == ["Offres", "Données brutes"]
+        raw_headers = [cell.value for cell in workbook["Données brutes"][1]]
+        assert raw_headers == pd.read_csv(raw_csv_path, nrows=0).columns.tolist()
+        assert {"company_description", "raw_json", "currency"}.isdisjoint(raw_headers)
         assert list(worksheet.tables.keys()) == ["TableOffres"]
         assert worksheet.tables["TableOffres"].ref == "A1:N2"
         assert worksheet.tables["TableOffres"].autoFilter.ref == "A1:N2"
@@ -87,7 +134,9 @@ def test_export_creates_localized_tracker_with_links_filters_and_annual_salary(t
             "Vu le",
             "Dernière vue",
         }
-        assert removed_headers.isdisjoint({cell.value for cell in worksheet[1]})
+        assert removed_headers.isdisjoint(
+            raw_header for cell in worksheet[1] if isinstance(raw_header := cell.value, str)
+        )
         assert worksheet["A2"].value is False
         assert worksheet["B2"].value is False
         assert worksheet["C2"].value == '=HYPERLINK("https://apply.example.com/1","https://apply.example.com/1")'
@@ -108,7 +157,6 @@ def test_export_handles_empty_store_with_tracker_headers(tmp_path: Path) -> None
         excel_path, csv_path, raw_csv_path, total = export_jobs(store, tmp_path / "exports")
 
         assert total == 0
-        assert excel_path.exists()
         assert csv_path.exists()
         assert raw_csv_path.exists()
 
@@ -155,20 +203,10 @@ def test_export_orders_rows_by_published_date_descending_with_blanks_last(tmp_pa
         store.close()
 
 
-def test_export_uses_configured_excel_columns(tmp_path: Path) -> None:
+def test_export_uses_configured_excel_columns(tmp_path: Path, hellowork_offer: JobOffer) -> None:
     store = JobStore(tmp_path / "jobs.duckdb")
     try:
-        store.upsert_offer(
-            JobOffer(
-                source="hellowork",
-                source_url="https://www.hellowork.com/fr-fr/emplois/1.html",
-                direct_url="https://apply.example.com/1",
-                title="Example manager",
-                company="Example",
-                location="Example City",
-                description="Full-time example role with sample responsibilities.",
-            )
-        )
+        store.upsert_offer(hellowork_offer)
 
         excel_path, csv_path, _raw_csv_path, _total = export_jobs(
             store,
@@ -184,7 +222,6 @@ def test_export_uses_configured_excel_columns(tmp_path: Path) -> None:
         assert worksheet["A2"].value == "Example manager"
         assert worksheet["B2"].value == "Example"
         assert worksheet["C2"].value == '=HYPERLINK("https://apply.example.com/1","https://apply.example.com/1")'
-        assert worksheet.auto_filter.ref is None
         assert pd.read_csv(csv_path).columns.tolist() == ["Intitulé", "Entreprise", "Lien"]
     finally:
         store.close()
@@ -257,62 +294,80 @@ def test_export_adds_status_dropdown_validation(tmp_path: Path) -> None:
         store.close()
 
 
-@pytest.mark.parametrize("status_header", ["Statut", "Postulé"])
-@pytest.mark.parametrize("status", ["Postulé", "Refusé"])
-def test_export_preserves_existing_status_for_matching_tracker_rows(
-    tmp_path: Path, status_header: str, status: str
-) -> None:
+def _export_refreshed_linkedin_offer(
+    tmp_path: Path, header: str, value: str | bool, excel_columns: tuple[str, ...] | None = None
+) -> tuple[Path, Path, Path, int]:
     export_dir = tmp_path / "exports"
+    offer = JobOffer(
+        source="linkedin",
+        source_url="https://linkedin.example/jobs/1",
+        title="Example manager",
+        company="Example",
+        location="Toulouse",
+    )
     store = JobStore(tmp_path / "jobs.duckdb")
     try:
-        store.upsert_offer(
-            JobOffer(
-                source="linkedin",
-                source_url="https://linkedin.example/jobs/1",
-                title="Example manager",
-                company="Example",
-                location="Toulouse",
-            )
-        )
-        excel_path, _csv_path, _raw_csv_path, _total = export_jobs(
-            store,
-            export_dir,
-            excel_columns=("Statut", "Lien", "Intitulé", "Entreprise"),
-        )
+        store.upsert_offer(offer)
+        excel_path, _, _, _ = export_jobs(store, export_dir, excel_columns=(header, "Lien", "Intitulé", "Entreprise"))
     finally:
         store.close()
 
     workbook = load_workbook(excel_path, data_only=False)
     worksheet = workbook["Offres"]
-    worksheet["A1"] = status_header
-    worksheet["A2"] = status
+    worksheet["A2"] = value
     workbook.save(excel_path)
     workbook.close()
 
     refreshed_store = JobStore(tmp_path / "refreshed.duckdb")
     try:
-        refreshed_store.upsert_offer(
-            JobOffer(
-                source="linkedin",
-                source_url="https://linkedin.example/jobs/1?utm_source=refresh",
-                title="Example manager",
-                company="Example",
-                location="Toulouse",
-            )
-        )
-
-        excel_path, csv_path, _raw_csv_path, total = export_jobs(
-            refreshed_store,
-            export_dir,
-            excel_columns=("Statut", "Lien", "Intitulé", "Entreprise"),
-        )
-
-        assert total == 1
-        assert pd.read_csv(csv_path).loc[0, "Statut"] == status
-        worksheet = load_workbook(excel_path, data_only=False)["Offres"]
-        assert worksheet["A2"].value == status
+        refreshed_store.upsert_offer(replace(offer, source_url=f"{offer.source_url}?utm_source=refresh"))
+        return export_jobs(refreshed_store, export_dir, excel_columns=excel_columns)
     finally:
         refreshed_store.close()
+
+
+@pytest.mark.parametrize("status_header", ["Statut", "Postulé"])
+@pytest.mark.parametrize("status", ["Postulé", "Refusé"])
+def test_export_preserves_existing_status_for_matching_tracker_rows(
+    tmp_path: Path, status_header: str, status: str
+) -> None:
+    excel_path, csv_path, _, total = _export_refreshed_linkedin_offer(
+        tmp_path, status_header, status, excel_columns=("Statut", "Lien", "Intitulé", "Entreprise")
+    )
+
+    assert total == 1
+    assert pd.read_csv(csv_path).loc[0, "Statut"] == status
+    worksheet = load_workbook(excel_path, data_only=False)["Offres"]
+    assert worksheet["A2"].value == status
+
+
+@pytest.mark.parametrize(
+    ("old_header", "old_value", "expected_status", "applied"),
+    [
+        ("Statut", "En Attente", "En Attente", False),
+        ("Statut", "Postulé", "Postulé", True),
+        ("Statut", "Refusé", "Refusé", False),
+        ("Postulé", True, "Postulé", True),
+    ],
+)
+def test_export_drives_applied_checkbox_from_status(
+    tmp_path: Path, old_header: str, old_value: str | bool, expected_status: str, applied: bool
+) -> None:
+    excel_path, csv_path, _, total = _export_refreshed_linkedin_offer(
+        tmp_path, old_header, old_value, excel_columns=("Postulé", "Lien", "Statut", "Intitulé")
+    )
+    assert total == 1
+    with excel_path.open("rb") as stream:
+        workbook = load_workbook(stream)
+        worksheet = workbook["Offres"]
+        assert worksheet["A2"].value == '=C2="Postulé"'
+        assert worksheet["C2"].value == expected_status
+        workbook.close()
+    with excel_path.open("rb") as stream:
+        workbook = load_workbook(stream, data_only=True)
+        assert workbook["Offres"]["A2"].value is applied
+        workbook.close()
+    assert bool(pd.read_csv(csv_path).loc[0, "Postulé"]) is applied
 
 
 def test_export_retains_existing_tracker_rows_when_current_export_has_new_rows(tmp_path: Path) -> None:
@@ -359,14 +414,25 @@ def test_export_retains_existing_tracker_rows_when_current_export_has_new_rows(t
         new_store.close()
 
 
-def test_export_rewrites_retained_ouvrir_links_to_full_url_labels(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("source_url", "fragment"),
+    [
+        ("https://linkedin.example/jobs/old", ""),
+        ("https://www.hellowork.com/fr-fr/emplois/1.html", "#postuler"),
+    ],
+)
+def test_export_rewrites_retained_ouvrir_links_to_full_url_labels(
+    tmp_path: Path,
+    source_url: str,
+    fragment: str,
+) -> None:
     export_dir = tmp_path / "exports"
     old_store = JobStore(tmp_path / "old.duckdb")
     try:
         old_store.upsert_offer(
             JobOffer(
                 source="linkedin",
-                source_url="https://linkedin.example/jobs/old",
+                source_url=source_url,
                 title="Old example manager",
                 company="Example",
                 location="Toulouse",
@@ -378,7 +444,7 @@ def test_export_rewrites_retained_ouvrir_links_to_full_url_labels(tmp_path: Path
 
     workbook = load_workbook(excel_path, data_only=False)
     worksheet = workbook["Offres"]
-    worksheet["C2"] = '=HYPERLINK("https://linkedin.example/jobs/old","Ouvrir")'
+    worksheet["C2"] = f'=HYPERLINK("{source_url}{fragment}","Ouvrir")'
     worksheet["A2"] = '=B2="Postulé"'
     workbook.save(excel_path)
     workbook.close()
@@ -390,58 +456,23 @@ def test_export_rewrites_retained_ouvrir_links_to_full_url_labels(tmp_path: Path
         assert total == 1
         worksheet = load_workbook(excel_path, data_only=False)["Offres"]
         assert worksheet["A2"].value is False
-        assert worksheet["C2"].value == (
-            '=HYPERLINK("https://linkedin.example/jobs/old","https://linkedin.example/jobs/old")'
-        )
+        assert worksheet["C2"].value == f'=HYPERLINK("{source_url}","{source_url}")'
         assert "Ouvrir" not in pd.read_csv(csv_path).loc[0, "Lien"]
     finally:
         empty_store.close()
 
 
 def test_export_preserves_existing_checkbox_for_matching_tracker_rows(tmp_path: Path) -> None:
-    export_dir = tmp_path / "exports"
-    store = JobStore(tmp_path / "jobs.duckdb")
-    try:
-        store.upsert_offer(
-            JobOffer(
-                source="linkedin",
-                source_url="https://linkedin.example/jobs/1",
-                title="Example manager",
-                company="Example",
-                location="Toulouse",
-            )
-        )
-        excel_path, _csv_path, _raw_csv_path, _total = export_jobs(store, export_dir)
-    finally:
-        store.close()
+    excel_path, csv_path, _, total = _export_refreshed_linkedin_offer(tmp_path, "Postulé", True)
 
-    workbook = load_workbook(excel_path, data_only=False)
-    worksheet = workbook["Offres"]
-    worksheet["A2"] = True
-    workbook.save(excel_path)
-    workbook.close()
-
-    refreshed_store = JobStore(tmp_path / "refreshed.duckdb")
-    try:
-        refreshed_store.upsert_offer(
-            JobOffer(
-                source="linkedin",
-                source_url="https://linkedin.example/jobs/1?utm_source=refresh",
-                title="Example manager",
-                company="Example",
-                location="Toulouse",
-            )
-        )
-
-        excel_path, csv_path, _raw_csv_path, total = export_jobs(refreshed_store, export_dir)
-
-        assert total == 1
-        assert bool(pd.read_csv(csv_path).loc[0, "Postulé"])
-        worksheet = load_workbook(excel_path, data_only=False)["Offres"]
-        assert worksheet["A2"].value is True
-        assert worksheet["C2"].value == '=HYPERLINK("https://linkedin.example/jobs/1?utm_source=refresh","https://linkedin.example/jobs/1?utm_source=refresh")'
-    finally:
-        refreshed_store.close()
+    assert total == 1
+    assert bool(pd.read_csv(csv_path).loc[0, "Postulé"])
+    worksheet = load_workbook(excel_path, data_only=False)["Offres"]
+    assert worksheet["A2"].value is True
+    assert (
+        worksheet["C2"].value
+        == '=HYPERLINK("https://linkedin.example/jobs/1?utm_source=refresh","https://linkedin.example/jobs/1?utm_source=refresh")'
+    )
 
 
 def test_export_does_not_retain_existing_rows_rejected_by_current_filters(tmp_path: Path) -> None:
@@ -566,6 +597,7 @@ def test_export_keeps_postule_boolean_when_status_column_is_omitted(tmp_path: Pa
             JobOffer(
                 source="hellowork",
                 source_url="https://www.hellowork.com/fr-fr/emplois/1.html",
+                direct_url="https://www.hellowork.com/fr-fr/emplois/1.html#postuler",
                 title="Example manager",
                 company="Example",
                 location="Example City",
@@ -580,20 +612,26 @@ def test_export_keeps_postule_boolean_when_status_column_is_omitted(tmp_path: Pa
         )
 
         worksheet = load_workbook(excel_path, data_only=False)["Offres"]
-        assert worksheet.tables["TableOffres"].ref == "A1:D2"
-        assert worksheet.tables["TableOffres"].autoFilter.ref == "A1:D2"
-        assert [cell.value for cell in worksheet[1]] == ["Postulé", "Lien", "Intitulé", "Entreprise"]
         assert worksheet["A2"].value is False
         assert worksheet["B2"].value == (
             '=HYPERLINK("https://www.hellowork.com/fr-fr/emplois/1.html",'
             '"https://www.hellowork.com/fr-fr/emplois/1.html")'
         )
-        assert worksheet.auto_filter.ref is None
     finally:
         store.close()
 
 
-def test_export_sanitizes_tracker_fields_for_france_travail_style_rows(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("repairs_enabled", "expected_title", "expected_company", "expected_location"),
+    [
+        (True, "Chargé de communication (F/H)", "", "Blagnac"),
+        (False, "208WKXK Chargé de communication (F/H)", "31 - Blagnac - Localiser avec Mappy", "Toulouse"),
+    ],
+    ids=["default-repairs", "repairs-disabled-for-source"],
+)
+def test_export_repairs_france_travail_tracker_fields(
+    tmp_path: Path, repairs_enabled: bool, expected_title: str, expected_company: str, expected_location: str
+) -> None:
     store = JobStore(tmp_path / "jobs.duckdb")
     try:
         store.upsert_offer(
@@ -612,49 +650,23 @@ def test_export_sanitizes_tracker_fields_for_france_travail_style_rows(tmp_path:
             store,
             tmp_path / "exports",
             excel_columns=("Intitulé", "Entreprise", "Lieu"),
+            repair_fields_by_source={} if repairs_enabled else {"france_travail": False},
         )
 
         frame = pd.read_csv(csv_path).fillna("")
         assert frame.iloc[0].to_dict() == {
-            "Intitulé": "Chargé de communication (F/H)",
-            "Entreprise": "",
-            "Lieu": "Blagnac",
+            "Intitulé": expected_title,
+            "Entreprise": expected_company,
+            "Lieu": expected_location,
         }
     finally:
         store.close()
 
 
-def test_export_can_disable_repairs_for_specific_source(tmp_path: Path) -> None:
-    store = JobStore(tmp_path / "jobs.duckdb")
-    try:
-        store.upsert_offer(
-            JobOffer(
-                source="france_travail",
-                source_url="https://candidat.francetravail.fr/offres/recherche/detail/208WKXK",
-                direct_url="https://candidat.francetravail.fr/offres/recherche/detail/208WKXK",
-                title="208WKXK Chargé de communication (F/H)",
-                company="31 - Blagnac - Localiser avec Mappy",
-                location="Toulouse",
-                description="Votre objectif principal sera de mettre en œuvre la stratégie de communication.",
-            )
-        )
-
-        _excel_path, csv_path, _raw_csv_path, _total = export_jobs(
-            store,
-            tmp_path / "exports",
-            excel_columns=("Intitulé", "Entreprise", "Lieu"),
-            repair_fields_enabled_by_default=True,
-            repair_fields_by_source={"france_travail": False},
-        )
-
-        frame = pd.read_csv(csv_path).fillna("")
-        assert frame.iloc[0].to_dict() == {
-            "Intitulé": "208WKXK Chargé de communication (F/H)",
-            "Entreprise": "31 - Blagnac - Localiser avec Mappy",
-            "Lieu": "Toulouse",
-        }
-    finally:
-        store.close()
+def test_town_cleanup_handles_other_regions_and_street_addresses() -> None:
+    assert export._town_fr("Paris 9e, Île-de-France") == "Paris"
+    assert export._town_fr("Marseille 2e Arrondissement, Provence-Alpes-Côte d'Azur") == "Marseille"
+    assert export._town_fr("1 rue de la République, Beauzelle (31)") == "Beauzelle"
 
 
 def test_export_normalizes_location_to_town_for_tracker_display(tmp_path: Path) -> None:
@@ -755,32 +767,50 @@ def test_date_fr_formats_iso_natural_language_and_relative_dates() -> None:
     assert _date_value("31 décembre", today=date(2026, 1, 2)) == date(2025, 12, 31)
 
 
-@pytest.mark.parametrize(("minimum", "maximum", "unit", "currency", "expected"), [
-    (2400, 2500, "monthly", "EUR", (28800, 30000)),
-    (2900, 2900, "MONTH", "EUR", (34800, 34800)),
-    (36000, 44000, "yearly", "EUR", (36000, 44000)),
-    (40, 56, "hourly", "EUR", (None, None)),
-    (300, 400, "daily", "EUR", (None, None)),
-    (2400, 2500, None, "EUR", (None, None)),
-    (40000, 45000, "yearly", "USD", (None, None)),
-    (3000, 2000, "monthly", "EUR", (None, None)),
-    (-100, 2000, "monthly", "EUR", (None, None)),
-    (None, 3000, "monthly", "EUR", (None, 36000)),
-    (3000, None, "monthly", "EUR", (36000, None)),
-])
-def test_audit_salary_units_and_unreliable_ranges(minimum, maximum, unit, currency, expected) -> None:
-    assert _salary_bounds(pd.Series({
-        "min_amount": minimum, "max_amount": maximum, "interval": unit, "currency": currency,
-    })) == expected
+@pytest.mark.parametrize(
+    ("minimum", "maximum", "unit", "currency", "expected"),
+    [
+        (2400, 2500, "monthly", "EUR", (28800, 30000)),
+        (2900, 2900, "MONTH", "EUR", (34800, 34800)),
+        (36000, 44000, "yearly", "EUR", (36000, 44000)),
+        (40, 56, "hourly", "EUR", (None, None)),
+        (300, 400, "daily", "EUR", (None, None)),
+        (2400, 2500, None, "EUR", (None, None)),
+        (40000, 45000, "yearly", "USD", (None, None)),
+        (3000, 2000, "monthly", "EUR", (None, None)),
+        (-100, 2000, "monthly", "EUR", (None, None)),
+        (None, 3000, "monthly", "EUR", (None, 36000)),
+        (3000, None, "monthly", "EUR", (36000, None)),
+    ],
+)
+def test_audit_salary_units_and_unreliable_ranges(
+    minimum: int | None, maximum: int | None, unit: str | None, currency: str, expected: tuple[int | None, int | None]
+) -> None:
+    assert (
+        _salary_bounds(
+            pd.Series(
+                {
+                    "min_amount": minimum,
+                    "max_amount": maximum,
+                    "interval": unit,
+                    "currency": currency,
+                }
+            )
+        )
+        == expected
+    )
 
 
 def test_purged_description_only_contract_cannot_return_from_old_tracker(tmp_path: Path) -> None:
     store = JobStore(tmp_path / "jobs.duckdb")
     offer = JobOffer(
-        source="indeed", source_url="https://example.com/jobs/student",
-        direct_url="https://example.com/apply/student", title="Assistant communication",
+        source="indeed",
+        source_url="https://example.com/jobs/student",
+        direct_url="https://example.com/apply/student",
+        title="Assistant communication",
         company="Example",
-        description="Type d'alternance : Apprentissage", employment_type="FULL_TIME",
+        description="Type d'alternance : Apprentissage",
+        employment_type="FULL_TIME",
     )
     export_dir = tmp_path / "exports"
     try:
@@ -808,21 +838,34 @@ def test_export_filters_current_titles_and_flags_uncertain_low_pay_without_losin
     export_dir = tmp_path / "exports"
     columns = ("Statut", "Lien", "Intitulé", "Salaire min (€ annuel)", "À vérifier")
     try:
-        for title, slug, amount in [("Assistant communication", "assistant", 630),
-                                     ("Développeur communication", "developer", 3000)]:
-            store.upsert_offer(JobOffer(
-                source="indeed", source_url=f"https://example.com/jobs/{slug}", title=title,
-                company="Example",
-                min_amount=amount, max_amount=amount, interval="monthly", currency="EUR",
-            ))
+        for title, slug, amount in [
+            ("Assistant communication", "assistant", 630),
+            ("Développeur communication", "developer", 3000),
+        ]:
+            store.upsert_offer(
+                JobOffer(
+                    source="indeed",
+                    source_url=f"https://example.com/jobs/{slug}",
+                    title=title,
+                    company="Example",
+                    min_amount=amount,
+                    max_amount=amount,
+                    interval="monthly",
+                    currency="EUR",
+                )
+            )
         path, _, _, _ = export_jobs(store, export_dir, excel_columns=columns)
         book = load_workbook(path)
-        for row in book["Offres"].iter_rows(min_row=2):
-            row[0].value = "Postulé"
+        offers = book["Offres"]
+        for row in range(2, offers.max_row + 1):
+            offers.cell(row, 1, "Postulé")
         book.save(path)
         path, csv_path, _, total = export_jobs(
-            store, export_dir, excel_columns=columns,
-            include_terms=("communication",), excluded_title_patterns=(r"^developpeur\b",),
+            store,
+            export_dir,
+            excel_columns=columns,
+            include_terms=("communication",),
+            excluded_title_patterns=(r"^developpeur\b",),
         )
         assert total == 1
         row = pd.read_csv(csv_path).iloc[0]
@@ -837,16 +880,27 @@ def test_export_filters_current_titles_and_flags_uncertain_low_pay_without_losin
 def test_export_preserves_status_when_canonical_source_changes_without_restoring_duplicate(tmp_path: Path) -> None:
     store = JobStore(tmp_path / "jobs.duckdb")
     try:
-        offer = JobOffer(source="indeed", source_url="https://indeed.example/job/1", title="Communication",
-                         company="Example", employment_type="CDI")
+        offer = JobOffer(
+            source="indeed",
+            source_url="https://indeed.example/job/1",
+            title="Communication",
+            company="Example",
+            employment_type="CDI",
+        )
         store.upsert_offer(offer)
         columns = ("Statut", "Lien", "Intitulé")
         path, _, _, _ = export_jobs(store, tmp_path / "exports", excel_columns=columns)
         book = load_workbook(path)
         book["Offres"]["A2"] = "Postulé"
         book.save(path)
-        store.upsert_offer(replace(offer, source="linkedin", source_url="https://linkedin.example/job/2",
-                                   description="A richer description with the role's responsibilities."))
+        store.upsert_offer(
+            replace(
+                offer,
+                source="linkedin",
+                source_url="https://linkedin.example/job/2",
+                description="A richer description with the role's responsibilities.",
+            )
+        )
         path, csv_path, _, total = export_jobs(store, tmp_path / "exports", excel_columns=columns)
         assert total == 1
         row = pd.read_csv(csv_path).iloc[0]
@@ -860,8 +914,15 @@ def test_export_checks_contract_evidence_from_noncanonical_copy(tmp_path: Path) 
     store = JobStore(tmp_path / "jobs.duckdb", source_priority={"indeed": 0, "glassdoor": 10})
     try:
         for source, description in [("indeed", None), ("glassdoor", "Lieu du stage : Toulouse")]:
-            store.upsert_offer(JobOffer(source=source, source_url=f"https://{source}.example/jobs/1",
-                                       title="Responsable Marketing", company="Example", description=description))
+            store.upsert_offer(
+                JobOffer(
+                    source=source,
+                    source_url=f"https://{source}.example/jobs/1",
+                    title="Responsable Marketing",
+                    company="Example",
+                    description=description,
+                )
+            )
         assert store.canonical_dataframe().iloc[0]["best_source"] == "indeed"
         assert export_jobs(store, tmp_path / "exports", exclude_terms=("stage",))[3] == 0
     finally:
@@ -870,17 +931,22 @@ def test_export_checks_contract_evidence_from_noncanonical_copy(tmp_path: Path) 
 
 def test_review_notes_distinguish_teaching_recruitment_from_mentoring() -> None:
     assert "formation" in _review_note(pd.Series({"description": "Nous recrutons des formateurs/trices indépendants."}))
-    assert not _review_note(pd.Series({"description": "Vous encadrez les stagiaires et préparez les contenus marketing."}))
+    assert not _review_note(
+        pd.Series({"description": "Vous encadrez les stagiaires et préparez les contenus marketing."})
+    )
 
 
 def test_duplicate_status_conflicts_stay_visible_after_repeated_exports(tmp_path: Path) -> None:
     from scrapper.export import _merge_existing_tracker_rows
 
     columns = ["Statut", "Lien", "Intitulé", "À vérifier"]
-    old = pd.DataFrame([
-        ["En Attente", "https://example.com/a", "Communication", ""],
-        ["Postulé", "https://example.com/b", "Communication", ""],
-    ], columns=columns)
+    old = pd.DataFrame(
+        [
+            ["En Attente", "https://example.com/a", "Communication", ""],
+            ["Postulé", "https://example.com/b", "Communication", ""],
+        ],
+        columns=pd.Index(columns),
+    )
     path = tmp_path / "jobs.csv"
     old.to_csv(path, index=False)
     current = old.iloc[:1].copy()

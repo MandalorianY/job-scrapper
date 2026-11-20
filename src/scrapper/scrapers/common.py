@@ -5,21 +5,24 @@ import re
 from collections.abc import Iterable
 from datetime import UTC, datetime, timedelta
 from typing import Any
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urldefrag, urljoin, urlparse
 
 from bs4 import BeautifulSoup, Tag
 
 from scrapper.dates import parse_posted_date
-from scrapper.text import clean_text
+from scrapper.text import clean_text, is_application_destination
 
 APPLY_SIGNAL_RE = re.compile(
-    r"\b(?:apply|application|postul\w*|candid\w*|rejoindre|join)\b",
+    r"\b(?:apply|application|postul\w*|candidatur\w*|candidater|rejoindre|join)\b",
     re.IGNORECASE,
 )
 NON_APPLY_SIGNAL_RE = re.compile(
-    r"\b(?:share|partage|facebook|twitter|linkedin|whatsapp|mailto|alerte|alert|saved?|favori|login|connexion|onetap|bookmark)\b",
+    r"\b(?:share|partage|facebook|twitter|linkedin|whatsapp|mailto|alerte|alert|saved?|"
+    r"favori|login|connexion|onetap\w*|\w*bookmark|guide-candidat|conseils-candidature|placement|cvtheque\w*)\b",
     re.IGNORECASE,
 )
+
+
 def absolutize(base_url: str, href: str | None) -> str | None:
     if not href:
         return None
@@ -30,6 +33,7 @@ def absolutize(base_url: str, href: str | None) -> str | None:
 
 def apply_url(soup: BeautifulSoup | Tag, page_url: str) -> str | None:
     candidates: list[tuple[int, str]] = []
+    listing_url = urldefrag(page_url).url
     for node in soup.select("a[href], form[action], [data-redirect]"):
         if node.has_attr("data-redirect"):
             href = node.get("data-redirect")
@@ -38,16 +42,20 @@ def apply_url(soup: BeautifulSoup | Tag, page_url: str) -> str | None:
         else:
             href = node.get("action")
         url = absolutize(page_url, str(href) if href else None)
-        if not url or not _is_candidate_apply_url(url):
+        if not url or urldefrag(url).url == listing_url or not is_application_destination(url):
             continue
-        signal = _apply_signal_text(node, url)
-        if NON_APPLY_SIGNAL_RE.search(signal):
+        signal = _apply_signal_text(node)
+        path = urlparse(url).path
+        if NON_APPLY_SIGNAL_RE.search(f"{signal} {path}"):
             continue
-        score = _apply_score(signal, url, page_url)
+        if not APPLY_SIGNAL_RE.search(signal) and not (
+            node.name == "form" and APPLY_SIGNAL_RE.search(path)
+        ):
+            continue
+        score = _apply_score(url, page_url)
         if node.name == "a":
             score += 10
-        if score > 0:
-            candidates.append((score, url))
+        candidates.append((score, url))
     if not candidates:
         return None
     return max(candidates, key=lambda item: item[0])[1]
@@ -63,29 +71,17 @@ def first_text(soup: BeautifulSoup | Tag, selectors: Iterable[str]) -> str | Non
     return None
 
 
-def _is_candidate_apply_url(url: str) -> bool:
-    parsed = urlparse(url)
-    return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
-
-
-def _apply_signal_text(node: Tag, url: str) -> str:
+def _apply_signal_text(node: Tag) -> str:
     values = [
         node.get_text(" "),
-        url,
         str(node.get("aria-label") or ""),
         str(node.get("title") or ""),
-        str(node.get("id") or ""),
-        " ".join(str(value) for value in node.get("class", [])),
-        str(node.get("data-testid") or ""),
-        str(node.get("data-cy") or ""),
     ]
     return " ".join(values)
 
 
-def _apply_score(signal: str, url: str, page_url: str) -> int:
+def _apply_score(url: str, page_url: str) -> int:
     score = 0
-    if APPLY_SIGNAL_RE.search(signal):
-        score += 100
     if APPLY_SIGNAL_RE.search(url):
         score += 40
     if urlparse(url).netloc.lower() != urlparse(page_url).netloc.lower():
