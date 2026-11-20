@@ -210,6 +210,7 @@ class Settings(BaseSettings):
     dedupe_source_priority: dict[str, int] = Field(default_factory=dict)
     dedupe_default_source_priority: int = 100
     default_hours_old: int
+    jobspy_batch_sites: bool = True
     jobspy_hours_old_override: int | None = None
     overlap_hours: int
     results_wanted_per_query: int
