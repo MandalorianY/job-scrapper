@@ -75,6 +75,14 @@ class SearchEnginesConfig(BaseModel):
     gl: str
     hl: str
 
+    @field_validator("google_domain")
+    @classmethod
+    def _validate_google_domain(cls, value: str) -> str:
+        value = value.strip().lower().removeprefix("www.")
+        if not re.fullmatch(r"google\.[a-z]{2,}(?:\.[a-z]{2,})?", value):
+            raise ValueError("Expected a Google hostname, such as google.fr")
+        return value
+
 
 class JobspyConfig(BaseModel):
     google_zero_results_error: str
@@ -91,18 +99,8 @@ class HttpConfig(BaseModel):
 
 
 class WebSearchConfig(BaseModel):
-    source: str
     duckduckgo_html_url: str
-    query_template: str
-    excluded_domains: tuple[str, ...]
     location_terms: tuple[str, ...]
-    info_path_markers: tuple[str, ...]
-    job_signal_terms: tuple[str, ...]
-
-
-class HelloworkConfig(BaseModel):
-    source: str
-    base_url: str
 
 
 class WelcomeToTheJungleConfig(BaseModel):
@@ -259,11 +257,7 @@ class Settings(BaseSettings):
     web_search_max_results_per_query: int
     web_search_max_detail_pages: int
     refresh_known_details: bool
-    request_delay_secs: float
     custom_source_concurrency: int = 4
-    crawlee_min_concurrency: int = 1
-    crawlee_desired_concurrency: int = 2
-    crawlee_max_concurrency: int = 4
     http_max_connections: int = 12
     http_per_host_concurrency: int = 2
     http_request_delay_secs: float = 0.25
@@ -275,7 +269,6 @@ class Settings(BaseSettings):
     search_engines: SearchEnginesConfig
     jobspy: JobspyConfig
     web_search: WebSearchConfig
-    hellowork: HelloworkConfig
     welcome_to_the_jungle: WelcomeToTheJungleConfig
     aggregators: AggregatorConfig
 
@@ -379,6 +372,9 @@ class Settings(BaseSettings):
 
     def is_source_enabled(self, source: str) -> bool:
         return self.enabled_sources.get(source, True)
+
+    def is_custom_source_enabled(self, source: str) -> bool:
+        return source in self.custom_sites and self.is_source_enabled(source)
 
     @field_validator("excluded_title_patterns")
     @classmethod

@@ -25,12 +25,17 @@ def test_bing_rejects_invalid_redirects(href: str | None) -> None:
 def test_free_search_uses_bing_after_blocked_google_and_duckduckgo() -> None:
     target = "https://jobs.example/offre/123"
     encoded = base64.urlsafe_b64encode(target.encode()).decode().rstrip("=")
+    config = SearchConfig()
+    query = 'site:jobs.example "chargé de communication" emploi CDI "Toulouse, France" -stage -alternance'
 
     def respond(request: httpx.Request) -> httpx.Response:
-        if request.url.host == "www.google.com":
+        if request.url.host == f"www.{config.search_engines.google_domain}":
+            assert request.url.params["q"] == query
             return httpx.Response(429)
         if "duckduckgo" in request.url.host:
+            assert request.url.params["q"] == query
             return httpx.Response(202, text='<form id="challenge-form"></form>')
+        assert request.url.params["q"] == query
         return httpx.Response(200, text=(
             f'<li class="b_algo"><h2><a href="https://www.bing.com/ck/a?u=a1{encoded}">'
             'Communication</a></h2><p>Job in Toulouse</p></li>'
@@ -38,15 +43,30 @@ def test_free_search_uses_bing_after_blocked_google_and_duckduckgo() -> None:
 
     async def run():
         async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
-            return await web_search._search(client, "communication Toulouse", 3, SearchConfig())
+            return await web_search._search(client, query, 3, config)
 
     assert asyncio.run(run()) == [web_search.SearchResult(target, "Communication", "Job in Toulouse")]
 
 
+def test_free_google_search_uses_configured_domain() -> None:
+    def respond(request: httpx.Request) -> httpx.Response:
+        assert request.url.host == "www.google.co.uk"
+        return httpx.Response(200, text='<a href="https://jobs.example/job/1"><h3>Job title</h3></a>')
+
+    async def run():
+        config = SearchConfig(search_engines={"google_domain": "www.google.co.uk"})
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+            return await web_search._search_google(client, "example role", 1, config)
+
+    assert [result.url for result in asyncio.run(run())] == ["https://jobs.example/job/1"]
+
+
 @pytest.mark.parametrize("bing_blocked", [True, False])
 def test_free_search_distinguishes_total_failure_from_successful_empty_search(bing_blocked: bool) -> None:
+    config = SearchConfig()
+
     def respond(request: httpx.Request) -> httpx.Response:
-        if request.url.host == "www.google.com":
+        if request.url.host == f"www.{config.search_engines.google_domain}":
             return httpx.Response(429)
         if "duckduckgo" in request.url.host:
             return httpx.Response(202, text="challenge")
@@ -54,30 +74,10 @@ def test_free_search_distinguishes_total_failure_from_successful_empty_search(bi
 
     async def run():
         async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
-            return await web_search._search(client, "communication Toulouse", 3, SearchConfig())
+            return await web_search._search(client, "communication Toulouse", 3, config)
 
     if bing_blocked:
         with pytest.raises(web_search.SearchUnavailableError, match="All free search providers failed"):
             asyncio.run(run())
     else:
         assert asyncio.run(run()) == []
-
-
-@pytest.mark.parametrize(
-    ("url", "accepted"),
-    [("https://en.wikipedia.org/wiki/Communication", False),
-     ("https://example.org/articles/communication", False),
-     ("https://example.org/jobs/communication-123", True)],
-)
-def test_web_search_requires_listing_evidence_beyond_job_keywords(url: str, accepted: bool) -> None:
-    html = '<h1>Chargé de communication</h1><main>Communication à Toulouse. CDI, emploi, poste.</main>'
-
-    async def run():
-        transport = httpx.MockTransport(lambda _: httpx.Response(200, text=html, headers={"content-type": "text/html"}))
-        async with httpx.AsyncClient(transport=transport) as client:
-            return await web_search._extract_offer(
-                client, web_search.SearchResult(url, "Communication", None), "communication", "Toulouse",
-                SearchConfig(location_scope={"enabled": False}),
-            )
-
-    assert (asyncio.run(run()) is not None) is accepted

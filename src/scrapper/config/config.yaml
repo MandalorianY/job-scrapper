@@ -92,11 +92,7 @@ custom_max_detail_pages: 80
 web_search_max_results_per_query: 8
 web_search_max_detail_pages: 50
 refresh_known_details: false
-request_delay_secs: 1.5
 custom_source_concurrency: 4
-crawlee_min_concurrency: 1
-crawlee_desired_concurrency: 2
-crawlee_max_concurrency: 4
 http_max_connections: 12
 http_per_host_concurrency: 2
 http_request_delay_secs: 0.25
@@ -153,11 +149,10 @@ jobspy_sites:
   - linkedin
   - glassdoor
   - google
+  - hellowork
 
 custom_sites:
-  - hellowork
   - welcome_to_the_jungle
-  - web_search
   - aggregators
 
 # Optional per-source switches. Any source omitted here stays enabled.
@@ -169,7 +164,6 @@ enabled_sources:
   google: true
   hellowork: true
   welcome_to_the_jungle: true
-  web_search: true
   aggregators: true
   example_direct_board: true
   emploi_territorial: true
@@ -211,6 +205,7 @@ dedupe_source_priority:
 # 7. HTTP Defaults
 # =============================================================================
 
+# Direct HTTP requests use this value. JobSpy uses its own user agents.
 user_agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0 Safari/537.36
 extra_headers: {}
 
@@ -245,21 +240,11 @@ jobspy:
   glassdoor_location_override: Toulouse
 
 # =============================================================================
-# 10. Web Search
+# 10. Site-Scoped Search Helpers
 # =============================================================================
 
 web_search:
-  source: web_search
   duckduckgo_html_url: https://html.duckduckgo.com/html/
-  query_template: '"{query}" emploi CDI "{location}" -stage -alternance -apprentissage -stagiaire'
-  excluded_domains:
-    - hellowork.com
-    - indeed.com
-    - linkedin.com
-    - welcometothejungle.com
-    - glassdoor.
-    - google.
-    - duckduckgo.com
   location_terms:
     - toulouse
     - blagnac
@@ -268,36 +253,10 @@ web_search:
     - metropole de toulouse
     - agglomération toulousaine
     - agglomeration toulousaine
-  info_path_markers:
-    - fiche-metier
-    - fiches-metier
-    - /metier
-    - /metiers
-    - /guides/
-    - /guide/
-    - /salaire
-    - /formation
-  job_signal_terms:
-    - full-time
-    - job
-    - role
-    - hiring
-    - opening
-    - cdi
-    - cdd
-    - emploi
-    - recrute
-    - recrutons
-    - poste
-    - offre
 
 # =============================================================================
 # 11. Direct Custom Sources
 # =============================================================================
-
-hellowork:
-  source: hellowork
-  base_url: https://www.hellowork.com
 
 welcome_to_the_jungle:
   source: welcome_to_the_jungle
