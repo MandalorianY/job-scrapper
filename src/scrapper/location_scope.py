@@ -16,8 +16,10 @@ class LocationCenter(Protocol):
 class LocationScope(Protocol):
     enabled: bool
     radius_km: float
-    centers: tuple[LocationCenter, ...]
     city_coordinates: dict[str, tuple[float, float]]
+
+    @property
+    def centers(self) -> tuple[LocationCenter, ...]: ...
 
 
 def location_is_in_scope(location: object | None, scope: LocationScope) -> bool:
@@ -29,10 +31,12 @@ def location_is_in_scope(location: object | None, scope: LocationScope) -> bool:
 
     coordinates = _coordinate_lookup(scope)
     matched = _matched_coordinates(text, coordinates)
+    return any(coordinates_are_in_scope(city, scope) for city in matched)
+
+
+def coordinates_are_in_scope(location: tuple[float, float], scope: LocationScope) -> bool:
     return any(
-        _distance_km(city_coordinates, (center.latitude, center.longitude)) <= scope.radius_km
-        for city_coordinates in matched
-        for center in scope.centers
+        _distance_km(location, (center.latitude, center.longitude)) <= scope.radius_km for center in scope.centers
     )
 
 
@@ -65,10 +69,7 @@ def _distance_km(left: tuple[float, float], right: tuple[float, float]) -> float
     right_lat, right_lon = math.radians(right[0]), math.radians(right[1])
     delta_lat = right_lat - left_lat
     delta_lon = right_lon - left_lon
-    haversine = (
-        math.sin(delta_lat / 2) ** 2
-        + math.cos(left_lat) * math.cos(right_lat) * math.sin(delta_lon / 2) ** 2
-    )
+    haversine = math.sin(delta_lat / 2) ** 2 + math.cos(left_lat) * math.cos(right_lat) * math.sin(delta_lon / 2) ** 2
     return 2 * radius_km * math.asin(math.sqrt(haversine))
 
 
