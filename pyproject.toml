@@ -35,8 +35,13 @@ dependencies = [
 ]
 
 [project.scripts]
-job-scrapper = "scrapper.cli:app"
+job-scrapper = "scrapper.cli:main"
 job-scrapper-install-timer = "scrapper.scheduling:main"
+
+[project.optional-dependencies]
+ods = [
+    "odfpy>=1.4.1",
+]
 
 [build-system]
 requires = ["hatchling"]
@@ -81,7 +86,7 @@ source = ["src/scrapper"]
 omit = [
     "src/scrapper/__init__.py",
     "src/scrapper/cli.py",
-    "src/scrapper/scrapers/*.py",
+    "src/scrapper/scrapers/**/*.py",
 ]
 
 [tool.coverage.report]
@@ -111,13 +116,23 @@ type = "uv"
 locked = true
 
 [tool.poe.tasks]
-lint = "ruff check ."
+lint = ["_ruff", "_format_check"]
+_ruff = "ruff check ."
+_format_check = "ruff format --check ."
+typecheck = ["_pyright_windows", "_pyright_linux", "_pyright_macos"]
+_pyright_windows = "pyright --warnings --pythonplatform Windows ."
+_pyright_linux = "pyright --warnings --pythonplatform Linux ."
+_pyright_macos = "pyright --warnings --pythonplatform Darwin ."
 test = ["lint", "_pytest"]
 _pytest = {cmd = "pytest -vv", env = {PROFILE = "local"}, executor = {group = "test"}}
 format = [{cmd = "ruff check . --fix"}, {cmd = "ruff format ."}]
 
+[tool.poe.tasks.check]
+sequence = ["lint", "typecheck", "_pytest"]
+env = {SCRAPPER_DISABLE_LOCAL_CONFIG = "1", SCRAPPER_RUN_REAL_SMOKE = "0", PYTHONUTF8 = "1", UV_NO_SYNC = "1"}
+
 [dependency-groups]
-dev = [{include-group = "lint"}, "poethepoet>=0.49.0"]
+dev = [{include-group = "lint"}, "poethepoet>=0.49.0", "pyright>=1.1.414"]
 lint = ["ruff>=0.17.6"]
 release = ["pyinstaller>=6.22.3"]
 test = [

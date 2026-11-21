@@ -29,7 +29,7 @@ exports/
 /jobs.xlsx
 trouve-un-travail/
 .crawlee_storage/
-storage/
+/storage/
 
 # Local configuration (secrets)
 .env

@@ -1,22 +1,27 @@
-"""Rclone sync for the Excel application tracker."""
+"""Rclone sync for the primary application tracker."""
 
 from __future__ import annotations
 
 import argparse
+import errno
 import shutil
 import subprocess
+import sys
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from hashlib import file_digest
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from tempfile import TemporaryDirectory, mkdtemp
 from uuid import uuid4
 
-from openpyxl import Workbook, load_workbook
 from pydantic import BaseModel
 
 from scrapper.cli import run
 from scrapper.config import SearchConfig
-from scrapper.export import _publish_exports
+from scrapper.export import export_paths
+from scrapper.export.jobs import _publish_exports, read_tracker, tracker_paths
+from scrapper.export.tracker import LOCALIZED_TRACKER_COLUMNS
 
 
 class SyncError(Exception):
@@ -35,21 +40,24 @@ class Remote:
     target: str
 
     @classmethod
-    def connect(cls, target: str | None) -> Remote:
+    def connect(cls, target: str | None, suffix: str) -> Remote:
         executable = shutil.which("rclone")
         if executable is None:
             raise SyncError("Please install rclone, then run rclone config to set up a remote.")
+        example = f"REMOTE:folder/jobs{suffix}"
         if not target:
-            raise SyncError("Set a destination with --enable REMOTE:path/workbook.xlsx.")
+            raise SyncError(f"Set a destination with --enable {example}.")
         name, separator, path = target.partition(":")
+        if sys.platform == "win32" and len(name) == 1 and name.isascii() and name.isalpha():
+            raise SyncError("On Windows, use an rclone remote name with more than one letter to avoid drive letters.")
         if (
             not separator
             or not name
             or target.startswith("-")
             or path.endswith("/")
-            or Path(path).suffix.lower() != ".xlsx"
+            or PurePosixPath(path).suffix.lower() != suffix
         ):
-            raise SyncError("Use a named rclone remote and an .xlsx path, such as REMOTE:folder/workbook.xlsx.")
+            raise SyncError(f"Set a named rclone destination matching the first export format with --enable {example}.")
         remote = cls(executable, target)
         configured = remote.call("listremotes")
         if configured is None or f"{name}:" not in configured.splitlines():
@@ -63,7 +71,14 @@ class Remote:
 
     def call(self, *args: str, allow_missing: bool = False) -> str | None:
         try:
-            result = subprocess.run([self.executable, *args], capture_output=True, text=True, timeout=120, check=False)
+            result = subprocess.run(
+                [self.executable, *args],
+                capture_output=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=120,
+                check=False,
+            )
         except (OSError, subprocess.TimeoutExpired) as exc:
             raise SyncError(f"rclone {args[0]} failed: {exc}") from exc
         if result.returncode == 0:
@@ -76,19 +91,19 @@ class Remote:
     def fetch(self, path: Path) -> None:
         if self.call("copyto", self.target, str(path), allow_missing=True) is not None:
             if not path.is_file():
-                raise SyncError("The remote workbook path did not resolve to a file.")
+                raise SyncError("The remote tracker path did not resolve to a file.")
             return
         listing = self.call("lsf", self.directory, "--files-only", "--max-depth", "1")
         name = self.target.partition(":")[2].rsplit("/", 1)[-1]
         if listing is None or name in listing.splitlines():
-            raise SyncError("Could not read the remote workbook.")
+            raise SyncError("Could not read the remote tracker.")
 
     def check_write(self, workspace: Path) -> None:
-        probe = workspace / "probe.xlsx"
-        Workbook().save(probe)
-        download = workspace / "probe-readback.xlsx"
+        probe = workspace / "probe.txt"
+        probe.write_text("job-scrapper sync check\n", encoding="utf-8")
+        download = workspace / "probe-readback.txt"
         separator = "" if self.directory.endswith(":") else "/"
-        remote_probe = f"{self.directory}{separator}.job-scrapper-check-{uuid4().hex}.xlsx"
+        remote_probe = f"{self.directory}{separator}.job-scrapper-check-{uuid4().hex}.txt"
         self.call("copyto", str(probe), remote_probe, "--immutable")
         try:
             self.call("copyto", remote_probe, str(download))
@@ -110,25 +125,46 @@ def _digest(path: Path) -> str | None:
         return None
 
 
-def _check_workbook(path: Path) -> None:
+def _check_tracker(path: Path) -> None:
     if not path.exists():
         return
     try:
-        with path.open("rb") as file:
-            workbook = load_workbook(file, read_only=True)
-            try:
-                if "Offres" not in workbook.sheetnames:
-                    raise SyncError("The remote workbook has no Offres sheet.")
-            finally:
-                workbook.close()
-    except SyncError:
-        raise
+        tracker = read_tracker(path)
     except Exception as exc:
-        raise SyncError(f"Could not open the remote workbook: {exc}") from exc
+        raise SyncError(f"Could not open the remote tracker: {exc}") from exc
+    if path.suffix == ".csv" and not set(LOCALIZED_TRACKER_COLUMNS).intersection(tracker.columns):
+        raise SyncError("The remote CSV has no tracker columns. Use jobs.csv as the sync target.")
 
 
 def sync_settings_path(database_path: Path) -> Path:
     return database_path.parent / ".tracker-sync" / "settings.json"
+
+
+@contextmanager
+def _sync_lock(path: Path) -> Iterator[None]:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("ab") as lock:
+        if sys.platform == "win32":
+            import msvcrt
+
+            lock.seek(0)
+            while True:
+                try:
+                    msvcrt.locking(lock.fileno(), msvcrt.LK_LOCK, 1)
+                    break
+                except OSError as exc:
+                    # The Windows blocking mode gives up after ten attempts.
+                    if exc.errno != errno.EDEADLK:
+                        raise
+            try:
+                yield
+            finally:
+                msvcrt.locking(lock.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            yield
 
 
 def load_sync_settings(path: Path) -> SyncSettings:
@@ -147,7 +183,8 @@ def _save_settings(path: Path, settings: SyncSettings) -> None:
 
 
 def _local_tracker(config: SearchConfig) -> Path:
-    return config.excel_path if config.excel_path.exists() else config.csv_path
+    candidates = tracker_paths(config.export_dir, config.export.formats)
+    return next((path for path in candidates if path.is_file()), candidates[0])
 
 
 def _save_conflict(output_dir: Path, **copies: Path) -> None:
@@ -163,15 +200,16 @@ def _sync(config: SearchConfig, path: Path, settings: SyncSettings, preference: 
         print("Tracker sync disabled. Running local export.")
         run()
         return
-
+    outputs = export_paths(config.export_dir, config.export.formats)
+    primary = outputs[0]
     config.export_dir.mkdir(parents=True, exist_ok=True)
     with TemporaryDirectory(prefix=".tracker-", dir=config.export_dir) as temp:
         workspace = Path(temp)
-        incoming = workspace / "drive.xlsx"
+        incoming = workspace / f"drive{primary.suffix}"
         try:
-            remote = Remote.connect(settings.target)
+            remote = Remote.connect(settings.target, primary.suffix)
             remote.fetch(incoming)
-            _check_workbook(incoming)
+            _check_tracker(incoming)
         except (OSError, SyncError) as exc:
             print(f"Tracker sync skipped. {exc}")
             run()
@@ -198,25 +236,24 @@ def _sync(config: SearchConfig, path: Path, settings: SyncSettings, preference: 
             seed = incoming if drive_hash is not None and local_hash in (None, checkpoint) else local
 
         if seed.is_file():
-            name = config.csv_path.name if seed.suffix == ".csv" else config.excel_path.name
-            shutil.copy2(seed, workspace / name)
+            shutil.copy2(seed, workspace / (primary.name if seed == incoming else seed.name))
         run(db=config.database_path, export_dir=workspace)
-        output = workspace / config.excel_path.name
+        output = workspace / primary.name
         if _digest(_local_tracker(config)) != local_hash:
             _save_conflict(path.parent, local=_local_tracker(config), generated=output)
-            print("Tracker sync skipped. The local workbook changed during the scrape.")
+            print("Tracker sync skipped. The local tracker changed during the scrape.")
             return
 
-        upload = workspace / "upload.xlsx"
+        upload = workspace / f"upload{primary.suffix}"
         shutil.copy2(output, upload)
-        _publish_exports(workspace, (config.csv_path, config.raw_csv_path, config.excel_path))
-        print(f"Local workbook saved to {config.excel_path}")
-        latest = workspace / "latest.xlsx"
+        _publish_exports(workspace, outputs)
+        print(f"Local tracker saved to {primary}")
+        latest = workspace / f"latest{primary.suffix}"
         try:
             remote.fetch(latest)
             if _digest(latest) != drive_hash:
-                _save_conflict(path.parent, local=config.excel_path, drive=latest)
-                raise SyncError("The remote workbook changed during the scrape.")
+                _save_conflict(path.parent, local=primary, drive=latest)
+                raise SyncError("The remote tracker changed during the scrape.")
             remote.publish(upload, first_upload=drive_hash is None)
         except (OSError, SyncError) as exc:
             print(f"Tracker upload skipped or unsuccessful. {exc}")
@@ -224,46 +261,46 @@ def _sync(config: SearchConfig, path: Path, settings: SyncSettings, preference: 
 
         settings.last_synced_hash = _digest(upload)
         _save_settings(path, settings)
-        print("Tracker workbook published successfully.")
+        print("Tracker published successfully.")
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description="Run the scraper and sync your private tracker.")
+def main(argv: list[str] | None = None) -> None:
+    parser = argparse.ArgumentParser(
+        prog="job-scrapper sync", description="Run the scraper and sync your private tracker."
+    )
     action = parser.add_mutually_exclusive_group()
     action.add_argument("--status", action="store_true", help="Show the private sync setting and rclone availability.")
     action.add_argument(
-        "--enable", nargs="?", const="", metavar="REMOTE:WORKBOOK", help="Check and enable a destination."
+        "--enable", nargs="?", const="", metavar="REMOTE:TRACKER", help="Check and enable a destination."
     )
     action.add_argument("--disable", action="store_true", help="Disable tracker sync.")
-    parser.add_argument("--prefer", choices=("local", "drive"), help="Choose the seed if both workbooks have changed.")
-    args = parser.parse_args()
+    parser.add_argument("--prefer", choices=("local", "drive"), help="Choose the seed if both trackers have changed.")
+    args = parser.parse_args(argv)
     if args.prefer and (args.status or args.enable is not None or args.disable):
         parser.error("--prefer applies to a sync run.")
 
     config = SearchConfig()
+    suffix = f".{config.export.formats[0]}"
     path = sync_settings_path(config.database_path)
     try:
         if args.status:
             settings = load_sync_settings(path)
             if settings.enabled:
-                Remote.connect(settings.target)
+                Remote.connect(settings.target, suffix)
                 print("Tracker sync enabled. The rclone remote is configured.")
             else:
                 print("Tracker sync disabled.")
             return
 
-        import fcntl
-
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with (path.parent / "lock").open("a", encoding="utf-8") as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
+        with _sync_lock(path.parent / "lock"):
             settings = load_sync_settings(path)
             if args.enable is not None:
-                remote = Remote.connect(args.enable or settings.target)
+                remote = Remote.connect(args.enable or settings.target, suffix)
                 with TemporaryDirectory() as temp:
                     workspace = Path(temp)
-                    remote.fetch(workspace / "drive.xlsx")
-                    _check_workbook(workspace / "drive.xlsx")
+                    incoming = workspace / f"drive{suffix}"
+                    remote.fetch(incoming)
+                    _check_tracker(incoming)
                     remote.check_write(workspace)
                 checkpoint = settings.last_synced_hash if settings.target == remote.target else None
                 _save_settings(path, SyncSettings(target=remote.target, enabled=True, last_synced_hash=checkpoint))

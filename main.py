@@ -1,4 +1,4 @@
-from scrapper.cli import app
+from scrapper.cli import main
 
 if __name__ == "__main__":
-    app()
+    main()

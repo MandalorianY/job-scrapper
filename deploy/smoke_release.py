@@ -85,7 +85,11 @@ def smoke(command: list[str], workspace: Path) -> None:
         workbook.close()
     assert all(example in (exports / filename).read_text(encoding="utf-8") for filename in ("jobs.csv", "jobs_raw.csv"))
     assert (workspace / "custom data/run.jsonl").is_file()
-    print(f"Verified {command[0]} with a YAML profile, replay and offline exports.")
+    (workspace / "config.local.yaml").write_bytes(profile.read_bytes())
+    assert run("sync", "--disable") == "Tracker sync disabled."
+    assert run("sync", "--status") == "Tracker sync disabled."
+    assert (workspace / "custom data/.tracker-sync/settings.json").is_file()
+    print(f"Verified {command[0]} with a YAML profile, replay, offline exports and tracker sync commands.")
 
 
 if __name__ == "__main__":

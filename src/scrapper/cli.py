@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sys
 import time
 import uuid
 from collections.abc import Awaitable, Callable
+from importlib.util import find_spec
 from pathlib import Path
 from typing import Annotated
 
@@ -14,19 +16,24 @@ import structlog
 import typer
 import yaml
 from pydantic import ValidationError
-from rich.console import Console
-from rich.table import Table
 from rich.text import Text
 
 from scrapper import __version__
+from scrapper.cli_output import (
+    CONFIG_OVERRIDE_HELP,
+    console,
+    print_export_summary,
+    print_search_status,
+    print_source_status,
+    print_tracker_sync_status,
+)
 from scrapper.cli_paths import existing_file
 from scrapper.config import SearchConfig
-from scrapper.config.settings import LOCAL_CONFIG_FILE, PACKAGE_CONFIG_DIR, _leaf_values
-from scrapper.export import export_jobs
+from scrapper.config.settings import _leaf_values
+from scrapper.export import export_job_formats, export_paths
 from scrapper.location_scope import location_is_in_scope
 from scrapper.logging import DEFAULT_LOG_LEVEL, LogLevel, configure_logging
 from scrapper.scrapers import (
-    JOBSPY_SITES,
     scrape_aggregators,
     scrape_jobspy_sources,
     scrape_welcome_to_the_jungle,
@@ -38,13 +45,8 @@ from scrapper.search_regions import load_location_scope, route_location_override
 from scrapper.storage import JobStore
 
 app = typer.Typer(pretty_exceptions_show_locals=False)
-console = Console()
 log = structlog.get_logger(__name__)
 ProgressReporter = Callable[[str], None]
-_CONFIG_OVERRIDE_HELP = (
-    "Use config.local.yaml in the working directory for an installed CLI, or under src/scrapper/config "
-    "in a checkout. Use --profile FILE for a specific YAML profile."
-)
 
 
 def _show_version(value: bool) -> None:
@@ -54,8 +56,8 @@ def _show_version(value: bool) -> None:
 
 
 @app.command(
-    help="[bold cyan]Scrape example role jobs and export deduped CSV/XLSX files.[/bold cyan]",
-    epilog=_CONFIG_OVERRIDE_HELP,
+    help="[bold cyan]Scrape example role jobs and export deduped XLSX, ODS, or CSV files.[/bold cyan]",
+    epilog=f"{CONFIG_OVERRIDE_HELP} Run job-scrapper sync --help for tracker sync.",
 )
 def run(
     query: Annotated[
@@ -67,7 +69,9 @@ def run(
         typer.Option("--location", "-l", help="Search location. Repeat to override the configured locations."),
     ] = None,
     db: Annotated[Path | None, typer.Option("--db", help="DuckDB storage path.")] = None,
-    export_dir: Annotated[Path | None, typer.Option("--export-dir", help="Folder for CSV and Excel exports.")] = None,
+    export_dir: Annotated[
+        Path | None, typer.Option("--export-dir", help="Folder for the selected export files.")
+    ] = None,
     results_wanted: Annotated[int | None, typer.Option("--results-wanted", min=1)] = None,
     custom_pages: Annotated[int | None, typer.Option("--custom-pages", min=1)] = None,
     export_only: Annotated[
@@ -144,14 +148,16 @@ def run(
         if show_config:
             typer.echo(json.dumps(report, ensure_ascii=False, indent=2))
         else:
-            _print_tracker_sync_status(config)
-            _print_search_status(config, report["sources"], profile)
-            _print_source_status(
+            print_tracker_sync_status(config)
+            print_search_status(config, report["sources"], profile)
+            print_source_status(
                 config,
                 skip_jobspy=skip_jobspy or replay_from is not None,
                 skip_custom=skip_custom or replay_from is not None,
             )
         return
+    if "ods" in config.export.formats and find_spec("odf") is None:
+        raise typer.BadParameter("ODS export requires odfpy. Run with uv run --locked --extra ods job-scrapper.")
     if export_only and replay_from is None and not config.database_path.is_file():
         raise typer.BadParameter(f"Database file not found: {config.database_path}", param_hint="--db")
     _validate_artifact_paths(config, replay_from)
@@ -239,7 +245,7 @@ def run(
         purged_companies = store.purge_excluded_companies(config.excluded_companies_by_source)
         if purged_companies:
             counts["excluded_companies_removed"] = purged_companies
-        excel_path, csv_path, raw_csv_path, total = export_jobs(
+        outputs, total = export_job_formats(
             store,
             config.export_dir,
             config.export.excel_columns,
@@ -250,8 +256,9 @@ def run(
             exclude_terms=config.exclude_terms,
             excluded_title_patterns=config.excluded_title_patterns,
             location_allowed=location_allowed,
+            formats=config.export.formats,
         )
-        _print_summary(counts, total, excel_path, csv_path, raw_csv_path)
+        print_export_summary(counts, total, outputs)
         if replay_from is None and not skip_custom:
             for source in store.sources_with_search_error(SourceBlockedError.message):
                 console.print(
@@ -262,9 +269,7 @@ def run(
             "scrape_run_completed",
             counts=counts,
             deduped_total=total,
-            excel_path=str(excel_path),
-            csv_path=str(csv_path),
-            raw_csv_path=str(raw_csv_path),
+            export_paths=[str(path) for path in outputs],
             duration_seconds=round(time.monotonic() - started_at, 3),
         )
     except Exception as exc:
@@ -283,9 +288,7 @@ def _validate_artifact_paths(config: SearchConfig, replay_from: Path | None) -> 
     paths = {
         "Database": config.database_path,
         "Log": config.log_file,
-        "Excel export": config.excel_path,
-        "CSV export": config.csv_path,
-        "Raw CSV export": config.raw_csv_path,
+        **{path.name: path for path in export_paths(config.export_dir, config.export.formats)},
     }
     if replay_from is not None and replay_from.resolve() != config.database_path.resolve():
         paths["Replay archive"] = replay_from
@@ -352,127 +355,6 @@ def _report_source_errors(errors: dict[str, str]) -> None:
     for source, error in errors.items():
         console.print(Text.assemble((f"{source} failed: ", "bold red"), error))
         log.error("source_failed", source=source, error=error)
-
-
-def _print_tracker_sync_status(config: SearchConfig) -> None:
-    # The tracker sync entry point also imports this CLI to run the scraper.
-    from scrapper.tracker_sync import load_sync_settings, sync_settings_path
-
-    try:
-        settings = load_sync_settings(sync_settings_path(config.database_path))
-    except (OSError, ValueError):
-        status = Text("⚠ Unavailable (could not read settings)", style="bold yellow")
-    else:
-        status = Text("✓ Enabled", style="bold green") if settings.enabled else Text("✕ Disabled", style="bold yellow")
-    console.print(Text.assemble(("Tracker sync  ", "bold"), status))
-    console.print()
-
-
-def _print_search_status(config: SearchConfig, setting_sources: dict[str, str], profile: Path | None) -> None:
-    scope = config.location_scope
-    centers = ", ".join(center.name for center in scope.centers)
-    location_filter = "Disabled"
-    if scope.enabled:
-        location_filter = f"{scope.radius_km:g} km around {centers}" if centers else "No resolved towns"
-    direct_regions = ", ".join(config.aggregators.direct_locations)
-    if not direct_regions and config.country.casefold() == "france" and config.search_locations:
-        direct_regions = "Derived from search locations"
-    company_exclusions = "\n".join(
-        f"{source}: {', '.join(companies)}"
-        for source, companies in config.excluded_companies_by_source.items()
-        if companies
-    )
-    search_limits = (
-        f"{config.results_wanted_per_query} results per query, {config.custom_max_pages} custom list pages, "
-        f"{config.aggregators.max_detail_pages} aggregator detail pages"
-    )
-    overrides: dict[str, set[str]] = {}
-    base_config = str(PACKAGE_CONFIG_DIR / "config.yaml")
-    for setting, source in setting_sources.items():
-        if source not in {"default", base_config}:
-            overrides.setdefault(Path(source).name, set()).add(setting.split(".", 1)[0])
-    if profile is None:
-        profile_name = LOCAL_CONFIG_FILE.name
-        profile_applied = profile_name in overrides
-    else:
-        profile_name = profile.name
-        profile_applied = str(profile.expanduser().absolute()) in setting_sources.values()
-
-    sections = (
-        (
-            "Search scope",
-            (
-                ("Environment", config.app_env),
-                ("Search profile", f"{profile_name} (overrides applied)" if profile_applied else "None"),
-                ("Search locations", ", ".join(config.search_locations)),
-                ("Search radius", f"{config.distance_km} km"),
-                ("Location filter", location_filter),
-                ("Direct search regions", direct_regions),
-                ("Queries", ", ".join(config.queries)),
-                ("Search limits", search_limits),
-            ),
-        ),
-        (
-            "Filters",
-            (
-                ("Include terms", ", ".join(config.include_terms)),
-                ("Exclude terms", ", ".join(config.exclude_terms)),
-                ("Excluded companies", company_exclusions),
-                ("Excluded titles", "\n".join(config.excluded_title_patterns)),
-            ),
-        ),
-    )
-    width = min(console.width, 96)
-    for heading, rows in sections:
-        console.print(heading, style="bold cyan")
-        table = Table.grid(padding=(0, 2))
-        table.add_column(min_width=21)
-        table.add_column()
-        for label, value in rows:
-            table.add_row(label, Text(value or "None"))
-        console.print(table, width=width)
-        console.print()
-
-    console.print("Configuration overrides", style="bold cyan")
-    console.print(_CONFIG_OVERRIDE_HELP, width=width)
-    console.print()
-    override_lines = "\n".join(f"{name}: {', '.join(sorted(fields))}" for name, fields in overrides.items())
-    console.print(Text(override_lines or "None"), width=width)
-    console.print()
-
-
-def _print_source_status(config: SearchConfig, *, skip_jobspy: bool, skip_custom: bool) -> None:
-    aggregators = config.aggregators
-    groups = (
-        ("JobSpy", JOBSPY_SITES, not skip_jobspy),
-        ("Custom", (WTTJ_SOURCE,), not skip_custom),
-        (
-            "Aggregator",
-            tuple(spec.source for spec in (*aggregators.direct_specs, *aggregators.site_search_sources)),
-            not skip_custom and config.is_source_enabled(AGGREGATORS_SOURCE),
-        ),
-    )
-    table = Table("Source", "Group", "Status", title="Job sources", title_style="bold cyan", header_style="bold cyan")
-    for group, sources, group_enabled in groups:
-        for source in sources:
-            enabled = group_enabled and config.is_source_enabled(source)
-            status = Text("Enabled", style="bold green") if enabled else Text("Disabled", style="bold yellow")
-            table.add_row(Text(source), group, status)
-    console.print(table)
-
-
-def _print_summary(counts: dict[str, int], total: int, excel_path: Path, csv_path: Path, raw_csv_path: Path) -> None:
-    table = Table(title="Job search export", title_style="bold cyan", header_style="bold cyan")
-    table.add_column("Source")
-    table.add_column("Stored / updated", justify="right")
-    for source, count in counts.items():
-        style = "yellow" if source.endswith("_removed") else "green" if count else "dim"
-        table.add_row(Text(source), Text(str(count), style=style))
-    table.add_section()
-    table.add_row("Deduped total", str(total), style="bold green" if total else "bold yellow")
-    console.print(table)
-    for label, path in (("Excel: ", excel_path), ("CSV:   ", csv_path), ("Raw:   ", raw_csv_path)):
-        console.print(Text.assemble((label, "bold cyan"), (str(path), "green")))
 
 
 async def _run_custom_sources(config: SearchConfig, store: JobStore) -> tuple[dict[str, int], dict[str, str]]:
@@ -589,5 +471,14 @@ def _config_from_cli(
     return SearchConfig(**overrides)
 
 
+def main() -> None:
+    if sys.argv[1:2] == ["sync"]:
+        from scrapper.tracker_sync import main as sync_main
+
+        sync_main(sys.argv[2:])
+    else:
+        app()
+
+
 if __name__ == "__main__":
-    app()
+    main()

@@ -49,6 +49,9 @@ jobs:
       - name: Install locked dependencies from wheels
         run: uv sync --locked --group test --no-install-project --no-build --no-cache
 
+      - name: Install the ODS test extra
+        run: uv sync --locked --group test --extra ods --no-install-project
+
       - name: Build package
         run: uv build --no-sources
 
@@ -58,7 +61,13 @@ jobs:
       - name: Check installed CLI
         run: uv run --locked --no-sync job-scrapper --status
 
-      - name: Lint and test
+      - name: Type-check Windows, Linux, and macOS
+        if: matrix.target.runner == 'ubuntu-24.04' && matrix.python-version == '3.14'
+        env:
+          UV_NO_SYNC: "1"
+        run: uv run --locked --no-sync poe typecheck
+
+      - name: Lint, check formatting, and test
         env:
           UV_NO_SYNC: "1" # Keep the built wheel installed during Poe's nested uv runs.
         run: uv run --locked poe test

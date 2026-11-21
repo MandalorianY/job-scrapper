@@ -12,10 +12,14 @@ uv run --locked job-scrapper
 
 Download a build for your platform from [GitHub Releases](https://github.com/MandalorianY/job-scrapper/releases).
 
+### Docker CLI
+
+With Docker running, run `./deploy/run-docker.sh` from the checkout root.
+See [Docker setup](deploy/README.md#docker-cli) for host paths and launcher setup.
+
 ## Homebrew
 
-Run `job-scrapper` from the directory where you want to keep `data/` and `exports/`. Pass `--profile /path/to/profile.yaml` to use your own search settings.
-You can also put `config.local.yaml` in that directory to load it automatically.
+Run `job-scrapper` from the directory where you want to keep `data/` and `exports/`.
 
 Install the latest published release from the project's tap.
 
@@ -25,9 +29,9 @@ brew install mandaloriany/tap/job-scrapper
 
 ## Job sources
 
-Use `--status` for an offline summary of search settings, enabled sources, and tracker sync. It uses saved geographic scope when available. Set a source to `false` under `enabled_sources` in `config.local.yaml` to disable it.
-
-Built-in aggregator routes live in Python. To override one provider in a profile, use its source name as a key under `aggregators.direct_specs` or `aggregators.site_search_sources`. Keep existing `query_template` values to reuse the search history in DuckDB.
+Use `--status` for an offline summary of search settings, enabled sources, and
+tracker sync. Set a source to `false` under `enabled_sources` in
+`config.local.yaml` to disable it.
 
 ✅ Working · ⚠️ Unverified · ⛔ Blocked or disabled
 
@@ -50,57 +54,34 @@ Built-in aggregator routes live in Python. To override one provider in a profile
 | Cadremploi | `cadremploi` | ✅ |
 | Optioncarriere | `optioncarriere` | ⛔ A verification challenge blocked discovery. |
 
-## Docker CLI
-
-With Docker running, start a live scrape from the checkout root.
-
-```sh
-./deploy/run-docker.sh
-```
-
-The launcher builds the image and uses the checkout’s local config, `data/`, and `exports/`.
-Use `--profile PATH` or `--replay-from PATH` to pass in a host file. Relative input paths are looked up from the calling directory first, then from the checkout. Use relative YAML output paths under `data/` or `exports/` to keep them in the checkout. For output elsewhere on the host, pass an absolute path with `--db`, `--export-dir`, or `--log-file`.
-
-To run `job-scrapper` from any directory, link the launcher into `~/.local/bin` if it’s on your `PATH`.
-
-```sh
-mkdir -p "$HOME/.local/bin"
-ln -s "$PWD/deploy/run-docker.sh" "$HOME/.local/bin/job-scrapper"
-```
-
-Recreate the link if you move the checkout.
-
 ## Configuration
 
-The bundled configuration uses Toulouse as its example town. Set your roles and one or more French municipalities in `src/scrapper/config/config.local.yaml`. With an installed CLI, put `config.local.yaml` in your working directory to load it automatically.
+Save your search settings in `config.local.yaml`.
+
+- **Checkout and Docker** use `src/scrapper/config/config.local.yaml`.
+- **Homebrew and standalone builds** use `config.local.yaml` in the directory where you run the scraper.
 
 ```yaml
 queries: [data analyst]
 include_terms: [data analyst, analyste de données]
 locations: ["Nantes, France"]
 distance_km: 10
-paths:
-  export_dir: exports
 ```
 
-`queries` tells boards what to search for. `include_terms` controls which job titles pass the filter. For live searches the CLI resolves each municipality's coordinates, department, and region to build provider routes. The location filter uses `distance_km` unless `location_scope.radius_km` is set separately. Pass `--location` once per town to override the saved locations for a run.
-
-The bundled Toulouse Graphiste profile searches for graphic design, motion design, and PAO roles within 25 km of Toulouse. Save another search as a separate YAML file and select it with `--profile`. The chosen file takes the place of `config.local.yaml`. Set `paths.database_path`, `paths.export_dir`, and `paths.log_file` to separate paths for each profile. Files matching `src/scrapper/config/*.local.yaml` are ignored by Git.
-
-`paths.export_dir` sets the folder for the Excel and CSV files and defaults to `exports`. Relative YAML output paths resolve from the checkout when using `uv`, or from the working directory when using an installed CLI. Absolute paths and `~/` work for local installations. See [export folders for scheduled runs](deploy/README.md#export-folder).
+Use `--profile` to select a separate YAML file. Preview the bundled Toulouse Graphiste profile with this command.
 
 ```sh
 uv run --locked job-scrapper --profile src/scrapper/config/toulouse-graphiste.yaml --status
-uv run --locked job-scrapper --profile src/scrapper/config/toulouse-graphiste.yaml
 ```
 
-Use `--show-config` to inspect settings, their origins, and available cached geography offline. For French searches, set the town names in `locations` and optionally list alternate names under `location_scope.city_aliases`. Live runs cache municipality and region data beside DuckDB. They look up only towns and regions missing from that cache and recalculate changes to the radius or aliases locally. The resolved scope is saved for offline exports and replay with the same location settings. Keep credentials in `.env`. See the [example configuration](src/scrapper/config/config.yaml) and [.env.example](.env.example).
+See the [configuration reference](docs/configuration.md) for geography, aggregator overrides, and file paths.
 
 ## Results
 
 | File | Contents |
 | --- | --- |
 | `exports/jobs.xlsx` | French Excel tracker |
+| `exports/jobs.ods` | French LibreOffice tracker |
 | `exports/jobs.csv` | Deduplicated listings |
 | `exports/jobs_raw.csv` | Source listings |
 | `data/job_search.duckdb` | Listings and search history |
@@ -108,24 +89,48 @@ Use `--show-config` to inspect settings, their origins, and available cached geo
 
 Use `--help` for available options or `--export-only` to regenerate files from an existing DuckDB without scraping.
 
-## Replay and recovery
+### Export formats
 
-Rebuild from up to 90 days of saved observations using the current filters.
+Choose one or more formats in your local configuration or profile. The default
+is `[xlsx, csv]`. Selecting `csv` writes both CSV files.
 
-```sh
-uv run job-scrapper --replay-from data/job_search.duckdb --db data/rebuilt.duckdb --export-dir exports/rebuilt
+```yaml
+export:
+  formats: [ods, xlsx, csv]
 ```
 
-Keep the previous workbook to carry application statuses into a rebuilt tracker. Query DuckDB’s `source_health` view to diagnose source failures.
+Edit the first format in the list to carry application statuses forward. If that
+file is missing, the exporter looks for another selected workbook, then an
+existing XLSX or CSV tracker.
+
+Select `[ods]` for just the LibreOffice tracker. Whenever ODS is selected, run
+with the optional dependency.
+
+```sh
+uv run --locked --extra ods job-scrapper --export-only
+```
+
+The ODS tracker uses the same `export.excel_columns` list. Include `Statut` for the
+dropdown and `Rejeté` for a native checkbox. `Postulé` follows `Statut` when both
+columns are present and is a checkbox when configured alone.
+
+### Tracker sync
+
+Use rclone to sync the editable tracker with a private remote.
+See the [tracker sync guide](docs/tracker-sync.md).
+
+## Replay and recovery
+
+See the [recovery guide](docs/recovery.md) to rebuild from saved observations or diagnose a source failure.
 
 ## Development
 
+Run the offline checks before submitting changes.
+
 ```sh
-uv run --locked poe test
+uv run --locked --group test --extra ods poe check
 ```
 
-Poe runs Ruff before pytest. Pytest writes the HTML coverage report to `htmlcov/index.html`. Set `SCRAPPER_RUN_REAL_SMOKE=1` to include live smoke tests.
+See the [contributor commands](AGENTS.md#useful-commands) for pre-push hook setup and the development workflow.
 
-Run `uv run --locked poe lint` for lint checks or `uv run --locked poe format` to apply Ruff fixes and formatting.
-
-[Scheduled runs](deploy/README.md) · [MIT License](LICENSE)
+[Scheduled runs](deploy/README.md#scheduled-runs) · [MIT License](LICENSE)

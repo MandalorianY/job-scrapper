@@ -7,11 +7,28 @@ from collections.abc import Iterable
 from functools import lru_cache
 from typing import Protocol
 
-FRENCH_REGIONS = frozenset({
-    "auvergne rhone alpes", "bourgogne franche comte", "bretagne", "centre val de loire", "corse",
-    "grand est", "hauts de france", "ile de france", "normandie", "nouvelle aquitaine", "occitanie",
-    "pays de la loire", "provence alpes cote d azur", "guadeloupe", "guyane", "la reunion", "martinique", "mayotte",
-})
+FRENCH_REGIONS = frozenset(
+    {
+        "auvergne rhone alpes",
+        "bourgogne franche comte",
+        "bretagne",
+        "centre val de loire",
+        "corse",
+        "grand est",
+        "hauts de france",
+        "ile de france",
+        "normandie",
+        "nouvelle aquitaine",
+        "occitanie",
+        "pays de la loire",
+        "provence alpes cote d azur",
+        "guadeloupe",
+        "guyane",
+        "la reunion",
+        "martinique",
+        "mayotte",
+    }
+)
 REGION_ALIASES = {"ara": "auvergne rhone alpes", "rhone alpes": "auvergne rhone alpes"}
 
 

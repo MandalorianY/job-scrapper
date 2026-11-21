@@ -33,7 +33,7 @@ def _copy_notices(directory: Path) -> None:
                 continue
             destination = directory / item
             destination.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(package.locate_file(item), destination)
+            destination.write_bytes(item.read_binary())
     python_lib = Path(os.__file__).parent
     for candidate in (python_lib / "LICENSE.txt", Path(sys.base_prefix) / "LICENSE.txt"):
         if candidate.is_file():
@@ -78,6 +78,13 @@ def _freeze(work: Path, notices: Path, *, onefile: bool) -> Path:
 
 
 def _build_deb(bundle: Path, work: Path, destination: Path, arch: str) -> None:
+    if sys.platform != "linux":
+        raise RuntimeError("Debian packages must be built on Linux.")
+    libc_version = os.confstr("CS_GNU_LIBC_VERSION")
+    if libc_version is None:
+        raise RuntimeError("Cannot determine the glibc version for the Debian package.")
+    _, glibc = libc_version.split()
+
     package = work / "deb"
     control = package / "DEBIAN"
     control.mkdir(parents=True)
@@ -87,7 +94,6 @@ def _build_deb(bundle: Path, work: Path, destination: Path, arch: str) -> None:
     docs = package / "usr/share/doc" / NAME
     docs.mkdir(parents=True)
     shutil.copyfile(ROOT / "LICENSE", docs / "copyright")
-    _, glibc = os.confstr("CS_GNU_LIBC_VERSION").split()
     size_kib = (
         sum(path.stat().st_size for path in bundle.rglob("*") if path.is_file() and not path.is_symlink()) + 1023
     ) // 1024

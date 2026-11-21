@@ -1,0 +1,2 @@
+#!/bin/sh
+exec uv run --locked --group test --extra ods poe check

@@ -3,7 +3,6 @@ from __future__ import annotations
 import os
 import re
 from collections.abc import Iterator, Mapping
-from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, TypedDict
 
@@ -171,18 +170,6 @@ class PathsConfig(BaseModel):
             setattr(self, field_name, root / path)
         return self
 
-    @property
-    def excel_path(self) -> Path:
-        return self.export_dir / "jobs.xlsx"
-
-    @property
-    def csv_path(self) -> Path:
-        return self.export_dir / "jobs.csv"
-
-    @property
-    def raw_csv_path(self) -> Path:
-        return self.export_dir / "jobs_raw.csv"
-
 
 Weekday = Literal["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
 WEEKDAYS: tuple[Weekday, ...] = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
@@ -211,11 +198,22 @@ DEFAULT_EXCEL_COLUMNS = (
 )
 
 
+ExportFormat = Literal["xlsx", "ods", "csv"]
+
+
 class ExportConfig(BaseModel):
+    formats: tuple[ExportFormat, ...] = Field(default=("xlsx", "csv"), min_length=1)
     excel_columns: tuple[str, ...] = DEFAULT_EXCEL_COLUMNS
     repair_fields_enabled_by_default: bool = True
     repair_fields_by_source: dict[str, bool] = Field(default_factory=dict)
     direct_links_enabled_by_source: dict[str, bool] = Field(default_factory=dict)
+
+    @field_validator("formats")
+    @classmethod
+    def _formats_must_be_unique(cls, value: tuple[ExportFormat, ...]) -> tuple[ExportFormat, ...]:
+        if len(set(value)) != len(value):
+            raise ValueError("List each export format once.")
+        return value
 
 
 JobOfferField = Literal["title", "company", "location", "description"]
@@ -346,18 +344,6 @@ class Settings(BaseSettings):
         return self.paths.log_file
 
     @property
-    def excel_path(self) -> Path:
-        return self.paths.excel_path
-
-    @property
-    def csv_path(self) -> Path:
-        return self.paths.csv_path
-
-    @property
-    def raw_csv_path(self) -> Path:
-        return self.paths.raw_csv_path
-
-    @property
     def search_locations(self) -> tuple[str, ...]:
         return self.locations
 
@@ -399,24 +385,3 @@ class Settings(BaseSettings):
         excluded = self.excluded_companies_by_source.get(source, ())
         excluded += self.excluded_companies_by_source.get("*", ())
         return normalized_company in {normalize_text(value) for value in excluded}
-
-
-@lru_cache
-def get_settings() -> Settings:
-    return Settings()
-
-
-_LEGACY_SETTINGS = {
-    "DEFAULT_QUERIES": "queries",
-    "DEFAULT_EXCLUDE_TERMS": "exclude_terms",
-    "DEFAULT_INCLUDE_TERMS": "include_terms",
-}
-
-
-def __getattr__(name: str) -> object:
-    # Keep imports independent of the user's config until defaults are requested.
-    if name == "settings":
-        return get_settings()
-    if field := _LEGACY_SETTINGS.get(name):
-        return getattr(get_settings(), field)
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

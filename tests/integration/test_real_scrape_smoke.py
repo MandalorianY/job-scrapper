@@ -12,7 +12,7 @@ from openpyxl import load_workbook
 from openpyxl.utils import get_column_letter
 
 from scrapper.config import SearchConfig
-from scrapper.export import export_jobs
+from scrapper.export import export_job_formats
 from scrapper.scrapers import (
     JOBSPY_SITES,
     scrape_aggregators,
@@ -105,10 +105,11 @@ def test_real_small_scrape_by_website(smoke_source: SmokeSource, tmp_path: Path)
         ).fetchall()
         assert search_state, f"{smoke_source.source} did not record search state; counts={counts!r}"
 
-        excel_path, csv_path, raw_csv_path, total = export_jobs(
+        (excel_path, csv_path, raw_csv_path), total = export_job_formats(
             store,
             config.export_dir,
-            config.export.excel_columns,
+            formats=("xlsx", "csv"),
+            excel_columns=config.export.excel_columns,
             repair_fields_enabled_by_default=config.export.repair_fields_enabled_by_default,
             repair_fields_by_source=config.export.repair_fields_by_source,
             direct_links_enabled_by_source=config.export.direct_links_enabled_by_source,
