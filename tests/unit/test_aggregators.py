@@ -588,7 +588,7 @@ def test_jobijoba_detail_parser_resolves_redirect_target(
 ) -> None:
     detail_url, redirect_url, detail_html = jobijoba_redirect_page
     job = {"@type": "JobPosting", "title": "Chargé de communication H/F", "description": "Concevoir les campagnes."}
-    detail_html += f'<script type="application/ld+json">{json.dumps(job)}</script>'
+    detail_html = detail_html.replace("</body>", f'<script type="application/ld+json">{json.dumps(job)}</script></body>')
     target_url = "https://www.hellowork.com/fr-fr/emplois/79739983.html?utm_source=jobijoba"
     application_link = f'<a href="https://r.holeest.com/redirect?from={target_url}">Continuer</a>'
     redirect_html = f"""
@@ -648,6 +648,7 @@ async def test_jobijoba_skips_redirect_for_filtered_offer(
         update={"search_url_templates": ("https://www.jobijoba.com/fr/emploi/{query}",)}
     )
     job = {"@type": "JobPosting", "title": "Communication", "description": "Concevoir les campagnes."} | fields
+    detail_html = detail_html.replace("</body>", f'<script type="application/ld+json">{json.dumps(job)}</script></body>')
     requests: list[str] = []
 
     def respond(request: httpx.Request) -> httpx.Response:
@@ -657,7 +658,7 @@ async def test_jobijoba_skips_redirect_for_filtered_offer(
             html = f'<a href="{detail_url}">Communication</a>'
         else:
             assert url == detail_url
-            html = detail_html + f'<script type="application/ld+json">{json.dumps(job)}</script>'
+            html = detail_html
         return httpx.Response(200, text=html, headers={"content-type": "text/html"})
 
     store = JobStore(tmp_path / "jobs.duckdb")
