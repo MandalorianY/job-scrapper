@@ -6,7 +6,7 @@ from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from hashlib import sha256
 from pathlib import Path
-from typing import Any
+from typing import Protocol, cast
 from urllib.parse import urlparse
 from uuid import uuid4
 
@@ -20,6 +20,7 @@ from scrapper.text import (
     completeness_score,
     dedupe_key_for_fields,
     description_dedupe_key_for_fields,
+    external_url_key,
     has_excluded_contract_signal,
     is_application_destination,
     matches_job_title,
@@ -32,29 +33,75 @@ SOURCE_DIRECT_URL_IDENTITY_HOST_BLOCKLIST = {
     "jobijoba": "jobijoba.com",
 }
 OBSERVATION_RETENTION_DAYS = 90
+CANONICAL_COLUMNS = [
+    "title",
+    "company",
+    "location",
+    "date_posted",
+    "employment_type",
+    "salary",
+    "min_amount",
+    "max_amount",
+    "currency",
+    "interval",
+    "is_remote",
+    "best_source",
+    "best_source_url",
+    "best_direct_url",
+    "sources",
+    "all_source_links",
+    "all_direct_links",
+    "duplicate_count",
+    "description",
+    "company_url",
+    "company_description",
+    "emails",
+    "search_query",
+    "search_location",
+    "completeness_score",
+    "first_seen_at",
+    "last_seen_at",
+    "raw_json",
+]
 
 
-def _offer_url_key(record: Mapping[str, Any]) -> str | None:
+class _OfferRow(Protocol):
+    source: str
+    source_url: str
+    source_id: str | None
+    direct_url: str | None
+    location: str | None
+    description_key: str | None
+    dedupe_key: str | None
+
+    def _asdict(self) -> dict[str, object]: ...
+
+
+def _offer_url_key(record: Mapping[str, object]) -> str | None:
     source = str(record.get("source") or "")
     blocked_host = SOURCE_DIRECT_URL_IDENTITY_HOST_BLOCKLIST.get(source)
     if blocked_host:
         direct_url = clean_text(record.get("direct_url"))
-        direct_key = _external_url_key(direct_url, blocked_host) if is_application_destination(direct_url) else None
+        direct_key = external_url_key(direct_url, blocked_host) if is_application_destination(direct_url) else None
         if direct_key:
             return direct_key
     return url_key(clean_text(record.get("source_url")))
 
 
-def _external_url_key(url: str | None, blocked_host: str) -> str | None:
-    parsed = urlparse(url or "")
-    if not parsed.netloc or blocked_host in parsed.netloc.lower():
-        return None
-    return url_key(url)
-
-
 GENERIC_LISTING_PATHS = {
-    "apply", "apply-now", "application", "career", "careers", "emploi", "emplois", "job", "jobs", "offres",
-    "postuler", "redirect", "view",
+    "apply",
+    "apply-now",
+    "application",
+    "career",
+    "careers",
+    "emploi",
+    "emplois",
+    "job",
+    "jobs",
+    "offres",
+    "postuler",
+    "redirect",
+    "view",
 }
 
 
@@ -166,9 +213,7 @@ class JobStore:
             )
             """
         )
-        self.conn.execute(
-            "CREATE UNIQUE INDEX IF NOT EXISTS raw_offers_url_idx ON raw_offers(source, source_url_key)"
-        )
+        self.conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS raw_offers_url_idx ON raw_offers(source, source_url_key)")
         self.conn.execute(
             """
             CREATE TABLE IF NOT EXISTS offer_observations (
@@ -204,10 +249,7 @@ class JobStore:
         self._normalize_existing_posted_dates()
 
     def _ensure_optional_columns(self) -> None:
-        columns = {
-            row[1]
-            for row in self.conn.execute("PRAGMA table_info('raw_offers')").fetchall()
-        }
+        columns = {row[1] for row in self.conn.execute("PRAGMA table_info('raw_offers')").fetchall()}
         if "description_key" not in columns:
             self.conn.execute("ALTER TABLE raw_offers ADD COLUMN description_key VARCHAR")
 
@@ -312,9 +354,11 @@ class JobStore:
             [observation_id, self.run_id, observed_at, payload],
         ).fetchone()
         if not inserted:
-            observed_at = self.conn.execute(
+            observation = self.conn.execute(
                 "SELECT observed_at FROM offer_observations WHERE observation_id = ?", [observation_id]
-            ).fetchone()[0]
+            ).fetchone()
+            assert observation is not None
+            observed_at = observation[0]
         return self._upsert_record(record, observed_at)
 
     def prune_observations(self) -> None:
@@ -348,7 +392,7 @@ class JobStore:
             raise
         return len(rows)
 
-    def _upsert_record(self, record: dict[str, Any], observed_at: datetime) -> bool:
+    def _upsert_record(self, record: dict[str, object], observed_at: datetime) -> bool:
         record["date_posted"] = absolute_posted_date(
             record.get("date_posted"),
             now=_datetime_value(record.get("scraped_at")),
@@ -371,7 +415,7 @@ class JobStore:
         )
         record_score = completeness_score(record)
         raw_json = json.dumps(record.get("raw") or {}, ensure_ascii=False, default=str)
-        params: list[Any] = [
+        params: list[object] = [
             offer_id,
             duplicate_key,
             duplicate_description_key,
@@ -447,11 +491,11 @@ class JobStore:
         )
         # An accepted, freshly scraped offer can replace a previously excluded listing.
         for link in (record.get("source_url"), record.get("direct_url")):
-            if key := url_key(link):
+            if isinstance(link, str) and (key := url_key(link)):
                 self.conn.execute("DELETE FROM excluded_offer_urls WHERE url_key = ?", [key])
         return True
 
-    def canonical_dataframe(self):
+    def canonical_dataframe(self) -> pd.DataFrame:
         frame = self.conn.execute(
             """
             SELECT
@@ -489,38 +533,7 @@ class JobStore:
             """
         ).df()
         if frame.empty:
-            return pd.DataFrame(
-                columns=[
-                    "title",
-                    "company",
-                    "location",
-                    "date_posted",
-                    "employment_type",
-                    "salary",
-                    "min_amount",
-                    "max_amount",
-                    "currency",
-                    "interval",
-                    "is_remote",
-                    "best_source",
-                    "best_source_url",
-                    "best_direct_url",
-                    "sources",
-                    "all_source_links",
-                    "all_direct_links",
-                    "duplicate_count",
-                    "description",
-                    "company_url",
-                    "company_description",
-                    "emails",
-                    "search_query",
-                    "search_location",
-                    "completeness_score",
-                    "first_seen_at",
-                    "last_seen_at",
-                    "raw_json",
-                ]
-            )
+            return pd.DataFrame(columns=pd.Index(CANONICAL_COLUMNS))
 
         frame["date_posted"] = frame.apply(
             lambda row: absolute_posted_date(row["date_posted"], now=row["first_seen_at"]),
@@ -528,42 +541,13 @@ class JobStore:
         )
         frame["direct_url"] = frame["direct_url"].where(frame["direct_url"].map(is_application_destination), None)
         frame["group_key"] = self._build_group_keys(frame)
-        frame["source_priority"] = frame["source"].map(self.source_priority).fillna(self.default_source_priority).astype(int)
+        frame["source_priority"] = (
+            frame.loc[:, "source"].map(self.source_priority).fillna(self.default_source_priority).astype(int)
+        )
 
-        candidates = frame[frame["title"].notna() & frame["company"].notna()].copy()
+        candidates = frame.loc[frame["title"].notna() & frame["company"].notna()].copy()
         if candidates.empty:
-            return pd.DataFrame(
-                columns=[
-                    "title",
-                    "company",
-                    "location",
-                    "date_posted",
-                    "employment_type",
-                    "salary",
-                    "min_amount",
-                    "max_amount",
-                    "currency",
-                    "interval",
-                    "is_remote",
-                    "best_source",
-                    "best_source_url",
-                    "best_direct_url",
-                    "sources",
-                    "all_source_links",
-                    "all_direct_links",
-                    "duplicate_count",
-                    "description",
-                    "company_url",
-                    "company_description",
-                    "emails",
-                    "search_query",
-                    "search_location",
-                    "completeness_score",
-                    "first_seen_at",
-                    "last_seen_at",
-                    "raw_json",
-                ]
-            )
+            return pd.DataFrame(columns=pd.Index(CANONICAL_COLUMNS))
 
         candidates = candidates.sort_values(
             by=["group_key", "source_priority", "completeness_score", "scraped_at"],
@@ -590,53 +574,24 @@ class JobStore:
         )
         result = result.sort_values(by=["sort_date", "company", "title"], ascending=[False, True, True], kind="stable")
 
-        return result.rename(
+        result = result.rename(
             columns={
                 "source": "best_source",
                 "source_url": "best_source_url",
                 "direct_url": "best_direct_url",
             }
-        )[
-            [
-                "title",
-                "company",
-                "location",
-                "date_posted",
-                "employment_type",
-                "salary",
-                "min_amount",
-                "max_amount",
-                "currency",
-                "interval",
-                "is_remote",
-                "best_source",
-                "best_source_url",
-                "best_direct_url",
-                "sources",
-                "all_source_links",
-                "all_direct_links",
-                "duplicate_count",
-                "description",
-                "company_url",
-                "company_description",
-                "emails",
-                "search_query",
-                "search_location",
-                "completeness_score",
-                "first_seen_at",
-                "last_seen_at",
-                "raw_json",
-            ]
-        ]
+        )
+        return result.loc[:, CANONICAL_COLUMNS]
 
     def _build_group_keys(self, frame: pd.DataFrame) -> pd.Series:
         parents = list(range(len(frame)))
-        rows = list(frame.itertuples(index=False))
+        rows = cast("list[_OfferRow]", list(frame.itertuples(index=False)))
         sources = [{row.source} for row in rows]
         locations = [{key} if (key := _location_key(row.location)) else set() for row in rows]
-        use_location = any("location" in fields for fields in (
-            self.dedupe_primary_fields, self.dedupe_fallback_fields, self.dedupe_description_fields
-        ))
+        use_location = any(
+            "location" in fields
+            for fields in (self.dedupe_primary_fields, self.dedupe_fallback_fields, self.dedupe_description_fields)
+        )
 
         def find(index: int) -> int:
             while parents[index] != index:
@@ -652,7 +607,9 @@ class JobStore:
         seen_identity: dict[tuple[str, ...], int] = {}
         for index, row in enumerate(rows):
             direct_url = row.direct_url if is_application_destination(row.direct_url) else None
-            keys = [("url", key) for link in (row.source_url, direct_url) if (key := _listing_link_key(link))]
+            keys: list[tuple[str, ...]] = [
+                ("url", key) for link in (row.source_url, direct_url) if (key := _listing_link_key(link))
+            ]
             if row.source_id and str(row.source_id).lower() not in GENERIC_LISTING_PATHS:
                 host = (urlparse(row.source_url).hostname or "").removeprefix("www.")
                 keys.append(("id", row.source, host, str(row.source_id)))
@@ -664,7 +621,8 @@ class JobStore:
         candidates: dict[tuple[str, str], set[int]] = {}
         for index, row in enumerate(rows):
             description_key = row.description_key or description_dedupe_key_for_fields(
-                row._asdict(), fields=self.dedupe_description_fields,
+                row._asdict(),
+                fields=self.dedupe_description_fields,
             )
             for kind, value in (("title", row.dedupe_key), ("description", description_key)):
                 if not value:
@@ -674,7 +632,12 @@ class JobStore:
                     left, right = find(index), find(previous)
                     if left == right or sources[left] & sources[right]:
                         continue
-                    if use_location and locations[left] and locations[right] and locations[left].isdisjoint(locations[right]):
+                    if (
+                        use_location
+                        and locations[left]
+                        and locations[right]
+                        and locations[left].isdisjoint(locations[right])
+                    ):
                         continue
                     union(left, right)
                 bucket.add(find(index))
@@ -687,7 +650,7 @@ class JobStore:
             {
                 "sources": ", ".join(sorted({value for value in group["source"].dropna() if value})),
                 "all_source_links": "\n".join(sorted({value for value in group["source_url"].dropna() if value})),
-                "all_direct_links": JobStore._join_optional_links(group["direct_url"]),
+                "all_direct_links": JobStore._join_optional_links(group.loc[:, "direct_url"]),
                 "group_description": max(group["description"].dropna(), key=len, default=None),
                 "group_date_posted": JobStore._best_group_value(group, "date_posted"),
                 "duplicate_count": len(group),
@@ -720,7 +683,7 @@ class JobStore:
             return None
         return "\n".join(deduped)
 
-    def raw_dataframe(self):
+    def raw_dataframe(self) -> pd.DataFrame:
         return self.conn.execute(
             """
             SELECT
@@ -746,7 +709,8 @@ class JobStore:
         rejected = frame.apply(
             lambda row: has_excluded_contract_signal(
                 row["title"], row["employment_type"], row["description"], exclude_terms
-            ), axis=1,
+            ),
+            axis=1,
         )
         # A sparse copy must not hide the contract disclosed by another board for
         # the same offer. Use the same identity groups as the canonical export.
@@ -761,13 +725,9 @@ class JobStore:
     def purge_nonmatching_offers(
         self, include_terms: tuple[str, ...], excluded_title_patterns: tuple[str, ...] = ()
     ) -> int:
-        rows = self.conn.execute(
-            "SELECT offer_id, title FROM raw_offers"
-        ).fetchall()
+        rows = self.conn.execute("SELECT offer_id, title FROM raw_offers").fetchall()
         offer_ids = [
-            offer_id
-            for offer_id, title in rows
-            if not matches_job_title(title, include_terms, excluded_title_patterns)
+            offer_id for offer_id, title in rows if not matches_job_title(title, include_terms, excluded_title_patterns)
         ]
         if not offer_ids:
             return 0
@@ -775,14 +735,8 @@ class JobStore:
         return len(offer_ids)
 
     def purge_out_of_scope_offers(self, location_allowed: Callable[[object | None], bool]) -> int:
-        rows = self.conn.execute(
-            "SELECT offer_id, location FROM raw_offers"
-        ).fetchall()
-        offer_ids = [
-            offer_id
-            for offer_id, location in rows
-            if not location_allowed(location)
-        ]
+        rows = self.conn.execute("SELECT offer_id, location FROM raw_offers").fetchall()
+        offer_ids = [offer_id for offer_id, location in rows if not location_allowed(location)]
         if not offer_ids:
             return 0
         self._delete_offer_ids(offer_ids)
@@ -796,9 +750,7 @@ class JobStore:
         if not excluded:
             return 0
         global_excluded = excluded.get("*", set())
-        rows = self.conn.execute(
-            "SELECT offer_id, source, company FROM raw_offers"
-        ).fetchall()
+        rows = self.conn.execute("SELECT offer_id, source, company FROM raw_offers").fetchall()
         offer_ids = []
         for offer_id, source, company in rows:
             normalized_company = normalize_text(company)
@@ -827,7 +779,9 @@ class JobStore:
             try:
                 self.conn.executemany("DELETE FROM raw_offers WHERE offer_id = ?", params)
             finally:
-                self.conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS raw_offers_url_idx ON raw_offers(source, source_url_key)")
+                self.conn.execute(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS raw_offers_url_idx ON raw_offers(source, source_url_key)"
+                )
 
     def excluded_url_keys(self) -> set[str]:
         """Prevent old tracker copies from restoring offers removed by a purge."""
