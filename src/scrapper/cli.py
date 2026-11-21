@@ -212,10 +212,6 @@ def run(
         purged_companies = store.purge_excluded_companies(config.excluded_companies_by_source)
         if purged_companies:
             counts["excluded_companies_removed"] = purged_companies
-        if locations is None and location_allowed is not None:
-            purged_out_of_scope = store.purge_out_of_scope_offers(location_allowed)
-            if purged_out_of_scope:
-                counts["out_of_scope_removed"] = purged_out_of_scope
         excel_path, csv_path, raw_csv_path, total = export_jobs(
             store,
             config.export_dir,

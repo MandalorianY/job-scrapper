@@ -69,6 +69,7 @@ def test_contract_evidence_excludes_sparse_copies_of_same_offer(tmp_path: Path) 
             JobOffer(
                 source="indeed",
                 source_url="https://indeed.example/jobs/2",
+                source_id="permanent-2",
                 title="Responsable Marketing",
                 company="Other employer",
                 employment_type="CDI",
@@ -326,6 +327,83 @@ def test_listing_identity_beats_title_company_matches(tmp_path: Path) -> None:
         canonical = store.canonical_dataframe()
         assert sorted(canonical["duplicate_count"].tolist()) == [1, 1, 1, 3]
         assert set(canonical["location"]) >= {"Toulouse", "Grenoble", "Annecy"}
+    finally:
+        store.close()
+
+
+def test_shared_apply_pages_cannot_merge_distinct_requisitions(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    try:
+        for index, direct in enumerate(
+            (
+                "https://www.francetravail.fr/a/article.jspz?id=1",
+                "https://www.francetravail.fr/a/article.jspz?id=1",
+                "https://recrutement.lyon.fr/front-jobs-detail.html?id_job=10&id_origin=1",
+                "https://recrutement.lyon.fr/front-jobs-detail.html?id_job=20&id_origin=2",
+                "https://recrutement.lyon.fr/front-jobs-detail.html?id_job=20&id_origin=3",
+            )
+        ):
+            store.upsert_offer(
+                JobOffer(
+                    source="board",
+                    source_url=f"https://board.example/jobs/{index}",
+                    direct_url=direct,
+                    title=f"Chargé de communication {min(index, 2)}",
+                    company="Example employer",
+                    location="Lyon",
+                    description="We are hiring a communications coordinator with experience running regional campaigns.",
+                )
+            )
+        canonical = store.canonical_dataframe()
+        assert sorted(canonical["duplicate_count"]) == [1, 1, 1, 2]
+        assert canonical["best_direct_url"].isna().sum() == 2
+    finally:
+        store.close()
+
+
+def test_refresh_keeps_legacy_identity_after_normalizing_job_id_parameter(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    offer = JobOffer(
+        source="board",
+        source_url="https://recrutement.lyon.fr/front-jobs-detail.html?id_job=10",
+        title="Chargé de communication",
+        company="Example employer",
+    )
+    try:
+        store.upsert_offer(offer)
+        store.conn.execute("UPDATE raw_offers SET source_url_key = 'recrutement.lyon.fr/front-jobs-detail.html'")
+        original = store.conn.execute("SELECT offer_id, first_seen_at FROM raw_offers").fetchall()
+        store.upsert_offer(offer)
+        assert store.conn.execute("SELECT offer_id, first_seen_at FROM raw_offers").fetchall() == original
+        store.upsert_offer(
+            JobOffer(
+                source="board",
+                source_url="https://recrutement.lyon.fr/front-jobs-detail.html?id_job=20",
+                title="Webmaster",
+                company="Example employer",
+            )
+        )
+        assert len(store.raw_dataframe()) == 2
+    finally:
+        store.close()
+
+
+def test_same_board_reposts_need_matching_title_company_location_and_description(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    try:
+        for index, town in enumerate(("Lyon", "Lyon", "Grenoble")):
+            store.upsert_offer(
+                JobOffer(
+                    source="board",
+                    source_url=f"https://board.example/jobs/{index}",
+                    title="Chargé de communication",
+                    company="Example employer",
+                    location=town,
+                    description="We are hiring a communications coordinator with experience running regional campaigns.",
+                )
+            )
+        assert sorted(store.canonical_dataframe()["duplicate_count"]) == [1, 2]
+        assert len(store.raw_dataframe()) == 3
     finally:
         store.close()
 
