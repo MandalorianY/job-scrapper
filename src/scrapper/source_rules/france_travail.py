@@ -19,6 +19,17 @@ DESCRIPTION_COMPANY_PATTERNS = (
     ),
 )
 PUBLISHED_PREFIX_RE = re.compile(r"^publi[ée]e?\s+le\s+", re.IGNORECASE)
+EXPLICIT_WORKPLACE_RE = re.compile(
+    r"\bLieu du poste\s*:\s*(?:Télétravail hybride\s*)?\(?([0-9]{5}[^\S\r\n]+[^()<>,.;\r\n]+)",
+    re.IGNORECASE,
+)
+
+
+def public_offer_location(workplace: object, description: object) -> str | None:
+    if isinstance(workplace, dict):
+        workplace = workplace.get("libelleCommuneLieuTravail") or workplace.get("libelleLieuTravail")
+    explicit_location = EXPLICIT_WORKPLACE_RE.search(str(description or ""))
+    return clean_text(explicit_location.group(1) if explicit_location else workplace)
 
 
 def repair_tracker_fields(

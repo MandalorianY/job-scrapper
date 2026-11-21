@@ -27,6 +27,7 @@ from scrapper.scrapers import (
     scrape_welcome_to_the_jungle,
 )
 from scrapper.scrapers.aggregators import AGGREGATORS_SOURCE
+from scrapper.scrapers.async_http import SourceBlockedError
 from scrapper.scrapers.wttj import WTTJ_SOURCE
 from scrapper.search_regions import load_location_scope, route_location_overrides, save_location_scope
 from scrapper.storage import JobStore
@@ -228,6 +229,12 @@ def run(
             location_allowed=location_allowed,
         )
         _print_summary(counts, total, excel_path, csv_path, raw_csv_path)
+        if replay_from is None and not skip_custom:
+            for source in store.sources_with_search_error(SourceBlockedError.message):
+                console.print(
+                    Text(f"{source} blocked by a verification challenge. Remaining searches skipped.", style="yellow")
+                )
+                log.warning("source_blocked", source=source, error=SourceBlockedError.message)
         log.info(
             "scrape_run_completed",
             counts=counts,

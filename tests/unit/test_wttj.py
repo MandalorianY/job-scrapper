@@ -13,6 +13,7 @@ import pytest
 
 from scrapper.config import SearchConfig
 from scrapper.scrapers import wttj
+from scrapper.scrapers.async_http import HostThrottle, SourceBlockedError
 from scrapper.storage import JobStore
 
 
@@ -79,7 +80,7 @@ def _scrape_with_search_state(config: SearchConfig) -> tuple[int, tuple[object, 
 def test_wttj_missing_public_algolia_config_records_search_state(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    async def missing_public_config(_: SearchConfig) -> None:
+    async def missing_public_config(_: SearchConfig, throttle: HostThrottle) -> None:
         return None
 
     monkeypatch.setattr(wttj, "_public_algolia_config", missing_public_config)
@@ -90,8 +91,26 @@ def test_wttj_missing_public_algolia_config_records_search_state(
     )
 
 
+def test_wttj_stops_when_runtime_discovery_is_challenged(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    requests: list[str] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        requests.append(request.url.path)
+        return httpx.Response(403, headers={"cf-mitigated": "challenge"})
+
+    client_class = httpx.AsyncClient
+    monkeypatch.setattr(
+        wttj.httpx,
+        "AsyncClient",
+        lambda **kwargs: client_class(transport=httpx.MockTransport(respond), **kwargs),
+    )
+    config = SearchConfig(queries=("communication", "marketing"), paths={"database_path": tmp_path / "jobs.duckdb"})
+    assert _scrape_with_search_state(config) == (0, (0, SourceBlockedError.message))
+    assert requests == ["/fr/sitemap.xml"]
+
+
 def test_disabled_wttj_source_is_skipped(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    async def unexpected_public_config(_: SearchConfig) -> wttj.WttjAlgoliaConfig | None:
+    async def unexpected_public_config(_: SearchConfig, throttle: HostThrottle) -> wttj.WttjAlgoliaConfig | None:
         raise AssertionError("disabled source should not fetch Algolia config")
 
     monkeypatch.setattr(wttj, "_public_algolia_config", unexpected_public_config)
@@ -120,7 +139,7 @@ def test_disabled_wttj_source_is_skipped(monkeypatch: pytest.MonkeyPatch, tmp_pa
 
 @pytest.fixture
 def mock_public_algolia_config(monkeypatch: pytest.MonkeyPatch) -> None:
-    async def fake_public_config(_: SearchConfig) -> wttj.WttjAlgoliaConfig:
+    async def fake_public_config(_: SearchConfig, throttle: HostThrottle) -> wttj.WttjAlgoliaConfig:
         return wttj.WttjAlgoliaConfig(
             api_key="public-key-123",
             app_id="app-id-123",
@@ -134,13 +153,6 @@ def mock_public_algolia_config(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_blank_env_key_falls_back_to_public_algolia_key(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, mock_public_algolia_config: None
 ) -> None:
-    class DummyResponse:
-        def raise_for_status(self) -> None:
-            return None
-
-        def json(self) -> dict[str, object]:
-            return {"results": [{"hits": []}]}
-
     class DummyClient:
         def __init__(self, *args: object, headers: dict[str, str] | None = None, **kwargs: object) -> None:
             self.headers = headers or {}
@@ -153,12 +165,12 @@ def test_blank_env_key_falls_back_to_public_algolia_key(
         ) -> None:
             return None
 
-        async def post(self, url: str, content: str) -> DummyResponse:
+        async def post(self, url: str, content: str) -> httpx.Response:
             assert url == "https://app-id-123-dsn.algolia.net/1/indexes/*/queries"
             assert self.headers["x-algolia-application-id"] == "app-id-123"
             assert self.headers["x-algolia-api-key"] == "public-key-123"
             assert "wttj_jobs_production_fr" in content
-            return DummyResponse()
+            return httpx.Response(200, request=httpx.Request("POST", url), json={"results": [{"hits": []}]})
 
     monkeypatch.setattr(wttj.httpx, "AsyncClient", DummyClient)
 
@@ -252,6 +264,7 @@ def test_wttj_refreshes_duplicate_listing_once_per_run(
     hit = {
         "slug": "charge-communication",
         "name": "Chargé de communication",
+        "summary": "Déployer les campagnes de communication.",
         "organization": {"slug": "example", "name": "Example"},
         "office": {"city": "Toulouse", "country": "France"},
     }

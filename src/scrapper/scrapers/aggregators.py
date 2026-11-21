@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import re
+from dataclasses import replace
 from datetime import UTC, datetime
+from itertools import product
 from typing import TypeGuard
 from urllib.parse import parse_qs, quote, quote_plus, unquote, urljoin, urlparse
 
@@ -15,7 +17,7 @@ from scrapper.dates import FRENCH_DATE_PHRASE_RE
 from scrapper.location_scope import location_is_in_scope
 from scrapper.models import JobOffer
 from scrapper.scrapers import cadremploi, france_travail
-from scrapper.scrapers.async_http import HostThrottle
+from scrapper.scrapers.async_http import HostCooldownError, HostThrottle, SourceBlockedError, get_checked_page
 from scrapper.scrapers.common import (
     apply_url,
     custom_search_cutoff,
@@ -23,13 +25,20 @@ from scrapper.scrapers.common import (
     job_location,
     json_ld_jobposting,
     meta_content,
+    offer_matches_search,
     org_name,
     posted_date_is_before_cutoff,
 )
 from scrapper.source_rules import get_source_rules
 from scrapper.source_rules.meteojob import is_placeholder_offer
 from scrapper.storage import JobStore
-from scrapper.text import clean_text, external_url_key, has_excluded_contract_signal, normalize_text
+from scrapper.text import (
+    clean_text,
+    external_url_key,
+    has_excluded_contract_signal,
+    is_application_destination,
+    normalize_text,
+)
 
 log = structlog.get_logger(__name__)
 
@@ -54,15 +63,14 @@ async def scrape_aggregators(config: SearchConfig, store: JobStore) -> dict[str,
     if not config.is_source_enabled(AGGREGATORS_SOURCE):
         return {}
 
-    counts: dict[str, int] = {}
+    direct_specs = tuple(spec for spec in config.aggregators.direct_specs if config.is_source_enabled(spec.source))
+    site_sources = [
+        spec.source for spec in config.aggregators.site_search_sources if config.is_source_enabled(spec.source)
+    ]
     log.info(
         "aggregators_scrape_started",
-        direct_sources=[
-            spec.source for spec in config.aggregators.direct_specs if config.is_source_enabled(spec.source)
-        ],
-        site_search_sources=[
-            spec.source for spec in config.aggregators.site_search_sources if config.is_source_enabled(spec.source)
-        ],
+        direct_sources=[spec.source for spec in direct_specs],
+        site_search_sources=site_sources,
     )
     headers = {"user-agent": config.user_agent, "accept-language": config.http.accept_language}
     limits = httpx.Limits(
@@ -70,19 +78,16 @@ async def scrape_aggregators(config: SearchConfig, store: JobStore) -> dict[str,
     )
     throttle = HostThrottle(config.http_per_host_concurrency, config.http_request_delay_secs)
     async with httpx.AsyncClient(headers=headers, timeout=30, follow_redirects=True, limits=limits) as client:
-        direct_tasks = [
-            _scrape_direct_spec(client, spec, config, store, throttle)
-            for spec in config.aggregators.direct_specs
-            if config.is_source_enabled(spec.source)
-        ]
-        direct_results = await asyncio.gather(*direct_tasks)
-        for spec, count in zip(
-            (spec for spec in config.aggregators.direct_specs if config.is_source_enabled(spec.source)),
-            direct_results,
-            strict=False,
-        ):
-            counts[spec.source] = count
-        site_counts = await _scrape_site_search(client, config, store, throttle)
+        site_task: asyncio.Task[dict[str, int]] | None = None
+        async with asyncio.TaskGroup() as group:
+            direct_tasks = [
+                group.create_task(_scrape_direct_spec(client, spec, config, store, throttle)) for spec in direct_specs
+            ]
+            # Custom specs can share search keys across the two discovery methods.
+            if not any(spec.source in site_sources for spec in direct_specs):
+                site_task = group.create_task(_scrape_site_search(client, config, store, throttle))
+        counts = {spec.source: task.result() for spec, task in zip(direct_specs, direct_tasks, strict=True)}
+        site_counts = await _scrape_site_search(client, config, store, throttle) if site_task is None else site_task.result()
         counts.update(site_counts)
     log.info("aggregators_scrape_completed", counts=counts)
     return counts
@@ -123,7 +128,7 @@ async def _scrape_direct_spec(
                     checked_on_page += 1
                     seen_count += 1
                     offer = await _extract_detail_offer(
-                        client, detail_url, spec.source, query, config, throttle=throttle
+                        client, detail_url, spec.source, query, config, throttle=throttle, cutoff=cutoff
                     )
                     if offer and not offer.date_posted:
                         offer.date_posted = listing_dates.get(detail_url)
@@ -142,13 +147,17 @@ async def _scrape_direct_spec(
                 stored=written,
             )
         except Exception as exc:
-            store.finish_search(spec.source, query, config.location_label, seen_count, error=str(exc))
+            error = str(exc) or type(exc).__name__
+            store.finish_search(spec.source, query, config.location_label, seen_count, error=error)
+            if isinstance(exc, SourceBlockedError):
+                break
             log.exception(
                 "aggregator_direct_search_failed",
                 source=spec.source,
                 query=query,
                 location=config.location_label,
                 seen=seen_count,
+                error=error,
             )
     return written
 
@@ -162,65 +171,89 @@ async def _scrape_site_search(
     counts = {
         spec.source: 0 for spec in config.aggregators.site_search_sources if config.is_source_enabled(spec.source)
     }
+    sitemap_urls: list[str] | None = None
     for spec in config.aggregators.site_search_sources:
         if not config.is_source_enabled(spec.source):
             continue
-        for query in config.queries:
-            for search_location in config.search_locations:
-                search_query = spec.query_template.format(query=query, location=search_location)
-                store.start_search(spec.source, search_query, search_location)
-                seen = 0
-                try:
-                    cutoff = custom_search_cutoff(store, spec.source, search_query, search_location, config)
+        parsed_details: dict[str, JobOffer] = {}
+        for query, search_location in product(config.queries, config.search_locations):
+            search_query = spec.query_template.format(query=query, location=search_location)
+            store.start_search(spec.source, search_query, search_location)
+            seen = 0
+            try:
+                cutoff = custom_search_cutoff(store, spec.source, search_query, search_location, config)
+                if spec.source == "emploi_collectivites":
+                    if sitemap_urls is None:
+                        response = await get_checked_page(client, EMPLOI_COLLECTIVITES_SITEMAP, throttle)
+                        response.raise_for_status()
+                        sitemap_urls = SITEMAP_URL_RE.findall(response.text)
+                    urls = _emploi_collectivites_sitemap_results(sitemap_urls, query, config)
+                else:
                     templates = site_search_templates(spec, search_location, config)
                     search_spec = spec.model_copy(update={"search_url_templates": templates})
-                    urls = await _site_search_results(client, search_spec, query, config)
-                    candidates: list[str] = []
-                    for url in urls:
-                        seen += 1
-                        if not _site_result_matches_source(spec, url):
-                            continue
-                        if not config.refresh_known_details and store.source_url_seen(spec.source, url):
-                            continue
-                        candidates.append(url)
-                    offers = await asyncio.gather(
-                        *(
-                            _extract_detail_offer(
-                                client,
-                                url,
-                                spec.source,
-                                search_query,
-                                config,
-                                throttle=throttle,
-                            )
-                            for url in candidates
+                    urls = await _site_search_results(client, search_spec, query, config, throttle)
+                candidates: dict[str, None] = {}
+                for url in urls:
+                    seen += 1
+                    if not _site_result_matches_source(spec, url):
+                        continue
+                    if not config.refresh_known_details and store.source_url_seen(spec.source, url):
+                        continue
+                    candidates[url] = None
+                unfetched = [url for url in candidates if url not in parsed_details]
+                offers = await asyncio.gather(
+                    *(
+                        _extract_detail_offer(
+                            client,
+                            url,
+                            spec.source,
+                            search_query,
+                            config,
+                            throttle=throttle,
                         )
-                    )
-                    for offer in offers:
-                        if not _offer_is_usable(offer, config, cutoff=cutoff):
-                            continue
-                        offer.search_location = search_location
-                        store.upsert_offer(offer)
-                        counts[spec.source] += 1
-                    store.finish_search(spec.source, search_query, search_location, seen)
-                    log.info(
-                        "aggregator_site_search_finished",
-                        source=spec.source,
-                        query=search_query,
-                        location=search_location,
-                        seen=seen,
-                        candidates=len(candidates),
-                        stored=counts[spec.source],
-                    )
-                except Exception as exc:
-                    store.finish_search(spec.source, search_query, search_location, seen, error=str(exc))
-                    log.exception(
-                        "aggregator_site_search_failed",
-                        source=spec.source,
-                        query=search_query,
-                        location=search_location,
-                        seen=seen,
-                    )
+                        for url in unfetched
+                    ),
+                    return_exceptions=True,
+                )
+                fetched = dict(zip(unfetched, offers, strict=True))
+                error: BaseException | None = None
+                for url in candidates:
+                    offer = parsed_details[url] if url in parsed_details else fetched[url]
+                    if isinstance(offer, BaseException):
+                        if error is None or isinstance(offer, SourceBlockedError):
+                            error = offer
+                        continue
+                    if offer is not None and offer.title:
+                        parsed_details[url] = offer
+                    if not _offer_is_usable(offer, config, cutoff=cutoff):
+                        continue
+                    store.upsert_offer(replace(offer, search_query=search_query, search_location=search_location))
+                    counts[spec.source] += 1
+                if error is not None:
+                    raise error
+                store.finish_search(spec.source, search_query, search_location, seen)
+                log.info(
+                    "aggregator_site_search_finished",
+                    source=spec.source,
+                    query=search_query,
+                    location=search_location,
+                    seen=seen,
+                    candidates=len(candidates),
+                    stored=counts[spec.source],
+                )
+            except Exception as exc:
+                error_message = str(exc) or type(exc).__name__
+                store.finish_search(spec.source, search_query, search_location, seen, error=error_message)
+                if isinstance(exc, SourceBlockedError):
+                    break
+                log.exception(
+                    "aggregator_site_search_failed",
+                    source=spec.source,
+                    query=search_query,
+                    location=search_location,
+                    seen=seen,
+                    error=error_message,
+                )
     return counts
 
 
@@ -229,11 +262,12 @@ async def _site_search_results(
     spec: SiteSearchConfig,
     query: str,
     config: SearchConfig,
+    throttle: HostThrottle | None = None,
 ) -> list[str]:
-    if spec.source == "emploi_collectivites":
-        return await _emploi_collectivites_sitemap_results(client, query, config)
     if spec.source in SITE_SEARCH_DIRECT_PREFIXES and spec.search_url_templates:
-        return await _direct_site_search_results(client, spec.source, query, config, spec.search_url_templates)
+        return await _direct_site_search_results(
+            client, spec.source, query, config, spec.search_url_templates, throttle
+        )
     raise ValueError(f"No direct discovery URL configured for {spec.source}")
 
 
@@ -270,6 +304,7 @@ async def _direct_site_search_results(
     query: str,
     config: SearchConfig,
     search_url_templates: tuple[str, ...] | None = None,
+    throttle: HostThrottle | None = None,
 ) -> list[str]:
     urls: list[str] = []
     regional_urls: set[str] = set()
@@ -290,22 +325,22 @@ async def _direct_site_search_results(
         search_url = template.format(query=quote_plus(query), query_slug=quote(query.replace(" ", "-")))
         try:
             response = (
-                await cadremploi.get_page(client, search_url)
+                await cadremploi.get_page(client, search_url, throttle)
                 if source == "cadremploi"
-                else await client.get(search_url)
+                else await get_checked_page(client, search_url, throttle)
             )
             response.raise_for_status()
         except httpx.HTTPError as exc:
-            reason = (
-                f"HTTP {exc.response.status_code}" if isinstance(exc, httpx.HTTPStatusError) else type(exc).__name__
-            )
+            if isinstance(exc, httpx.HTTPStatusError):
+                reason = f"HTTP {exc.response.status_code}"
+            elif isinstance(exc, HostCooldownError):
+                reason = str(exc)
+            else:
+                reason = type(exc).__name__
             failures.append(reason)
             continue
         if "text/html" not in response.headers.get("content-type", ""):
             failures.append("non-HTML response")
-            continue
-        if any(marker in response.text for marker in ("captcha.careerjet.net", "captcha-delivery.com")):
-            failures.append("verification challenge")
             continue
         successful_pages += 1
         soup = BeautifulSoup(response.text, "lxml")
@@ -338,18 +373,16 @@ async def _direct_site_search_results(
     return urls[: config.aggregators.max_detail_pages]
 
 
-async def _emploi_collectivites_sitemap_results(
-    client: httpx.AsyncClient,
+def _emploi_collectivites_sitemap_results(
+    sitemap_urls: list[str],
     query: str,
     config: SearchConfig,
 ) -> list[str]:
-    response = await client.get(EMPLOI_COLLECTIVITES_SITEMAP)
-    response.raise_for_status()
     urls: list[str] = []
     include_terms = tuple(term.lower().replace(" ", "-") for term in config.include_terms)
     query_terms = tuple(part.lower() for part in query.split() if len(part) > 3)
     regional_terms = tuple(term.lower().replace(" ", "-") for term in config.aggregators.location_terms)
-    for url in SITEMAP_URL_RE.findall(response.text):
+    for url in sitemap_urls:
         lowered = url.lower()
         if not any(term in lowered for term in include_terms + query_terms):
             continue
@@ -369,7 +402,7 @@ async def _detail_links(
     config: SearchConfig | None = None,
     listing_dates: dict[str, str] | None = None,
 ) -> list[str]:
-    response = await throttle.get(client, search_url) if throttle else await client.get(search_url)
+    response = await get_checked_page(client, search_url, throttle)
     response.raise_for_status()
     soup = BeautifulSoup(response.text, "lxml")
     urls: list[str] = []
@@ -415,6 +448,8 @@ async def _extract_detail_offer(
     query: str,
     config: SearchConfig,
     throttle: HostThrottle | None = None,
+    *,
+    cutoff: datetime | None = None,
 ) -> JobOffer | None:
     if source == "france_travail":
         return await france_travail.extract_public_offer(client, url, query, config, throttle)
@@ -423,14 +458,14 @@ async def _extract_detail_offer(
         job_id = parse_qs(urlparse(url).query).get("job", [""])[0]
         if job_id.isdigit():
             detail_url = f"https://isarta.fr/cgi-bin/emplois/pm.cgi?action=display&login={job_id}"
-    try:
-        if source == "cadremploi":
-            response = await cadremploi.get_page(client, detail_url, throttle)
-        else:
-            response = await throttle.get(client, detail_url) if throttle else await client.get(detail_url)
-    except httpx.HTTPError:
+    if source == "cadremploi":
+        response = await cadremploi.get_page(client, detail_url, throttle)
+    else:
+        response = await get_checked_page(client, detail_url, throttle)
+    if response.status_code in {403, 404, 410}:
         return None
-    if response.status_code >= 400 or "text/html" not in response.headers.get("content-type", ""):
+    response.raise_for_status()
+    if "text/html" not in response.headers.get("content-type", ""):
         return None
     if _page_provider_is_blocked(source, response.text, config):
         return None
@@ -458,19 +493,16 @@ async def _extract_detail_offer(
     source_description = source_rules.extract_description(soup, url)
     if source == "emploi_collectivites" and not source_description:
         return None
-    description = source_description or clean_text(job.get("description")) or _description_from_page(soup)
+    structured_description = clean_text(job.get("description"))
+    if source == "jobijoba":
+        source_description = structured_description or source_description
+    description = source_description or structured_description or _description_from_page(soup)
     employment_type = source_rules.extract_employment_type(soup, url) or _employment_type(job.get("employmentType"))
     if not employment_type and source != "jobijoba":
         employment_type = _infer_contract(description)
-    direct_url = await _direct_url_for_detail(client, soup, url, source, throttle)
-    if _direct_url_is_blocked(source, direct_url, config):
-        return None
-
-    return JobOffer(
+    offer = JobOffer(
         source=source,
-        source_id=_offer_source_id(source, url, direct_url),
         source_url=url,
-        direct_url=direct_url or url,
         title=title,
         company=company,
         location=location,
@@ -484,6 +516,14 @@ async def _extract_detail_offer(
         scraped_at=datetime.now(UTC).isoformat(),
         raw={"json_ld": job, "url": url},
     )
+    if source == "jobijoba" and cutoff is not None and not _offer_is_usable(offer, config, cutoff=cutoff):
+        return None
+    direct_url = await _direct_url_for_detail(client, soup, url, source, throttle)
+    if _direct_url_is_blocked(source, direct_url, config):
+        return None
+    offer.source_id = _offer_source_id(source, url, direct_url)
+    offer.direct_url = direct_url or url
+    return offer
 
 
 async def _direct_url_for_detail(
@@ -506,7 +546,7 @@ async def _jobijoba_redirect_target(
     throttle: HostThrottle | None = None,
 ) -> str | None:
     try:
-        response = await throttle.get(client, redirect_url) if throttle else await client.get(redirect_url)
+        response = await get_checked_page(client, redirect_url, throttle)
     except httpx.HTTPError:
         return None
     if response.status_code >= 400:
@@ -517,13 +557,12 @@ async def _jobijoba_redirect_target(
     if "text/html" not in response.headers.get("content-type", ""):
         return None
     soup = BeautifulSoup(response.text, "lxml")
-    for anchor in soup.select("a[href]"):
+    explicit_application = _jobijoba_external_target(apply_url(soup, redirect_url))
+    if explicit_application:
+        return explicit_application
+    for anchor in soup.select('a[href*="from="]'):
         href = anchor.get("href")
         target = _jobijoba_external_target(href) if isinstance(href, str) else None
-        if target:
-            return target
-    for match in re.findall(r"https?://[^\"'<> ]+", response.text):
-        target = _jobijoba_external_target(match)
         if target:
             return target
     return None
@@ -532,16 +571,16 @@ async def _jobijoba_redirect_target(
 def _jobijoba_external_target(url: str | None) -> str | None:
     if not url:
         return None
-    parsed = urlparse(url)
+    try:
+        parsed = urlparse(url)
+    except ValueError:
+        return None
     host = parsed.netloc.lower()
-    if "jobijoba.com" in host:
+    if parsed.scheme not in {"http", "https"} or not host or "jobijoba.com" in host:
         return None
     from_url = parse_qs(parsed.query).get("from", [None])[0]
-    if from_url:
-        return unquote(from_url)
-    if parsed.scheme in {"http", "https"} and host:
-        return url
-    return None
+    target = unquote(from_url) if from_url else url
+    return target if is_application_destination(target) else None
 
 
 def _direct_url_is_blocked(source: str, direct_url: str | None, config: SearchConfig) -> bool:
@@ -588,13 +627,7 @@ def _offer_is_usable(
             return False
     if _is_meteojob_placeholder_offer(offer):
         return False
-    if has_excluded_contract_signal(offer.title, offer.employment_type, offer.description, config.exclude_terms):
-        return False
-    if not config.title_is_allowed(offer.title):
-        return False
-    if config.is_company_excluded(offer.source, offer.company):
-        return False
-    return _has_regional_signal(offer.location, offer.description, config)
+    return offer_matches_search(offer, config, allow_description_location=True)
 
 
 def _is_meteojob_placeholder_offer(offer: JobOffer) -> bool:
@@ -679,12 +712,6 @@ def _infer_location(text: str | None, config: SearchConfig | None = None) -> str
         if term in normalized:
             return term.title()
     return None
-
-
-def _has_regional_signal(location: str | None, description: str | None, config: SearchConfig | None = None) -> bool:
-    if config is None:
-        config = SearchConfig()
-    return location_is_in_scope(f"{location or ''} {description or ''}", config.location_scope)
 
 
 def _infer_date(text: str | None) -> str | None:

@@ -1,16 +1,61 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import Callable
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import httpx
 import pytest
 
-from scrapper.config import SearchConfig, SiteSearchConfig
+from scrapper.config import DirectAggregatorConfig, SearchConfig, SiteSearchConfig
 from scrapper.models import JobOffer
-from scrapper.scrapers import aggregators
+from scrapper.scrapers import aggregators, async_http
+from scrapper.scrapers.async_http import HostThrottle, SourceBlockedError
 from scrapper.storage import JobStore
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("shared_source", [False, True])
+async def test_aggregator_groups_share_limits_and_overlap_when_disjoint(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, shared_source: bool
+) -> None:
+    config = SearchConfig()
+    direct_source = "isarta" if shared_source else "jobijoba"
+    config.aggregators.direct_specs = (config.aggregators.direct_specs[0].model_copy(update={"source": direct_source}),)
+    config.aggregators.site_search_sources = tuple(
+        spec for spec in config.aggregators.site_search_sources if spec.source == "isarta"
+    )
+    site_started = asyncio.Event()
+    direct_finished = asyncio.Event()
+    resources: list[tuple[httpx.AsyncClient, HostThrottle]] = []
+
+    async def direct(
+        client: httpx.AsyncClient, spec: DirectAggregatorConfig, config: SearchConfig, store: JobStore, throttle: HostThrottle
+    ) -> int:
+        resources.append((client, throttle))
+        if not shared_source:
+            await asyncio.wait_for(site_started.wait(), timeout=1)
+        direct_finished.set()
+        return 1
+
+    async def site(
+        client: httpx.AsyncClient, config: SearchConfig, store: JobStore, throttle: HostThrottle
+    ) -> dict[str, int]:
+        resources.append((client, throttle))
+        assert direct_finished.is_set() is shared_source
+        site_started.set()
+        return {"isarta": 2}
+
+    monkeypatch.setattr(aggregators, "_scrape_direct_spec", direct)
+    monkeypatch.setattr(aggregators, "_scrape_site_search", site)
+    store = JobStore(tmp_path / "jobs.duckdb")
+    try:
+        assert await aggregators.scrape_aggregators(config, store) == {direct_source: 1, "isarta": 2}
+    finally:
+        store.close()
+    assert len(resources) == 2 and resources[0] == resources[1]
 
 
 def test_isarta_discovers_absolute_job_query_links() -> None:
@@ -33,6 +78,57 @@ def test_isarta_discovers_absolute_job_query_links() -> None:
             )
 
     assert asyncio.run(run()) == ["https://isarta.fr/?job=123"]
+
+
+@pytest.mark.asyncio
+async def test_isarta_reuses_detail_with_each_search_watermark(tmp_path: Path) -> None:
+    now = datetime.now(UTC)
+    config = SearchConfig(
+        queries=("communication", "marketing"),
+        locations=("Toulouse, France",),
+        include_terms=("communication",),
+        location_scope={"enabled": False},
+        overlap_hours=24,
+        default_hours_old=336,
+    )
+    isarta = next(spec for spec in config.aggregators.site_search_sources if spec.source == "isarta").model_copy(
+        update={"search_url_templates": ("https://isarta.fr/search?q={query}",)}
+    )
+    config.aggregators.site_search_sources = (isarta,)
+    job = {
+        "@type": "JobPosting",
+        "title": "Communication",
+        "description": "Concevoir les campagnes.",
+        "datePosted": (now - timedelta(days=3)).date().isoformat(),
+    }
+    detail_calls = 0
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        nonlocal detail_calls
+        if request.url.path == "/search":
+            html = '<a href="/?job=123">Communication</a>'
+        else:
+            assert request.url.params["login"] == "123"
+            detail_calls += 1
+            html = f'<script type="application/ld+json">{json.dumps(job)}</script>'
+        return httpx.Response(200, text=html, headers={"content-type": "text/html"})
+
+    first_query, second_query = (
+        isarta.query_template.format(query=query, location=config.search_locations[0]) for query in config.queries
+    )
+    store = JobStore(tmp_path / "jobs.duckdb")
+    try:
+        store.start_search("isarta", first_query, config.search_locations[0])
+        store.finish_search("isarta", first_query, config.search_locations[0], 0)
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+            assert await aggregators._scrape_site_search(client, config, store) == {"isarta": 1}
+        assert store.conn.execute("SELECT search_query, search_location FROM raw_offers").fetchall() == [
+            (second_query, config.search_locations[0])
+        ]
+        assert store.conn.execute("SELECT count(*) FROM source_health WHERE status = 'succeeded'").fetchone() == (2,)
+    finally:
+        store.close()
+    assert detail_calls == 1
 
 
 def test_cadremploi_all_blocked_pages_raise_instead_of_empty_success(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -139,6 +235,7 @@ def test_site_search_attempts_every_query_and_skips_disabled_sources(
         spec: SiteSearchConfig,
         query: str,
         config: SearchConfig,
+        throttle: HostThrottle | None,
     ) -> list[str]:
         return [f"https://{spec.host}/jobs/example"]
 
@@ -158,7 +255,7 @@ def test_site_search_attempts_every_query_and_skips_disabled_sources(
     config = SearchConfig(
         queries=("example role", "sample coordinator", "demo lead", "placeholder specialist"),
         locations=("Toulouse, France",),
-        enabled_sources={"apec": False},
+        enabled_sources={"apec": False, "emploi_collectivites": False},
         paths={"database_path": tmp_path / "jobs.duckdb"},
     )
     store = JobStore(config.database_path)
@@ -177,6 +274,153 @@ def test_site_search_attempts_every_query_and_skips_disabled_sources(
         assert store.conn.execute("SELECT COUNT(*) FROM search_state WHERE source = 'cadremploi'").fetchone() == (4,)
     finally:
         store.close()
+
+
+@pytest.mark.asyncio
+async def test_collectivites_reuses_successful_sitemap_across_searches(tmp_path: Path) -> None:
+    config = SearchConfig(queries=("communication", "marketing"), locations=("Toulouse, France", "Nantes, France"))
+    config.aggregators.site_search_sources = tuple(
+        spec for spec in config.aggregators.site_search_sources if spec.source == "emploi_collectivites"
+    )
+    sitemap_requests: list[str] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        sitemap_requests.append(str(request.url))
+        return httpx.Response(200, text="<urlset/>")
+
+    store = JobStore(tmp_path / "jobs.duckdb")
+    try:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+            await aggregators._scrape_site_search(client, config, store)
+        assert store.conn.execute("SELECT COUNT(*) FROM source_health WHERE status = 'succeeded'").fetchone() == (4,)
+    finally:
+        store.close()
+
+    assert sitemap_requests == [aggregators.EMPLOI_COLLECTIVITES_SITEMAP]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("status", "retry_after", "detail_requests"), [(429, "60", 1), (503, "0", 2)])
+async def test_rate_limited_details_keep_previous_search_watermark(
+    tmp_path: Path, status: int, retry_after: str, detail_requests: int
+) -> None:
+    source = "makesense"
+    query = "communication"
+    config = SearchConfig(queries=(query,), include_terms=(query,))
+    spec = next(spec for spec in config.aggregators.direct_specs if spec.source == source)
+    requested_details = 0
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        nonlocal requested_details
+        if request.url.path == "/fr/jobs/employer-communication-123":
+            requested_details += 1
+            return httpx.Response(status, headers={"retry-after": retry_after})
+        return httpx.Response(200, text='<a href="/fr/jobs/employer-communication-123">Communication</a>')
+
+    store = JobStore(tmp_path / "jobs.duckdb")
+    try:
+        store.start_search(source, query, config.location_label)
+        store.finish_search(source, query, config.location_label, 1)
+        watermark = store.get_last_success(source, query, config.location_label)
+        assert watermark is not None
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+            assert await aggregators._scrape_direct_spec(client, spec, config, store, HostThrottle(1, 0)) == 0
+        assert store.get_last_success(source, query, config.location_label) == watermark
+        row = store.conn.execute("SELECT status, error FROM source_health").fetchone()
+        assert row is not None and row[0] == "failed" and str(status) in row[1]
+    finally:
+        store.close()
+
+    assert requested_details == detail_requests
+
+
+@pytest.mark.asyncio
+async def test_custom_source_stops_queued_details_and_keeps_completed_offers(tmp_path: Path) -> None:
+    config = SearchConfig(
+        queries=("communication", "marketing"),
+        locations=("Toulouse, France", "Nantes, France"),
+        include_terms=("communication",),
+        location_scope={"enabled": False},
+        aggregators={
+            "site_search_sources": {
+                "isarta": {"search_url_templates": ("https://isarta.fr/search?q={query}",)},
+                "cadremploi": {"search_url_templates": ("https://www.cadremploi.fr/search?q={query}",)},
+            },
+            "max_detail_pages": 3,
+        },
+        enabled_sources={"apec": False, "optioncarriere": False, "emploi_collectivites": False},
+    )
+    config.aggregators.site_search_sources = tuple(reversed(config.aggregators.site_search_sources))
+    requests: list[tuple[str, str, str | None]] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        requests.append((request.url.host, request.url.path, request.url.params.get("login")))
+        if request.url.host == "www.cadremploi.fr":
+            if request.url.params["q"] == "communication":
+                return httpx.Response(503, headers={"retry-after": "0"})
+            return httpx.Response(200, headers={"content-type": "text/html"})
+        if request.url.path == "/search":
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/html"},
+                text="".join(f'<a href="/?job={i}">Communication</a>' for i in range(1, 4)),
+            )
+        if request.url.params["login"] == "1":
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/html"},
+                text='<script type="application/ld+json">{"@type":"JobPosting","title":"Communication",'
+                '"hiringOrganization":{"name":"Sample employer"},"description":"A job in Toulouse."}</script>',
+            )
+        return httpx.Response(403, headers={"cf-mitigated": "challenge"})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        store = JobStore(tmp_path / "jobs.duckdb")
+        try:
+            await aggregators._scrape_site_search(client, config, store, HostThrottle(1, 0))
+            assert store.sources_with_search_error(SourceBlockedError.message) == ["isarta"]
+            assert store.conn.execute("SELECT COUNT(*) FROM raw_offers WHERE source = 'isarta'").fetchone() == (1,)
+            assert store.conn.execute(
+                "SELECT source, count(*), count(error), count(last_success_at) FROM source_health GROUP BY source ORDER BY source"
+            ).fetchall() == [("cadremploi", 4, 2, 2), ("isarta", 1, 1, 0)]
+        finally:
+            store.close()
+
+    assert [request for request in requests if request[0] == "isarta.fr"] == [
+        ("isarta.fr", "/search", None),
+        ("isarta.fr", "/cgi-bin/emplois/pm.cgi", "1"),
+        ("isarta.fr", "/cgi-bin/emplois/pm.cgi", "2"),
+    ]
+    assert requests[3][0] == "www.cadremploi.fr"
+
+
+@pytest.mark.asyncio
+async def test_custom_source_records_blank_timeout_and_continues(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(async_http, "_DEFAULT_RETRY_DELAY", 0)
+    config = SearchConfig(queries=("communication", "marketing"))
+    spec = next(spec for spec in config.aggregators.direct_specs if spec.source == "makesense")
+    queries: list[str] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        query = request.url.params["s"]
+        queries.append(query)
+        if query == "communication":
+            raise httpx.ReadTimeout("", request=request)
+        return httpx.Response(200, text="<html></html>")
+
+    store = JobStore(tmp_path / "jobs.duckdb")
+    try:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+            await aggregators._scrape_direct_spec(client, spec, config, store)
+        assert store.conn.execute("SELECT query, error FROM source_health ORDER BY query").fetchall() == [
+            ("communication", "ReadTimeout"),
+            ("marketing", None),
+        ]
+    finally:
+        store.close()
+    assert queries == ["communication", "communication", "marketing"]
 
 
 def test_site_search_records_missing_direct_route(tmp_path: Path) -> None:
@@ -338,12 +582,20 @@ def jobijoba_redirect_page() -> tuple[str, str, str]:
     return detail_url, redirect_url, detail_html
 
 
-def test_jobijoba_detail_parser_resolves_redirect_target(jobijoba_redirect_page: tuple[str, str, str]) -> None:
+@pytest.mark.parametrize("with_application_link", [False, True])
+def test_jobijoba_detail_parser_resolves_redirect_target(
+    jobijoba_redirect_page: tuple[str, str, str], with_application_link: bool
+) -> None:
     detail_url, redirect_url, detail_html = jobijoba_redirect_page
+    job = {"@type": "JobPosting", "title": "Chargé de communication H/F", "description": "Concevoir les campagnes."}
+    detail_html += f'<script type="application/ld+json">{json.dumps(job)}</script>'
     target_url = "https://www.hellowork.com/fr-fr/emplois/79739983.html?utm_source=jobijoba"
+    application_link = f'<a href="https://r.holeest.com/redirect?from={target_url}">Continuer</a>'
     redirect_html = f"""
     <html><body>
-      <a href="https://r.holeest.com/redirect?from={target_url}">Continuer</a>
+      <a href="https://www.googletagmanager.com/gtm.js?id=example">Analytics</a>
+      <a href="https://example.com/unrelated">Recommended job</a>
+      {application_link if with_application_link else ""}
     </body></html>
     """
 
@@ -355,14 +607,66 @@ def test_jobijoba_detail_parser_resolves_redirect_target(jobijoba_redirect_page:
 
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler), follow_redirects=True) as client:
             return await aggregators._extract_detail_offer(
-                client, detail_url, "jobijoba", "communication", SearchConfig()
+                client,
+                detail_url,
+                "jobijoba",
+                "communication",
+                SearchConfig(include_terms=("communication",), location_scope={"enabled": False}),
+                cutoff=datetime(2001, 1, 1, tzinfo=UTC),
             )
 
     offer = asyncio.run(run_test())
 
     assert offer is not None
-    assert offer.direct_url == target_url
-    assert offer.source_id == "www.hellowork.com/fr-fr/emplois/79739983.html"
+    assert offer.description == "Concevoir les campagnes."
+    assert offer.direct_url == (target_url if with_application_link else redirect_url)
+    if with_application_link:
+        assert offer.source_id == "www.hellowork.com/fr-fr/emplois/79739983.html"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"datePosted": "2000-01-01"},
+        {"title": "Développeur"},
+        {"description": "Offre de stage en communication."},
+    ],
+)
+async def test_jobijoba_skips_redirect_for_filtered_offer(
+    tmp_path: Path, jobijoba_redirect_page: tuple[str, str, str], fields: dict[str, str]
+) -> None:
+    detail_url, _, detail_html = jobijoba_redirect_page
+    search_url = "https://www.jobijoba.com/fr/emploi/communication"
+    config = SearchConfig(
+        queries=("communication",),
+        include_terms=("communication",),
+        exclude_terms=("stage",),
+        location_scope={"enabled": False},
+    )
+    spec = next(spec for spec in config.aggregators.direct_specs if spec.source == "jobijoba").model_copy(
+        update={"search_url_templates": ("https://www.jobijoba.com/fr/emploi/{query}",)}
+    )
+    job = {"@type": "JobPosting", "title": "Communication", "description": "Concevoir les campagnes."} | fields
+    requests: list[str] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        requests.append(url)
+        if url == search_url:
+            html = f'<a href="{detail_url}">Communication</a>'
+        else:
+            assert url == detail_url
+            html = detail_html + f'<script type="application/ld+json">{json.dumps(job)}</script>'
+        return httpx.Response(200, text=html, headers={"content-type": "text/html"})
+
+    store = JobStore(tmp_path / "jobs.duckdb")
+    try:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+            assert await aggregators._scrape_direct_spec(client, spec, config, store) == 0
+    finally:
+        store.close()
+    assert requests == [search_url, detail_url]
 
 
 def test_jobijoba_detail_parser_rejects_jobleads_redirect(jobijoba_redirect_page: tuple[str, str, str]) -> None:

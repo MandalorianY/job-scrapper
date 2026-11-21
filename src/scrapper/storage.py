@@ -334,6 +334,19 @@ class JobStore:
         ).fetchone()
         return row[0] if row and row[0] else None
 
+    def sources_with_search_error(self, error: str) -> list[str]:
+        rows = self.conn.execute(
+            """
+            SELECT DISTINCT state.source
+            FROM search_attempts AS attempt
+            JOIN search_state AS state USING (search_key)
+            WHERE attempt.run_id = ? AND attempt.error = ?
+            ORDER BY state.source
+            """,
+            [self.run_id, error],
+        ).fetchall()
+        return [row[0] for row in rows]
+
     def source_url_seen(self, source: str, source_url: str) -> bool:
         key = url_key(source_url)
         if not key:

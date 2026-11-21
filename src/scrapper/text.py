@@ -5,7 +5,8 @@ import html
 import re
 import unicodedata
 from collections.abc import Iterable, Mapping
-from urllib.parse import parse_qs, unquote, urlparse
+from functools import lru_cache
+from urllib.parse import parse_qs, unquote, urlencode, urlparse
 
 from bs4 import BeautifulSoup
 
@@ -17,6 +18,16 @@ NON_APPLICATION_PATH_RE = re.compile(
     r"/candidats/placement\.php$|/[^/]*cvtheque[^/]*(?:/|$)",
     re.IGNORECASE,
 )
+GENERIC_LISTING_PATHS = frozenset({
+    "apply", "apply-now", "application", "article", "career", "careers", "detail", "details",
+    "emploi", "emplois", "home", "index", "job", "jobs", "offres", "postuler", "redirect", "view",
+})
+JOB_ID_PARAMETERS = ("jk", "jl", "currentJobId", "jobId", "gh_jid", "job", "offreId", "annonceId", "id_job")
+# These shared endpoints identify the job in a parameter whose name is otherwise ambiguous.
+QUERY_LISTING_ROUTES = {
+    ("inrecruitingfr.intervieweb.it", "/annunci.php"): "l",
+    ("isarta.fr", "/cgi-bin/emplois/externe_candidature.cgi"): "login",
+}
 CONTRACT_MARKERS_RE = re.compile(
     r"\b(h/?f|f/?h|m/?f|f/?m|cdi|cdd|stage|alternance|apprentissage)\b",
     re.IGNORECASE,
@@ -68,7 +79,10 @@ def is_application_destination(url: object | None) -> bool:
         parsed = urlparse(url)
     except ValueError:
         return False
-    if parsed.scheme not in {"http", "https"} or not parsed.netloc or NON_APPLICATION_PATH_RE.search(parsed.path):
+    if not listing_url_key(url) or NON_APPLICATION_PATH_RE.search(parsed.path):
+        return False
+    host = (parsed.hostname or "").rstrip(".")
+    if any(host == domain or host.endswith(f".{domain}") for domain in ("googletagmanager.com", "google-analytics.com", "itunes.apple.com", "apps.apple.com")):
         return False
     return not (
         parsed.hostname in {"meteojob.com", "www.meteojob.com"}
@@ -148,17 +162,41 @@ def url_key(url: str | None) -> str | None:
     parsed = urlparse(url)
     path = parsed.path.rstrip("/")
     query = parse_qs(parsed.query)
-    relevant_params = []
-    for name in ("jk", "jl", "currentJobId", "jobId", "gh_jid", "job", "offreId", "annonceId"):
-        if query.get(name):
-            relevant_params.append(f"{name}={query[name][0]}")
-    compact_query = "&".join(relevant_params)
+    route_parameter = QUERY_LISTING_ROUTES.get(((parsed.hostname or "").removeprefix("www."), path))
+    parameters = JOB_ID_PARAMETERS
+    if route_parameter and route_parameter not in parameters:
+        parameters = (*parameters, route_parameter)
+    compact_query = urlencode([(name, query[name][0]) for name in parameters if name in query])
     return f"{parsed.netloc.lower()}{path}?{compact_query}".rstrip("?")
 
 
+def listing_url_key(url: str | None) -> str | None:
+    try:
+        parsed = urlparse(url or "")
+    except ValueError:
+        return None
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return None
+    key = url_key(url)
+    leaf = parsed.path.rstrip("/").rsplit("/", 1)[-1].lower().split(".", 1)[0]
+    route = ((parsed.hostname or "").removeprefix("www."), parsed.path.rstrip("/"))
+    if key and ("?" in key or (leaf and leaf not in GENERIC_LISTING_PATHS and route not in QUERY_LISTING_ROUTES)):
+        return key
+    return None
+
+
+def offer_link_keys(source_url: object, direct_url: object) -> set[str]:
+    links = [source_url]
+    if is_application_destination(direct_url):
+        links.append(direct_url)
+    return {key for link in links if isinstance(link, str) and (key := listing_url_key(link))}
+
+
 def external_url_key(url: str | None, blocked_host: str) -> str | None:
+    if not is_application_destination(url):
+        return None
     parsed = urlparse(url or "")
-    if not parsed.netloc or blocked_host in parsed.netloc.lower():
+    if blocked_host in parsed.netloc.lower():
         return None
     return url_key(url)
 
@@ -201,6 +239,8 @@ def has_excluded_contract_signal(
     expanded = terms + tuple(alias for term in terms for alias in aliases.get(_normalize_for_match(term), ()))
     if contains_excluded_terms((title, employment_type), expanded):
         return True
+    if _normalize_for_match(employment_type) in {"franchise", "franchise emploi non salarie"}:
+        return True
     normalized_title = _normalize_for_match(title)
     if "alternance" in {_normalize_for_match(term) for term in terms} and re.search(
         r"(?:^alt\b|\ben alt\b|\b(?:bts|bachelor|master|mba)\b.*\balt\b)", normalized_title
@@ -208,9 +248,18 @@ def has_excluded_contract_signal(
         return True
     if re.search(r"\b(?:job|emploi|contrat)\s+etudiant\b", normalized_title):
         return True
+    return _description_has_excluded_contract(None if description is None else str(description))
+
+
+@lru_cache(maxsize=4096)
+def _description_has_excluded_contract(description: str | None) -> bool:
     normalized_description = _normalize_for_match(description)
     if not normalized_description:
         return False
+    if re.search(r"\bcreer votre entreprise\b", normalized_description) and re.search(
+        r"\b(?:exercer votre activite de maniere independante|notre reseau de franchise)\b", normalized_description
+    ):
+        return True
     return any(pattern.search(normalized_description) for pattern in EXCLUDED_CONTRACT_DESCRIPTION_PATTERNS)
 
 

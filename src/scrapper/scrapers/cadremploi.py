@@ -5,7 +5,7 @@ import asyncio
 import httpx
 from jobspy.util import TLSRotating
 
-from scrapper.scrapers.async_http import HostThrottle
+from scrapper.scrapers.async_http import HostThrottle, get_checked_page
 
 
 def _tls_get(url: str, user_agent: str) -> httpx.Response:
@@ -18,7 +18,11 @@ def _tls_get(url: str, user_agent: str) -> httpx.Response:
         return httpx.Response(
             response.status_code,
             text=response.text,
-            headers={"content-type": response_headers.get("content-type", "")},
+            headers={
+                key: response_headers[key]
+                for key in ("content-type", "cf-mitigated", "retry-after")
+                if key in response_headers
+            },
             request=httpx.Request("GET", response.url or url),
         )
     except Exception as exc:
@@ -36,9 +40,9 @@ class _PublicClient:
 
 
 async def get_page(client: httpx.AsyncClient, url: str, throttle: HostThrottle | None = None) -> httpx.Response:
-    response = await throttle.get(client, url) if throttle else await client.get(url)
+    response = await get_checked_page(client, url, throttle)
     if response.status_code != 403:
         return response
     public_client = _PublicClient(client.headers.get("user-agent", ""))
     # Keep the fallback inside the same per-host concurrency and delay limits.
-    return await throttle.get(public_client, url) if throttle else await public_client.get(url)
+    return await get_checked_page(public_client, url, throttle)

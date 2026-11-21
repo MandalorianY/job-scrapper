@@ -17,7 +17,8 @@ from scrapper.storage import JobStore
 from scrapper.text import url_key
 
 
-def test_france_travail_reads_public_component_data() -> None:
+@pytest.mark.parametrize("explicit_workplace", [False, True])
+def test_france_travail_reads_public_component_data(explicit_workplace: bool) -> None:
     data = {
         "intituleOffre": "Chargé de communication",
         "descriptif": "Poste en CDI à Toulouse.",
@@ -27,6 +28,9 @@ def test_france_travail_reads_public_component_data() -> None:
         "salaire": "Mensuel de 2650 Euros",
         "etablissement": {"libelleEnseigne": "Example", "urlEntreprise": "https://example.org"},
     }
+    if explicit_workplace:
+        data["lieuTravail"] = {"libelleLieuTravail": "Aigueperse"}
+        data["descriptif"] = "Chargé de communication.\n\nLieu du poste : Télétravail hybride (31130 Balma)"
 
     def respond(request: httpx.Request) -> httpx.Response:
         assert request.url.path == "/api-descriptifoffre/offre/215HLNT"
@@ -46,7 +50,7 @@ def test_france_travail_reads_public_component_data() -> None:
     assert offer is not None
     assert offer.title == "Chargé de communication"
     assert offer.company == "Example"
-    assert offer.location == "Toulouse"
+    assert offer.location == ("31130 Balma" if explicit_workplace else "Toulouse")
     assert offer.employment_type == "CDI - Contrat travail"
     assert offer.salary == "Mensuel de 2650 Euros"
     assert offer.date_posted is None
@@ -203,6 +207,7 @@ def test_direct_relevance_order_keeps_recent_offer_after_old_offer(
             title="Example role",
             company="Example",
             location="Toulouse",
+            employment_type="CDI",
             date_posted=None if use_modified_date else date,
             raw={"public_offer": {"dateDerniereModification": date}} if use_modified_date else None,
         )
@@ -235,7 +240,8 @@ def test_direct_budget_allows_later_titles_and_regions(monkeypatch: pytest.Monke
         client: httpx.AsyncClient, url: str, source: str, query: str, config: SearchConfig, **kwargs: object
     ) -> JobOffer:
         return JobOffer(
-            source=source, source_url=url, title="Example role", company="Example", location="Paris", search_query=query
+            source=source, source_url=url, title="Example role", company="Example", location="Paris",
+            employment_type="CDI", search_query=query
         )
 
     monkeypatch.setattr(aggregators, "_detail_links", links)

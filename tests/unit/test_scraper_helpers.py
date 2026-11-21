@@ -8,13 +8,15 @@ from bs4 import BeautifulSoup
 from scrapper.config import SearchConfig
 from scrapper.config.settings import LocationScopeConfig
 from scrapper.dates import absolute_posted_date
+from scrapper.location_scope import mentions_location_in_scope
 from scrapper.models import JobOffer
 from scrapper.scrapers.aggregators import _company_from_domain as aggregator_company_from_domain
-from scrapper.scrapers.aggregators import _has_regional_signal, _infer_contract, _offer_is_usable
+from scrapper.scrapers.aggregators import _infer_contract, _offer_is_usable
 from scrapper.scrapers.common import (
     apply_url,
     custom_search_cutoff,
     json_ld_jobposting,
+    offer_matches_search,
     parse_posted_date,
     posted_date_is_before_cutoff,
 )
@@ -141,5 +143,25 @@ def test_aggregator_offer_usability_requires_title_contract_and_region(toulouse_
     assert _offer_is_usable(usable, config)
     assert not _offer_is_usable(bad_contract, config)
     assert _infer_contract("CDI ou CDD possible") == "CDI, CDD"
-    assert _has_regional_signal(None, "Hybrid role with presence in Blagnac", config)
+    assert mentions_location_in_scope("Hybrid role with presence in Blagnac", config.location_scope)
     assert aggregator_company_from_domain("https://www.emploi-collectivites.fr/offres/1") == "Emploi Collectivites"
+
+
+def test_shared_offer_validation_rejects_title_only_and_independent_business_ads(toulouse_scope: LocationScopeConfig) -> None:
+    config = SearchConfig(location_scope=toulouse_scope)
+    listing = JobOffer(
+        source="example",
+        source_url="https://example.com/jobs/1",
+        title="Example coordinator",
+        company="Example",
+        location="Toulouse",
+    )
+    assert not offer_matches_search(listing, config)
+    assert offer_matches_search(replace(listing, employment_type="CDI"), config)
+    business_ad = "Exercer votre activité de manière indépendante. Créer votre entreprise avec notre réseau."
+    assert not offer_matches_search(replace(listing, description=business_ad, employment_type="fulltime"), config)
+    assert not offer_matches_search(
+        replace(listing, location="Montauban", description="Notre siège est à Toulouse.", employment_type="CDI"),
+        config,
+        allow_description_location=True,
+    )

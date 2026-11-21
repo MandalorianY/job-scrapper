@@ -15,6 +15,7 @@ from scrapper.config.settings import PACKAGE_CONFIG_DIR, LocationScopeConfig
 from scrapper.location_scope import location_is_in_scope
 from scrapper.models import JobOffer
 from scrapper.scrapers.aggregators import site_search_templates
+from scrapper.scrapers.async_http import SourceBlockedError
 from scrapper.storage import JobStore
 
 
@@ -419,6 +420,8 @@ def test_local_export_survives_source_failure(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, toulouse_scope: LocationScopeConfig
 ) -> None:
     async def sources(config: SearchConfig, store: JobStore) -> tuple[dict[str, int], dict[str, str]]:
+        store.start_search("blocked_board", "example coordinator", "Toulouse")
+        store.finish_search("blocked_board", "example coordinator", "Toulouse", 0, error=SourceBlockedError.message)
         store.upsert_offer(
             JobOffer(
                 source="example",
@@ -452,6 +455,7 @@ def test_local_export_survives_source_failure(
     )
     assert result.exit_code == 0, result.output
     assert "unavailable_board failed" in result.output
+    assert result.output.count("blocked_board blocked by a verification challenge.") == 1
     assert (tmp_path / "exports/jobs.xlsx").exists()
 
 

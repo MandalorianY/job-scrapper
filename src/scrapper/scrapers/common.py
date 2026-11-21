@@ -11,7 +11,9 @@ from bs4 import BeautifulSoup, Tag
 
 from scrapper.config import SearchConfig
 from scrapper.dates import parse_posted_date
-from scrapper.text import clean_text, is_application_destination
+from scrapper.location_scope import location_is_in_scope, mentions_location_in_scope
+from scrapper.models import JobOffer
+from scrapper.text import clean_text, has_excluded_contract_signal, is_application_destination
 
 APPLY_SIGNAL_RE = re.compile(
     r"\b(?:apply|application|postul\w*|candidatur\w*|candidater|rejoindre|join)\b",
@@ -22,6 +24,24 @@ NON_APPLY_SIGNAL_RE = re.compile(
     r"favori|login|connexion|onetap\w*|\w*bookmark|guide-candidat|conseils-candidature|placement|cvtheque\w*)\b",
     re.IGNORECASE,
 )
+
+
+def offer_matches_search(
+    offer: JobOffer,
+    config: SearchConfig,
+    *,
+    require_details: bool = True,
+    allow_description_location: bool = False,
+) -> bool:
+    if not offer.source_url or (require_details and not (offer.description or offer.employment_type)):
+        return False
+    if not config.title_is_allowed(offer.title) or config.is_company_excluded(offer.source, offer.company):
+        return False
+    if has_excluded_contract_signal(offer.title, offer.employment_type, offer.description, config.exclude_terms):
+        return False
+    if not offer.location and allow_description_location:
+        return mentions_location_in_scope(offer.description, config.location_scope)
+    return location_is_in_scope(offer.location, config.location_scope)
 
 
 def absolutize(base_url: str, href: str | None) -> str | None:
