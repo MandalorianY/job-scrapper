@@ -36,6 +36,7 @@ from scrapper.text import (
     clean_text,
     external_url_key,
     has_excluded_contract_signal,
+    hostname_matches,
     is_application_destination,
     normalize_text,
 )
@@ -575,8 +576,7 @@ def _jobijoba_external_target(url: str | None) -> str | None:
         parsed = urlparse(url)
     except ValueError:
         return None
-    host = parsed.netloc.lower()
-    if parsed.scheme not in {"http", "https"} or not host or "jobijoba.com" in host:
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname or hostname_matches(parsed.hostname, "jobijoba.com"):
         return None
     from_url = parse_qs(parsed.query).get("from", [None])[0]
     target = unquote(from_url) if from_url else url
@@ -589,11 +589,8 @@ def _direct_url_is_blocked(source: str, direct_url: str | None, config: SearchCo
     spec = next((item for item in config.aggregators.direct_specs if item.source == source), None)
     if not spec or not spec.blocked_direct_hosts:
         return False
-    host = (urlparse(direct_url).hostname or "").lower().rstrip(".")
-    return any(
-        host == blocked.lower().rstrip(".") or host.endswith(f".{blocked.lower().rstrip('.')}")
-        for blocked in spec.blocked_direct_hosts
-    )
+    host = urlparse(direct_url).hostname
+    return any(hostname_matches(host, blocked) for blocked in spec.blocked_direct_hosts)
 
 
 def _page_provider_is_blocked(source: str, html: str, config: SearchConfig) -> bool:

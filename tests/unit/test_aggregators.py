@@ -624,6 +624,12 @@ def test_jobijoba_detail_parser_resolves_redirect_target(
         assert offer.source_id == "www.hellowork.com/fr-fr/emplois/79739983.html"
 
 
+def test_jobijoba_external_target_matches_full_hostname() -> None:
+    target_url = "https://careers-jobijoba.com.example/jobs/123"
+    assert aggregators._jobijoba_external_target(target_url) == target_url
+    assert aggregators._jobijoba_external_target("https://WWW.JOBIJOBA.COM.:443/fr/annonce/54/example") is None
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "fields",

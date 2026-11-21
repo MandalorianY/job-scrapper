@@ -134,8 +134,10 @@ def test_storage_dedupes_by_title_company_and_keeps_most_complete_offer(tmp_path
         row = canonical.iloc[0]
         assert row["best_source"] == "example_direct_board"
         assert row["duplicate_count"] == 2
-        assert "indeed.example" in row["all_source_links"]
-        assert "jobs.example.com" in row["all_source_links"]
+        assert set(row["all_source_links"].splitlines()) == {
+            "https://indeed.example/jobs/1?utm_source=test",
+            "https://jobs.example.com/detail/1",
+        }
     finally:
         store.close()
 

@@ -192,11 +192,17 @@ def offer_link_keys(source_url: object, direct_url: object) -> set[str]:
     return {key for link in links if isinstance(link, str) and (key := listing_url_key(link))}
 
 
+def hostname_matches(hostname: str | None, domain: str) -> bool:
+    host = (hostname or "").lower().rstrip(".")
+    domain = domain.lower().rstrip(".")
+    return host == domain or host.endswith(f".{domain}")
+
+
 def external_url_key(url: str | None, blocked_host: str) -> str | None:
     if not is_application_destination(url):
         return None
     parsed = urlparse(url or "")
-    if blocked_host in parsed.netloc.lower():
+    if hostname_matches(parsed.hostname, blocked_host):
         return None
     return url_key(url)
 
