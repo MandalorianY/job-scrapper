@@ -1,0 +1,10 @@
+**
+!pyproject.toml
+!uv.lock
+!README.md
+!LICENSE
+!src/scrapper/**/*.py
+!src/scrapper/config/config.yaml
+!src/scrapper/config/config.dev.yaml
+!src/scrapper/config/config.prod.yaml
+src/scrapper/tracker_sync.py

@@ -7,6 +7,7 @@ This repository is a Python job-search scraper for configured example roles in E
 Primary outputs are ignored runtime artifacts:
 
 - `data/job_search.duckdb`
+- `data/job-scrapper.jsonl`
 - `exports/jobs.xlsx`
 - `exports/jobs.csv`
 - `exports/jobs_raw.csv`
@@ -15,11 +16,10 @@ Do not commit generated data or exports unless the user explicitly asks for that
 
 ## Stack
 
-- Python 3.13 with `uv`
+- Python 3.14 with `uv` by default, with Python 3.13 as the minimum supported version
 - Typer CLI exposed as `job-scrapper`
 - DuckDB for local storage and incremental search state
-- JobSpy for supported boards: Indeed, LinkedIn, Glassdoor, Google Jobs
-- Crawlee Python `BeautifulSoupCrawler` for custom static HTML crawling
+- JobSpy for supported boards: Indeed, LinkedIn, Glassdoor, Google Jobs, HelloWork
 - `httpx` + BeautifulSoup for APIs, aggregator pages, and web search
 - OpenPyXL and pandas for localized Excel/CSV exports
 
@@ -30,7 +30,7 @@ The tracked `src/scrapper/config/config.yaml` is the public example template. Us
 Install/sync dependencies:
 
 ```bash
-uv sync
+uv sync --locked --group test
 ```
 
 Run the full scraper and export:
@@ -39,16 +39,22 @@ Run the full scraper and export:
 uv run job-scrapper
 ```
 
+Run the full scraper and export with Docker:
+
+```bash
+./deploy/run-docker.sh
+```
+
 Re-export from the existing DuckDB without scraping:
 
 ```bash
-uv run job-scrapper --skip-custom --skip-jobspy
+uv run job-scrapper --export-only
 ```
 
 Run a smaller smoke scrape:
 
 ```bash
-uv run job-scrapper --results-wanted 5 --custom-pages 1
+uv run job-scrapper --results-wanted 5 --custom-pages 1 
 ```
 
 Compile check:
@@ -60,13 +66,13 @@ uv run python -m compileall src main.py
 Run lint plus pytest with coverage:
 
 ```bash
-uv run task test
+uv run --locked --group test task test
 ```
 
 Fast pytest iteration without coverage:
 
 ```bash
-uv run pytest -x -q --no-cov
+uv run --locked --group test pytest -x -q --no-cov
 ```
 
 Inspect the current workbook:
@@ -126,13 +132,20 @@ Use the existing helpers instead of ad hoc substring checks:
 - `has_excluded_contract_signal(title, employment_type, description, config.exclude_terms)`
 - `contains_any_terms((title,), config.include_terms)`
 
+Use `config.title_is_allowed(title)` in scrapers to apply both include terms and
+`excluded_title_patterns`. These patterns match normalized titles (lowercase,
+without accents or punctuation); real-search exclusions belong in `config.local.yaml`.
+Contract cleanup applies to the whole canonical duplicate group, so a sparse copy
+cannot hide internship evidence from another source. Purged URL keys are retained
+in `excluded_offer_urls` to prevent historical tracker copies from restoring them.
+
 Be careful with false positives. Do not remove an offer just because a description mentions managing an intern/alternant, internal example role, or international work. The stricter contract-stage logic lives in `text.py`; extend the phrase patterns there with focused examples when needed.
 
 For broad sources, keep the include filter title-focused unless there is an explicit product decision to broaden it. This prevents generic "responsable" or non-configured example roles from leaking into the workbook.
 
 ## Dedupe And Completeness
 
-Deduping is based on normalized title/company, with location added only when title or company is missing. The canonical export chooses the row with the highest completeness score, then most recent scrape time, while preserving duplicate counts and all links.
+Deduping matches provider IDs and listing-specific URLs first. Title/company and description matches across boards also consider location with the default settings. The canonical export ranks source priority, completeness, and scrape time, and preserves duplicate counts and links.
 
 When changing dedupe behavior:
 
@@ -151,49 +164,37 @@ All sources should call:
 
 Scrapers should continue when one board fails. A single source outage should not block the Excel export.
 
+Search attempts keep their run ID, outcome, and seen count in DuckDB. `source_health` shows the latest attempt and successful watermark. The 90-day observation archive records offers accepted at ingestion and supports offline `--replay-from`.
+
 Custom/detail scrapers should skip known detail pages by default using `store.source_url_seen(...)`, unless `config.refresh_known_details` is true. Search/list pages may still be revisited to discover new links.
 
 ## JobSpy
 
-Use JobSpy for sources in `config.jobspy_sites`: Indeed, LinkedIn, Glassdoor, Google Jobs.
+Use JobSpy for sources in `config.jobspy_sites`: Indeed, LinkedIn, Glassdoor, Google Jobs, HelloWork.
 
 Google is intentionally attempted through JobSpy first. Direct JobSpy Google Jobs may still return 0 results with `initial cursor not found`; when that happens, preserve the search-state error and continue with the other free sources. Do not invoke a paid Google Jobs fallback from the CLI unless paid API usage is explicitly requested.
 
 For JobSpy changes:
 
 - Keep `hours_old` incremental with the configured overlap.
-- Use `linkedin_fetch_description=True` for richer LinkedIn rows.
+- Set JobSpy's `fetch_description` for LinkedIn on a per-board copy of the search input so other boards in a batch keep their normal request count.
+- Run HelloWork separately with detail fetching enabled and convert the configured search radius to whole miles for JobSpy.
 - Keep Google-specific query construction in `_google_search_term`.
 - Normalize all row values before building `JobOffer`.
 - Filter before upsert.
 
-## Google Jobs And Web Search
+## Google Jobs And Site-Scoped Search
 
 Google Jobs uses JobSpy first. The CLI should stay free by default and should not call paid search APIs. Never hardcode keys.
 
-Web search uses free public HTML search fallbacks and direct site discovery for supported aggregators. DuckDuckGo, Google, or Bing may throttle or return no useful results; treat that as non-fatal and preserve the error in `search_state` only when all relevant free discovery paths fail.
+Supported aggregators discover offers through their own APIs, search pages, or sitemaps. Treat missing direct routes and source failures as non-fatal and record their errors in `search_state`.
 
-When adding web-search sources:
+When adding site-scoped searches:
 
 - Exclude the main boards already scraped directly.
 - Reject informational pages such as job guides, salary pages, training pages, and job-description articles.
 - Require a regional signal for Example Region.
 - Require a example-role title.
-
-## Crawlee
-
-Use Crawlee for custom crawlers where request queuing, retries, throttling, and page routing help more than a simple `httpx` request.
-
-Prefer `BeautifulSoupCrawler` for static HTML. Use a browser crawler only when the target truly requires JavaScript rendering and after checking for a public JSON/API endpoint first.
-
-For Crawlee scrapers:
-
-- Keep concurrency conservative.
-- Set retry, navigation, and request-handler timeouts.
-- Label requests such as `LIST` and `DETAIL`.
-- Use `context.add_requests` for discovered detail pages.
-- Deduplicate discovered URLs inside the crawl.
-- Respect `config.custom_max_pages`, `config.custom_max_detail_pages`, `config.request_delay_secs`, and `config.refresh_known_details`.
 
 ## Aggregators And Custom Sources
 
@@ -211,17 +212,27 @@ The workbook must stay localized-first and easy to scan. The main sheet is `Offr
 Preserve these user-facing features:
 
 - First columns are actionable: applied checkbox, status dropdown, clickable apply/source links.
-- `Postulé` is formula-driven from `Statut`.
+- When both columns are configured, `Postulé` is formula-driven from `Statut`. With only `Postulé` configured, it is a manual checkbox.
 - Filters, frozen panes, Excel table, conditional status colors.
 - Annual salary min/max columns should be numeric when a reliable range exists.
 - Ugly raw schema salary payloads should not appear in the main `Salaire` column.
 - Empty salary is better than misleading salary.
+
+Only annual amounts and monthly amounts multiplied by 12 belong in annual salary
+columns. Hourly/daily rates, unknown units, foreign currencies, and invalid ranges
+stay empty. The optional `À vérifier` column flags unusually low reported pay for
+manual contract review; low pay alone must not exclude an offer.
+
+The `job-scrapper` CLI writes local exports for normal runs, audits, and smoke runs.
+
+Generate the workbook and both CSV files in staging before replacing the published files.
 
 After export changes, regenerate and inspect `exports/jobs.xlsx` with OpenPyXL.
 
 ## Coding Style
 
 - Keep code small, readable, and source-specific.
+- Annotate function parameters and return types, including private helpers and tests. Ruff enforces the annotations.
 - Prefer reusable helpers over repeated parsing snippets.
 - Prefer structured data such as JSON-LD, API JSON, and known IDs before scraping loose visible text.
 - Use standard library parsing utilities for URLs, dates, and JSON rather than fragile string slicing when practical.
@@ -235,8 +246,8 @@ For most scraper/storage/export changes, run:
 
 ```bash
 uv run python -m compileall src main.py
-uv run task test
-uv run job-scrapper --skip-custom --skip-jobspy
+uv run --locked --group test task test
+uv run job-scrapper --export-only
 ```
 
 For source changes, also run a small scrape:
@@ -251,7 +262,7 @@ Then verify:
 - `exports/jobs.xlsx` exists.
 - `Offres` has rows and `Données brutes` exists.
 - `TableOffres` exists and the filter range covers all columns.
-- `A2` contains the `Postulé` formula.
+- If both `Postulé` and `Statut` are configured, the first `Postulé` data cell contains a formula referencing `Statut`.
 - Apply/source link columns contain `HYPERLINK(...)` formulas when URLs exist.
 - No obvious stage/alternance/apprentissage/contrat de professionnalisation offer remains.
 - Salary min/max are annual numeric values or empty.

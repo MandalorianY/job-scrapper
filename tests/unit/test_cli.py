@@ -42,7 +42,7 @@ def test_show_config_reports_effective_values_and_origins(monkeypatch: pytest.Mo
     def forbidden(*args: object, **kwargs: object) -> Never:
         raise AssertionError("Printing configuration must have no run side effects")
 
-    for name in ("configure_logging", "_tracker_sync_hooks", "_job_store"):
+    for name in ("configure_logging", "_job_store"):
         monkeypatch.setattr(cli, name, forbidden)
 
     result = CliRunner().invoke(cli.app, ["--show-config", "--query", "Administrateur Système", "--db", "test.duckdb"])
@@ -79,7 +79,8 @@ def test_status_previews_search_configuration_without_running(monkeypatch: pytes
     local_config = tmp_path / "config.local.yaml"
     local_config.write_text(
         "include_terms: [data analyst]\nexclude_terms: [volunteer]\n"
-        "excluded_title_patterns: [senior]\nexcluded_companies_by_source:\n  linkedin: [Example Company]\n",
+        "excluded_title_patterns: [senior]\nexcluded_companies_by_source:\n  linkedin: [Example Company]\n"
+        "tracker_sync:\n  enabled: true\n",
         encoding="utf-8",
     )
     monkeypatch.setattr(import_module("scrapper.config.settings"), "LOCAL_CONFIG_FILE", local_config)
@@ -92,7 +93,7 @@ def test_status_previews_search_configuration_without_running(monkeypatch: pytes
     def forbidden(*args: object, **kwargs: object) -> Never:
         raise AssertionError("Source status must have no run side effects")
 
-    for name in ("configure_logging", "_tracker_sync_hooks", "_job_store"):
+    for name in ("configure_logging", "_job_store"):
         monkeypatch.setattr(cli, name, forbidden)
 
     def resolve(config: SearchConfig) -> SearchConfig:
@@ -117,6 +118,8 @@ def test_status_previews_search_configuration_without_running(monkeypatch: pytes
         assert "environment: distance_km, enabled_sources" in result.stdout
         assert "command line: location_label, locations, queries" in result.stdout
         assert "private-key" not in result.stdout
+        assert "tracker sync" not in result.stdout.lower()
+        assert "tracker_sync" not in result.stdout
         rows = [
             tuple(cell.strip() for cell in line.strip("│").split("│"))
             for line in result.stdout.splitlines()
@@ -241,7 +244,7 @@ def test_custom_sites_controls_dispatch_and_status(monkeypatch: pytest.MonkeyPat
     assert sources["cadremploi"] == "Disabled"
 
 
-def test_local_export_survives_source_failure_and_never_syncs(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_local_export_survives_source_failure(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     async def sources(config: SearchConfig, store: JobStore) -> tuple[dict[str, int], dict[str, str]]:
         store.upsert_offer(
             JobOffer(
@@ -254,11 +257,7 @@ def test_local_export_survives_source_failure_and_never_syncs(monkeypatch: pytes
         )
         return {"example": 1}, {"unavailable_board": "Temporary source outage"}
 
-    def forbidden_sync() -> Never:
-        raise AssertionError("Local validation must not fetch or publish the remote tracker")
-
     monkeypatch.setattr(cli, "_run_custom_sources", sources)
-    monkeypatch.setattr(cli, "_tracker_sync_hooks", forbidden_sync)
     result = CliRunner().invoke(
         cli.app,
         [
@@ -295,9 +294,9 @@ def test_export_only_regenerates_local_files_from_duckdb(monkeypatch: pytest.Mon
         store.close()
 
     def forbidden(*args: object, **kwargs: object) -> Never:
-        raise AssertionError("Export-only must skip scraping, tracker sync, and observation pruning")
+        raise AssertionError("Export-only must skip scraping and observation pruning")
 
-    for name in ("_run_custom_sources", "_run_all_sources_parallel", "scrape_jobspy_sources", "_tracker_sync_hooks"):
+    for name in ("_run_custom_sources", "_run_all_sources_parallel", "scrape_jobspy_sources"):
         monkeypatch.setattr(cli, name, forbidden)
     monkeypatch.setattr(JobStore, "prune_observations", forbidden)
 
@@ -343,9 +342,9 @@ def test_offline_replay_restores_purged_offers_and_is_idempotent(
         archive.close()
 
     def forbidden(*args: object) -> Never:
-        raise AssertionError("Replay must never scrape or use the remote tracker")
+        raise AssertionError("Replay must never scrape")
 
-    for name in ("_run_custom_sources", "_run_all_sources_parallel", "scrape_jobspy_sources", "_tracker_sync_hooks"):
+    for name in ("_run_custom_sources", "_run_all_sources_parallel", "scrape_jobspy_sources"):
         monkeypatch.setattr(cli, name, forbidden)
 
     target = tmp_path / "rebuilt.duckdb"

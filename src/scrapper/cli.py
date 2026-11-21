@@ -31,8 +31,6 @@ from scrapper.storage import JobStore
 app = typer.Typer()
 console = Console()
 log = structlog.get_logger(__name__)
-TrackerFetch = Callable[[SearchConfig], Path | None]
-TrackerSync = Callable[[Path], Path | None]
 ProgressReporter = Callable[[str], None]
 
 
@@ -51,7 +49,7 @@ def run(
     results_wanted: Annotated[int | None, typer.Option("--results-wanted", min=1)] = None,
     custom_pages: Annotated[int | None, typer.Option("--custom-pages", min=1)] = None,
     export_only: Annotated[
-        bool, typer.Option("--export-only", help="Regenerate local exports from DuckDB without scraping or syncing.")
+        bool, typer.Option("--export-only", help="Regenerate local exports from DuckDB without scraping.")
     ] = False,
     skip_custom: Annotated[bool, typer.Option("--skip-custom", help="Only run JobSpy sources.")] = False,
     skip_jobspy: Annotated[bool, typer.Option("--skip-jobspy", help="Only run custom sources.")] = False,
@@ -59,9 +57,8 @@ def run(
         Path | None,
         typer.Option(exists=True, dir_okay=False, help="Rebuild from a DuckDB observation archive offline."),
     ] = None,
-    no_tracker_sync: Annotated[
-        bool, typer.Option("--no-tracker-sync", help="Skip fetching and publishing the remote tracker.")
-    ] = False,
+    # Accept the former opt-out for existing launchers.
+    no_tracker_sync: Annotated[bool, typer.Option("--no-tracker-sync", hidden=True)] = False,
     log_file: Annotated[Path | None, typer.Option("--log-file", help="Structured JSONL log path.")] = None,
     log_level: Annotated[
         LogLevel, typer.Option("--log-level", help="Minimum structured log level.")
@@ -76,7 +73,6 @@ def run(
     if export_only:
         skip_custom = True
         skip_jobspy = True
-        no_tracker_sync = True
     config_sources = {} if show_config or status else None
     config = _config_from_cli(
         query,
@@ -131,11 +127,6 @@ def run(
         refresh_known_details=config.refresh_known_details,
         log_file=str(configured_log_file) if configured_log_file else None,
     )
-    tracker_sync_hooks = _tracker_sync_hooks() if not no_tracker_sync and replay_from is None else None
-    sync_exported_tracker: TrackerSync | None = None
-    if tracker_sync_hooks:
-        fetch_remote_tracker, sync_exported_tracker = tracker_sync_hooks
-        fetch_remote_tracker(config)
     store = _job_store(config, run_id)
     try:
         counts: dict[str, int] = {}
@@ -200,10 +191,7 @@ def run(
             excluded_title_patterns=config.excluded_title_patterns,
             location_allowed=lambda location: location_is_in_scope(location, config.location_scope),
         )
-        synced_excel_path = sync_exported_tracker(excel_path) if sync_exported_tracker else None
         _print_summary(counts, total, excel_path, csv_path, raw_csv_path)
-        if synced_excel_path:
-            console.print(Text.assemble(("Synced Excel: ", "bold cyan"), (str(synced_excel_path), "green")))
         log.info(
             "scrape_run_completed",
             counts=counts,
@@ -211,7 +199,6 @@ def run(
             excel_path=str(excel_path),
             csv_path=str(csv_path),
             raw_csv_path=str(raw_csv_path),
-            synced_excel_path=str(synced_excel_path) if synced_excel_path else None,
             duration_seconds=round(time.monotonic() - started_at, 3),
         )
     except Exception:
@@ -428,16 +415,6 @@ def _run_jobspy_sources_with_own_store(
         return scrape_jobspy_sources(config, store, progress=progress)
     finally:
         store.close()
-
-
-def _tracker_sync_hooks() -> tuple[TrackerFetch, TrackerSync] | None:
-    try:
-        from scrapper.gdrive_sync import fetch_remote_tracker, sync_exported_tracker
-    except ModuleNotFoundError as exc:
-        if exc.name != "scrapper.gdrive_sync":
-            raise
-        return None
-    return fetch_remote_tracker, sync_exported_tracker
 
 
 def _config_from_cli(

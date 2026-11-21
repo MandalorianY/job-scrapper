@@ -1,0 +1,16 @@
+[Unit]
+Description=Job scraper and Excel tracker export
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/apps/job-scrapper
+ExecStart=%h/apps/job-scrapper/deploy/run.sh
+UMask=0077
+StandardOutput=append:%h/apps/job-scrapper/data/service.log
+StandardError=inherit
+Nice=10
+CPUQuota=400%
+MemoryMax=6G
+TimeoutStartSec=4h
+NoNewPrivileges=true
+PrivateTmp=true

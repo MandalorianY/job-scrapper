@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Iterator
+from pathlib import Path
 
 import pytest
 import structlog
@@ -10,7 +12,7 @@ from scrapper.logging import configure_logging
 
 
 @pytest.fixture
-def restore_logging():
+def restore_logging() -> Iterator[None]:
     root_logger = logging.getLogger()
     original_handlers = list(root_logger.handlers)
     original_level = root_logger.level
@@ -28,7 +30,7 @@ def restore_logging():
         structlog.reset_defaults()
 
 
-def test_configure_logging_writes_structured_json(tmp_path, restore_logging) -> None:
+def test_configure_logging_writes_structured_json(tmp_path: Path, restore_logging: None) -> None:
     log_file = tmp_path / "logs" / "job-scrapper.jsonl"
 
     configured_log_file = configure_logging(log_file, level="INFO")
@@ -49,6 +51,6 @@ def test_configure_logging_writes_structured_json(tmp_path, restore_logging) -> 
     assert "_from_structlog" not in record
 
 
-def test_configure_logging_rejects_unknown_level(tmp_path, restore_logging) -> None:
+def test_configure_logging_rejects_unknown_level(tmp_path: Path, restore_logging: None) -> None:
     with pytest.raises(ValueError, match="Unsupported log level"):
         configure_logging(tmp_path / "job-scrapper.jsonl", level="TRACE")
