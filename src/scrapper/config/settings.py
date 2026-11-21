@@ -25,7 +25,7 @@ from scrapper.config.aggregator_specs import (
 from scrapper.text import matches_job_title, normalize_text
 
 PACKAGE_CONFIG_DIR = Path(__file__).resolve().parent
-PROJECT_ROOT = PACKAGE_CONFIG_DIR.parents[2]
+PROJECT_ROOT = PACKAGE_CONFIG_DIR.parents[2] if PACKAGE_CONFIG_DIR.parents[1].name == "src" else None
 LOCAL_CONFIG_FILE = PACKAGE_CONFIG_DIR / "config.local.yaml"
 
 
@@ -37,7 +37,10 @@ def _yaml_config_files(app_env: str, profile: Path | None = None) -> list[Path]:
     if profile is not None:
         files.append(profile)
     elif os.getenv("SCRAPPER_DISABLE_LOCAL_CONFIG") not in {"1", "true", "TRUE", "yes", "YES"}:
-        files.append(LOCAL_CONFIG_FILE)
+        local_config = LOCAL_CONFIG_FILE
+        if PROJECT_ROOT is None and not local_config.is_file():
+            local_config = Path.cwd() / local_config.name
+        files.append(local_config)
     return files
 
 
@@ -162,10 +165,10 @@ class PathsConfig(BaseModel):
 
     @model_validator(mode="after")
     def resolve_project_relative_paths(self) -> PathsConfig:
+        root = PROJECT_ROOT or Path.cwd()
         for field_name in ("database_path", "export_dir", "log_file"):
-            path = getattr(self, field_name)
-            if not path.is_absolute():
-                setattr(self, field_name, PROJECT_ROOT / path)
+            path = getattr(self, field_name).expanduser()
+            setattr(self, field_name, root / path)
         return self
 
     @property
@@ -179,6 +182,15 @@ class PathsConfig(BaseModel):
     @property
     def raw_csv_path(self) -> Path:
         return self.export_dir / "jobs_raw.csv"
+
+
+Weekday = Literal["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+WEEKDAYS: tuple[Weekday, ...] = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
+
+
+class ScheduleConfig(BaseModel):
+    days: tuple[Weekday, ...] = Field(default=WEEKDAYS[:5], min_length=1)
+    time: str = Field(default="15:30", pattern=r"^(?:[01][0-9]|2[0-3]):[0-5][0-9]$")
 
 
 DEFAULT_EXCEL_COLUMNS = (
@@ -264,6 +276,7 @@ class Settings(BaseSettings):
     http_request_delay_secs: float = 0.25
     user_agent: str
     paths: PathsConfig
+    schedule: ScheduleConfig = Field(default_factory=ScheduleConfig)
     export: ExportConfig = Field(default_factory=ExportConfig)
     http: HttpConfig
     jobspy: JobspyConfig
@@ -393,8 +406,17 @@ def get_settings() -> Settings:
     return Settings()
 
 
-settings = get_settings()
+_LEGACY_SETTINGS = {
+    "DEFAULT_QUERIES": "queries",
+    "DEFAULT_EXCLUDE_TERMS": "exclude_terms",
+    "DEFAULT_INCLUDE_TERMS": "include_terms",
+}
 
-DEFAULT_QUERIES = settings.queries
-DEFAULT_EXCLUDE_TERMS = settings.exclude_terms
-DEFAULT_INCLUDE_TERMS = settings.include_terms
+
+def __getattr__(name: str) -> object:
+    # Keep imports independent of the user's config until defaults are requested.
+    if name == "settings":
+        return get_settings()
+    if field := _LEGACY_SETTINGS.get(name):
+        return getattr(get_settings(), field)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

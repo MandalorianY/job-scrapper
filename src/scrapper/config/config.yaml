@@ -74,6 +74,11 @@ paths:
   database_path: data/job_search.duckdb
   export_dir: exports
 
+# Used when installing the timer. Linux uses Paris time, macOS uses the system time zone.
+schedule:
+  days: [mon, tue, wed, thu, fri]
+  time: "15:30"
+
 export:
   # Available fields for the final Offres Excel/CSV export:
   # Postulé, Rejeté, Lien, Statut, Postuler, Offre source, Autres liens, Intitulé,

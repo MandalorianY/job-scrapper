@@ -8,13 +8,18 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Annotated
 
+import duckdb
 import httpx
 import structlog
 import typer
+import yaml
+from pydantic import ValidationError
 from rich.console import Console
 from rich.table import Table
 from rich.text import Text
 
+from scrapper import __version__
+from scrapper.cli_paths import existing_file
 from scrapper.config import SearchConfig
 from scrapper.config.settings import LOCAL_CONFIG_FILE, PACKAGE_CONFIG_DIR, _leaf_values
 from scrapper.export import export_jobs
@@ -32,14 +37,20 @@ from scrapper.scrapers.wttj import WTTJ_SOURCE
 from scrapper.search_regions import load_location_scope, route_location_overrides, save_location_scope
 from scrapper.storage import JobStore
 
-app = typer.Typer()
+app = typer.Typer(pretty_exceptions_show_locals=False)
 console = Console()
 log = structlog.get_logger(__name__)
 ProgressReporter = Callable[[str], None]
 _CONFIG_OVERRIDE_HELP = (
-    "Create or edit src/scrapper/config/config.local.yaml to apply overrides automatically. "
-    "Use --profile PATH to load a different YAML file."
+    "Use config.local.yaml in the working directory for an installed CLI, or under src/scrapper/config "
+    "in a checkout. Use --profile FILE for a specific YAML profile."
 )
+
+
+def _show_version(value: bool) -> None:
+    if value:
+        typer.echo(f"job-scrapper {__version__}")
+        raise typer.Exit()
 
 
 @app.command(
@@ -66,66 +77,66 @@ def run(
     skip_jobspy: Annotated[bool, typer.Option("--skip-jobspy", help="Only run custom sources.")] = False,
     replay_from: Annotated[
         Path | None,
-        typer.Option(exists=True, dir_okay=False, help="Rebuild from a DuckDB observation archive offline."),
+        typer.Option(parser=existing_file, metavar="FILE", help="Rebuild from a DuckDB observation archive offline."),
     ] = None,
     log_file: Annotated[Path | None, typer.Option("--log-file", help="Structured JSONL log path.")] = None,
     profile: Annotated[
         Path | None,
-        typer.Option("--profile", exists=True, dir_okay=False, help="Use this YAML in place of config.local.yaml."),
+        typer.Option(
+            "--profile", parser=existing_file, metavar="FILE", help="Use this YAML in place of config.local.yaml."
+        ),
     ] = None,
     log_level: Annotated[
         LogLevel, typer.Option("--log-level", help="Minimum structured log level.")
     ] = DEFAULT_LOG_LEVEL,
     show_config: Annotated[
-        bool, typer.Option("--show-config", help="Print effective settings and their sources, then exit.")
+        bool, typer.Option("--show-config", help="Print effective settings and their sources offline.")
     ] = False,
     status: Annotated[
         bool, typer.Option("--status", help="Show search settings, job sources, and tracker sync status offline.")
+    ] = False,
+    version: Annotated[
+        bool, typer.Option("--version", callback=_show_version, is_eager=True, help="Show the installed version.")
     ] = False,
 ) -> None:
     if export_only:
         skip_custom = True
         skip_jobspy = True
     config_sources = {} if show_config or status else None
-    config = _config_from_cli(
-        query,
-        locations,
-        db,
-        export_dir,
-        log_file,
-        results_wanted,
-        custom_pages,
-        config_sources,
-        profile,
-    )
-    status_only = status and not show_config
-    if status_only:
-        _print_tracker_sync_status(config)
+    try:
+        config = _config_from_cli(
+            query,
+            locations,
+            db,
+            export_dir,
+            log_file,
+            results_wanted,
+            custom_pages,
+            config_sources,
+            profile,
+        )
+    except ValidationError as exc:
+        errors = exc.errors(include_url=False, include_context=False, include_input=False)
+        details = "\n".join(f"{'.'.join(map(str, error['loc']))}: {error['msg']}" for error in errors)
+        raise typer.BadParameter(f"Invalid configuration.\n{details}") from exc
+    except yaml.YAMLError as exc:
+        mark = getattr(exc, "problem_mark", None)
+        detail = f" at line {mark.line + 1}, column {mark.column + 1}" if mark else ""
+        raise typer.BadParameter(f"Invalid YAML configuration{detail}.") from exc
+    except OSError as exc:
+        raise typer.BadParameter(f"Could not read configuration: {exc}") from exc
     live_search = replay_from is None and not (skip_jobspy and skip_custom)
-    unrouted_config = config
     if live_search and not config.search_locations and config_sources is None:
         raise typer.BadParameter("Set locations in your search config or pass --location.", param_hint="--location")
-    before_routing = dict(_leaf_values(config.model_dump())) if config_sources is not None else {}
-    if live_search and config.search_locations and not status_only:
-        try:
-            if locations is not None and config.country.casefold() == "france":
-                # Board-specific place lists in a saved profile refer to its original towns.
-                config.jobspy.google_query_places = ()
-                config.jobspy.glassdoor_regional_fallback_term = None
-                config.jobspy.glassdoor_location_override = None
-                config.aggregators.location_terms = ()
-                config.aggregators.direct_locations = ()
-            config = route_location_overrides(config, write_cache=not show_config)
-        except (httpx.HTTPError, ValueError) as exc:
-            raise typer.BadParameter(
-                f"Could not route the requested locations: {exc}", param_hint="--location"
-            ) from exc
-        scope_origin = "resolved from --location" if locations else "resolved from locations"
-    else:
-        scope = load_location_scope(config, replay_from or config.database_path)
-        config = config.model_copy(update={"location_scope": scope})
-        scope_origin = "saved geographic scope"
     if config_sources is not None:
+        before_routing = dict(_leaf_values(config.model_dump()))
+        config, scope_origin = _resolve_run_scope(
+            config,
+            locations_overridden=locations is not None,
+            replay_from=replay_from,
+            reroute=live_search and show_config,
+            preview=True,
+        )
         for key, value in _leaf_values(config.model_dump()):
             if key not in before_routing or before_routing[key] != value:
                 config_sources[".".join(key)] = scope_origin
@@ -133,6 +144,7 @@ def run(
         if show_config:
             typer.echo(json.dumps(report, ensure_ascii=False, indent=2))
         else:
+            _print_tracker_sync_status(config)
             _print_search_status(config, report["sources"], profile)
             _print_source_status(
                 config,
@@ -140,9 +152,13 @@ def run(
                 skip_custom=skip_custom or replay_from is not None,
             )
         return
-    configured_log_file = configure_logging(config.log_file, level=log_level)
-    if live_search:
-        save_location_scope(unrouted_config, config.location_scope)
+    if export_only and replay_from is None and not config.database_path.is_file():
+        raise typer.BadParameter(f"Database file not found: {config.database_path}", param_hint="--db")
+    _validate_artifact_paths(config, replay_from)
+    try:
+        configured_log_file = configure_logging(config.log_file, level=log_level)
+    except OSError as exc:
+        raise typer.BadParameter(f"Could not open the log file: {exc}", param_hint="--log-file") from exc
     run_id = str(uuid.uuid4())
     structlog.contextvars.clear_contextvars()
     structlog.contextvars.bind_contextvars(
@@ -161,13 +177,23 @@ def run(
         refresh_known_details=config.refresh_known_details,
         log_file=str(configured_log_file) if configured_log_file else None,
     )
-    store = _job_store(config, run_id)
-    location_allowed = (
-        (lambda location: location_is_in_scope(location, config.location_scope))
-        if config.location_scope.centers
-        else None
-    )
+    store = None
     try:
+        unrouted_config = config
+        config, _ = _resolve_run_scope(
+            config,
+            locations_overridden=locations is not None,
+            replay_from=replay_from,
+            reroute=live_search,
+        )
+        if live_search:
+            save_location_scope(unrouted_config, config.location_scope)
+        store = _job_store(config, run_id)
+        location_allowed = (
+            (lambda location: location_is_in_scope(location, config.location_scope))
+            if config.location_scope.centers
+            else None
+        )
         counts: dict[str, int] = {}
         if replay_from is None and not (skip_jobspy and skip_custom):
             store.prune_observations()
@@ -187,6 +213,7 @@ def run(
             counts.update(source_counts)
             _report_source_errors(source_errors)
             store.close()
+            store = None
             store = _job_store(config, run_id)
         elif not skip_jobspy:
             console.print("[bold cyan]Running JobSpy sources[/bold cyan]")
@@ -240,12 +267,61 @@ def run(
             raw_csv_path=str(raw_csv_path),
             duration_seconds=round(time.monotonic() - started_at, 3),
         )
-    except Exception:
+    except Exception as exc:
         log.exception("scrape_run_failed", duration_seconds=round(time.monotonic() - started_at, 3))
+        if isinstance(exc, (duckdb.Error, OSError)):
+            typer.echo(f"Run failed: {exc}", err=True)
+            raise typer.Exit(1) from exc
         raise
     finally:
         structlog.contextvars.clear_contextvars()
-        store.close()
+        if store is not None:
+            store.close()
+
+
+def _validate_artifact_paths(config: SearchConfig, replay_from: Path | None) -> None:
+    paths = {
+        "Database": config.database_path,
+        "Log": config.log_file,
+        "Excel export": config.excel_path,
+        "CSV export": config.csv_path,
+        "Raw CSV export": config.raw_csv_path,
+    }
+    if replay_from is not None and replay_from.resolve() != config.database_path.resolve():
+        paths["Replay archive"] = replay_from
+    used: dict[Path, str] = {}
+    for label, path in paths.items():
+        resolved = path.resolve()
+        if resolved in used:
+            raise typer.BadParameter(f"{label} and {used[resolved]} point to the same file: {resolved}")
+        used[resolved] = label
+
+
+def _resolve_run_scope(
+    config: SearchConfig, *, locations_overridden: bool, replay_from: Path | None, reroute: bool, preview: bool = False
+) -> tuple[SearchConfig, str]:
+    if reroute and config.search_locations:
+        try:
+            if locations_overridden and config.country.casefold() == "france":
+                # Board-specific place lists refer to the towns in the saved profile.
+                config.jobspy.google_query_places = ()
+                config.jobspy.glassdoor_regional_fallback_term = None
+                config.jobspy.glassdoor_location_override = None
+                config.aggregators.location_terms = ()
+                config.aggregators.direct_locations = ()
+            routed = (
+                route_location_overrides(config, write_cache=False, cache_only=True)
+                if preview
+                else route_location_overrides(config, write_cache=True)
+            )
+        except (httpx.HTTPError, ValueError) as exc:
+            raise typer.BadParameter(
+                f"Could not route the requested locations: {exc}", param_hint="--location"
+            ) from exc
+        if not preview or routed is not config:
+            return routed, "resolved from --location" if locations_overridden else "resolved from locations"
+    scope = load_location_scope(config, replay_from or config.database_path, warn=not preview)
+    return config.model_copy(update={"location_scope": scope}), "saved geographic scope"
 
 
 def _job_store(config: SearchConfig, run_id: str) -> JobStore:
@@ -500,7 +576,7 @@ def _config_from_cli(
         overrides["locations"] = tuple(locations)
         overrides["location_label"] = " / ".join(locations)
     paths = {
-        name: path.absolute()
+        name: path.expanduser().absolute()
         for name, path in (("database_path", db), ("export_dir", export_dir), ("log_file", log_file))
         if path is not None
     }

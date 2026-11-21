@@ -1,19 +1,36 @@
-# Schedule runs with systemd
+# Schedule scraper runs
 
-The user timer runs the scraper at 15:30 Europe/Paris on weekdays. It skips missed runs. The wrapper uses `flock` to prevent overlapping runs.
+Set the days and time in your YAML profile or checkout's `config.local.yaml`. The default is weekdays at 15:30. Use `mon`, `tue`, `wed`, `thu`, `fri`, `sat`, or `sun` and a quoted 24-hour time.
 
-Clone the repository to `~/apps/job-scrapper` or update the paths in the service unit. Install uv and make sure `flock` is available on the host. Then run:
+```yaml
+schedule:
+  days: [mon, wed, fri]
+  time: "09:15"
+```
+
+Run the installer again after changing the schedule. The same profile is passed to the scraper on each run.
+
+## macOS with Homebrew
+
+Install the formula and run the timer installer from the directory where you keep your tracker. Pass `--profile` to use your own search and schedule settings.
 
 ```sh
-cd ~/apps/job-scrapper
-uv sync --locked --no-dev
-mkdir -p data ~/.config/systemd/user
-cp deploy/job-scrapper.service deploy/job-scrapper.timer ~/.config/systemd/user/
-systemctl --user daemon-reload
-deploy/run.sh --export-only
-systemctl --user enable --now job-scrapper.timer
-systemctl --user list-timers job-scrapper.timer
+brew install mandaloriany/tap/job-scrapper
+job-scrapper-install-timer --profile /path/to/profile.yaml
+brew services list
 ```
+
+The service uses the Mac's time zone and runs as your logged-in user. Run `brew services stop job-scrapper` to disable it. Console output goes to `data/service.log` in the directory where you ran the installer. To update the schedule, run the installer again from that directory with the profile.
+
+## Linux with systemd
+
+Install `uv` and make sure a systemd user session and `flock` are available. From your checkout, run:
+
+```sh
+./deploy/install-timer.sh
+```
+
+The installer uses the checkout's path, enables the timer, and prints the next run. Add `--profile /path/to/profile.yaml` to use a specific profile. The timer uses Europe/Paris time and skips missed runs. The wrapper uses `flock` to prevent overlapping runs. Run `systemctl --user disable --now job-scrapper.timer` to disable the timer.
 
 Put optional environment overrides in `~/.config/job-scrapper/environment` with mode `600`. Keep the checkout's `data/`, `exports/`, and local configuration when updating the source.
 

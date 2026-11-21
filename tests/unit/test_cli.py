@@ -9,7 +9,7 @@ import pytest
 from pydantic import ValidationError
 from typer.testing import CliRunner
 
-from scrapper import cli, search_regions
+from scrapper import __version__, cli, search_regions
 from scrapper.config import SearchConfig
 from scrapper.config.settings import PACKAGE_CONFIG_DIR, LocationScopeConfig
 from scrapper.location_scope import location_is_in_scope
@@ -22,6 +22,122 @@ from scrapper.storage import JobStore
 def test_search_configuration_rejects_handwritten_coordinates() -> None:
     with pytest.raises(ValidationError, match="The scraper resolves coordinates automatically"):
         SearchConfig(location_scope={"city_coordinates": {"Paris": [48.8589, 2.347]}})
+
+
+def test_version_and_explicit_profile_work_with_invalid_local_config(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    local_config = tmp_path / "config.local.yaml"
+    local_config.write_text("paths: [invalid\n", encoding="utf-8")
+    profile = tmp_path / "selected.yaml"
+    profile.write_text("queries: [selected]\n", encoding="utf-8")
+    monkeypatch.setattr(import_module("scrapper.config.settings"), "LOCAL_CONFIG_FILE", local_config)
+    monkeypatch.delenv("SCRAPPER_DISABLE_LOCAL_CONFIG", raising=False)
+    runner = CliRunner()
+
+    version = runner.invoke(cli.app, ["--version"])
+    assert version.exit_code == 0
+    assert version.stdout.strip() == f"job-scrapper {__version__}"
+    bad_config = runner.invoke(cli.app, ["--status"])
+    assert bad_config.exit_code == 2
+    assert "Invalid YAML configuration" in bad_config.output
+    selected = runner.invoke(cli.app, ["--profile", str(profile), "--show-config"])
+    assert selected.exit_code == 0, selected.output
+    assert json.loads(selected.stdout)["values"]["queries"] == ["selected"]
+
+
+def test_show_config_stays_offline_when_geography_is_missing(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    def forbidden(*args: object, **kwargs: object) -> Never:
+        raise AssertionError("Configuration preview must not open an HTTP client")
+
+    monkeypatch.setattr(search_regions.httpx, "Client", forbidden)
+    database = tmp_path / "missing.duckdb"
+    cache = tmp_path / ".geography" / "town-paris.json"
+    cache.parent.mkdir()
+    cache.write_text("invalid json", encoding="utf-8")
+    result = CliRunner().invoke(cli.app, ["--show-config", "--db", str(database), "--location", "Paris, France"])
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout)["values"]["locations"] == ["Paris, France"]
+    assert not database.exists()
+    assert cache.read_text(encoding="utf-8") == "invalid json"
+
+
+def test_export_only_preserves_existing_tracker_if_database_is_missing(tmp_path: Path) -> None:
+    workbook = tmp_path / "jobs.xlsx"
+    workbook.write_bytes(b"existing tracker")
+    database = tmp_path / "missing.duckdb"
+    result = CliRunner().invoke(cli.app, ["--export-only", "--db", str(database), "--export-dir", str(tmp_path)])
+    assert result.exit_code == 2
+    assert "Database file not found" in result.output
+    assert workbook.read_bytes() == b"existing tracker"
+    assert not database.exists()
+
+
+def test_replay_rejects_log_path_pointing_to_archive(tmp_path: Path) -> None:
+    archive = tmp_path / "archive.duckdb"
+    archive.write_bytes(b"archive")
+    database = tmp_path / "new.duckdb"
+    result = CliRunner().invoke(
+        cli.app, ["--replay-from", str(archive), "--log-file", str(archive), "--db", str(database)]
+    )
+    assert result.exit_code == 2
+    assert "Replay archive and Log point to the same file" in result.output
+    assert archive.read_bytes() == b"archive"
+    assert not database.exists()
+
+
+def test_database_startup_failure_is_recorded(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    database = tmp_path / "jobs.duckdb"
+    database.touch()
+    log_path = tmp_path / "run.jsonl"
+
+    def fail(config: SearchConfig, run_id: str) -> Never:
+        raise OSError("Database is unavailable")
+
+    monkeypatch.setattr(cli, "_job_store", fail)
+    result = CliRunner().invoke(cli.app, ["--export-only", "--db", str(database), "--log-file", str(log_path)])
+    assert result.exit_code == 1
+    assert "Run failed: Database is unavailable" in result.output
+    records = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
+    assert [record["event"] for record in records] == ["scrape_run_started", "scrape_run_failed"]
+    assert records[0]["run_id"] == records[1]["run_id"]
+
+
+def test_installed_config_and_cli_paths_use_the_home_directory(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    workdir = tmp_path / "tracker"
+    workdir.mkdir()
+    settings_module = import_module("scrapper.config.settings")
+    monkeypatch.chdir(workdir)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    monkeypatch.setattr(settings_module, "PROJECT_ROOT", None)
+    monkeypatch.setattr(settings_module, "LOCAL_CONFIG_FILE", tmp_path / "package" / "config.local.yaml")
+    monkeypatch.delenv("SCRAPPER_DISABLE_LOCAL_CONFIG", raising=False)
+    (workdir / "config.local.yaml").write_text("queries: [local]\n", encoding="utf-8")
+    profile = home / "profile.yaml"
+    profile.write_text(
+        'queries: [profile]\npaths:\n  database_path: "~/jobs.duckdb"\n  log_file: "~/jobs.jsonl"\n',
+        encoding="utf-8",
+    )
+
+    assert SearchConfig().queries == ("local",)
+    runner = CliRunner()
+    result = runner.invoke(
+        cli.app,
+        ["--show-config", "--export-only", "--profile", "~/profile.yaml", "--export-dir", "~/exports"],
+    )
+    assert result.exit_code == 0, result.output
+    report = json.loads(result.stdout)
+    assert report["values"]["queries"] == ["profile"]
+    assert report["values"]["paths"] == {
+        "database_path": str(home / "jobs.duckdb"),
+        "export_dir": str(home / "exports"),
+        "log_file": str(home / "jobs.jsonl"),
+    }
+    assert report["sources"]["paths.database_path"] == str(profile)
+    assert report["sources"]["paths.export_dir"] == "command line"
 
 
 def test_show_config_reports_effective_values_and_origins(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -160,8 +276,8 @@ def test_status_previews_search_configuration_without_running(monkeypatch: pytes
     result = runner.invoke(cli.app, ["--status"])
     assert result.exit_code == 0, result.output
     assert "Search profile None" in " ".join(result.stdout.split())
-    assert "Create or edit src/scrapper/config/config.local.yaml" in result.stdout
-    assert "Use --profile PATH to load a different YAML file." in " ".join(result.stdout.split())
+    assert "Use config.local.yaml in the working directory for an installed CLI" in " ".join(result.stdout.split())
+    assert "Use --profile FILE for a specific YAML profile." in " ".join(result.stdout.split())
 
 
 @pytest.mark.parametrize(
