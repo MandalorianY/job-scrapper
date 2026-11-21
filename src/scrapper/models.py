@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
-from typing import Any
 
 
 @dataclass(slots=True)
@@ -29,9 +28,9 @@ class JobOffer:
     search_query: str | None = None
     search_location: str | None = None
     scraped_at: str | None = None
-    raw: dict[str, Any] | None = None
+    raw: dict[str, object] | None = None
 
-    def to_record(self) -> dict[str, Any]:
+    def to_record(self) -> dict[str, object]:
         record = asdict(self)
         record["scraped_at"] = record["scraped_at"] or datetime.now(UTC).isoformat()
         return record

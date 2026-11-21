@@ -156,6 +156,13 @@ def url_key(url: str | None) -> str | None:
     return f"{parsed.netloc.lower()}{path}?{compact_query}".rstrip("?")
 
 
+def external_url_key(url: str | None, blocked_host: str) -> str | None:
+    parsed = urlparse(url or "")
+    if not parsed.netloc or blocked_host in parsed.netloc.lower():
+        return None
+    return url_key(url)
+
+
 def unwrap_redirect(url: str | None) -> str | None:
     if not url:
         return None
