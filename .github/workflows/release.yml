@@ -1,0 +1,163 @@
+name: Release
+
+on:
+  push:
+    tags: ['v[0-9]+.[0-9]+.[0-9]+']
+  pull_request:
+    paths:
+      - .github/workflows/release.yml
+      - deploy/build_release.py
+      - deploy/smoke_release.py
+      - main.py
+      - pyproject.toml
+      - uv.lock
+      - src/scrapper/**
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency: release-${{ github.ref }}
+
+jobs:
+  python-packages:
+    if: ${{ !github.event.deleted }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      RELEASE_TAG: ${{ github.ref_name }}
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: "0.13.9"
+          python-version: "3.14"
+
+      - name: Check release version
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          package_version=$(uv version --short)
+          if [[ "$RELEASE_TAG" != "v$package_version" ]]; then
+            echo "Release tag $RELEASE_TAG must match package version v$package_version." >&2
+            exit 1
+          fi
+
+      - name: Build package
+        run: uv build --no-sources
+
+      - name: Smoke-test installed wheel
+        run: |
+          uv sync --locked --no-default-groups --no-install-project --no-build
+          uv pip install --no-deps dist/*.whl
+          uv run --locked --no-sync python deploy/smoke_release.py "$PWD/.venv/bin/job-scrapper"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-python
+          path: dist/*
+          if-no-files-found: error
+
+  native-packages:
+    if: ${{ !github.event.deleted }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {runner: ubuntu-22.04, arch: x86_64}
+          - {runner: ubuntu-22.04-arm, arch: aarch64}
+          - {runner: windows-2025, arch: x86_64}
+          - {runner: windows-11-arm, arch: aarch64}
+          - {runner: macos-15-intel, arch: x86_64}
+          - {runner: macos-15, arch: aarch64}
+    env:
+      PYTHONUTF8: '1'
+      UV_PYTHON_ARCH: ${{ matrix.arch }}
+      UV_PYTHON_PREFERENCE: only-managed
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ddfaca235ff9 # v9.0.0
+        with:
+          version: "0.13.9"
+          python-version: "3.14"
+
+      - name: Build standalone release
+        run: |
+          uv sync --locked --no-default-groups --group release --no-editable --no-build-package pyinstaller
+          uv run --locked --no-sync python deploy/build_release.py
+
+      - name: Smoke-test Windows executable
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $executable = (Get-ChildItem dist/*.exe | Select-Object -First 1).FullName
+          uv run --locked --no-sync python deploy/smoke_release.py "$executable"
+
+      - name: Smoke-test portable archive
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          tar -xzf dist/job-scrapper-*.tar.gz -C "$RUNNER_TEMP"
+          uv run --locked --no-sync python deploy/smoke_release.py "$RUNNER_TEMP/job-scrapper/job-scrapper"
+
+      - name: Smoke-test Debian package
+        if: runner.os == 'Linux'
+        run: |
+          sudo dpkg -i dist/*.deb
+          uv run --locked --no-sync python deploy/smoke_release.py /usr/bin/job-scrapper
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-${{ matrix.runner }}
+          path: dist/*
+          if-no-files-found: error
+          compression-level: 0
+
+  release:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') && !github.event.deleted
+    needs: [python-packages, native-packages]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    env:
+      RELEASE_TAG: ${{ github.ref_name }}
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
+
+      - name: Generate release checksums
+        working-directory: dist
+        run: sha256sum ./* > SHA256SUMS
+
+      - name: Upload to GitHub release draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if is_draft=$(gh release view "$RELEASE_TAG" --json isDraft --jq .isDraft); then
+            if [[ "$is_draft" != true ]]; then
+              echo "Release $RELEASE_TAG is already published." >&2
+              exit 1
+            fi
+            gh release upload "$RELEASE_TAG" dist/* --clobber
+          else
+            gh release create "$RELEASE_TAG" dist/* --verify-tag --draft --generate-notes
+          fi
