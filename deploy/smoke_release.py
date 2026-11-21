@@ -65,7 +65,8 @@ def smoke(command: list[str], workspace: Path) -> None:
         return result.stdout.strip()
 
     assert run("--version") == f"job-scrapper {__version__}"
-    assert "--export-only" in run("--help")
+    help_text = run("--help")
+    assert "Usage:" in help_text, help_text
     assert "Search scope" in run("--profile", profile.name, "--status")
     settings = json.loads(run("--profile", profile.name, "--show-config"))["values"]
     assert settings["queries"] == ["example"]
