@@ -1,8 +1,6 @@
-  # =============================================================================
+# =============================================================================
 # 1. Core Search Scope
 # =============================================================================
-
-app_env: dev
 
 queries:
   - example role
@@ -13,28 +11,10 @@ queries:
   - demo analyst
   - placeholder operator
 
-location_label: Toulouse, France
-locations:
-  - Toulouse, France
+# Override this example town in config.local.yaml, a search profile, or --location.
+locations: ["Toulouse, France"]
 country: france
 distance_km: 25
-
-location_scope:
-  enabled: true
-  radius_km: 25
-  centers:
-    - name: Toulouse
-      latitude: 43.6007
-      longitude: 1.4328
-      aliases:
-        - Grand Toulouse
-        - Métropole de Toulouse
-        - Metropole de Toulouse
-        - Agglomération toulousaine
-        - Agglomeration toulousaine
-  city_coordinates:
-    Blagnac: [43.6410, 1.3770]
-    Colomiers: [43.6116, 1.3245]
 
 # =============================================================================
 # 2. Role Filtering
@@ -52,9 +32,6 @@ include_terms:
   - lead
   - analyst
   - operator
-
-# Optional regular expressions matched against normalized titles (lowercase, no accents/punctuation).
-excluded_title_patterns: []
 
 exclude_terms:
   - stage
@@ -77,7 +54,6 @@ exclude_terms:
   - contrat professionnel
   - contrat de professionnalisation
   - bénévole
-  - benevole
   - volunteer
 
 # =============================================================================
@@ -85,16 +61,10 @@ exclude_terms:
 # =============================================================================
 
 default_hours_old: 336
-jobspy_batch_sites: true
 overlap_hours: 24
 results_wanted_per_query: 25
 custom_max_pages: 2
-custom_max_detail_pages: 80
 refresh_known_details: false
-custom_source_concurrency: 4
-http_max_connections: 12
-http_per_host_concurrency: 2
-http_request_delay_secs: 0.25
 
 # =============================================================================
 # 4. Outputs And Runtime Paths
@@ -103,7 +73,6 @@ http_request_delay_secs: 0.25
 paths:
   database_path: data/job_search.duckdb
   export_dir: exports
-  log_file: data/job-scrapper.jsonl
 
 export:
   # Available fields for the final Offres Excel/CSV export:
@@ -134,66 +103,22 @@ export:
     - Salaire min (€ annuel)
     - Salaire max (€ annuel)
     - Recherche
-  repair_fields_enabled_by_default: true
   repair_fields_by_source:
     france_travail: true
-  direct_links_enabled_by_source: {}
 
 # =============================================================================
 # 5. Enabled Sources
 # =============================================================================
 
-jobspy_sites:
-  - indeed
-  - linkedin
-  - glassdoor
-  - google
-  - hellowork
-
-custom_sites:
-  - welcome_to_the_jungle
-  - aggregators
-
 # Optional per-source switches. Any source omitted here stays enabled.
 # Set a source to false to skip scraping it.
 enabled_sources:
-  indeed: true
-  linkedin: true
-  glassdoor: true
-  google: true
-  hellowork: true
-  welcome_to_the_jungle: true
-  aggregators: true
-  france_travail: true
-  emploi_territorial: true
-  meteojob: true
-  jobijoba: true
-  makesense: true
   apec: false
-  isarta: true
-  emploi_collectivites: true
-  cadremploi: true
-  optioncarriere: true
-
-# Exact company names to exclude per source. Use "*" for all sources.
-excluded_companies_by_source: {}
 
 # =============================================================================
 # 6. Dedupe Source Preference
 # =============================================================================
 
-dedupe_fields:
-  primary:
-    - title
-    - company
-  fallback:
-    - location
-  description:
-    - description
-    - company
-    - location
-
-dedupe_default_source_priority: 100
 dedupe_source_priority:
   indeed: 0
   linkedin: 10
@@ -206,8 +131,6 @@ dedupe_source_priority:
 
 # Direct HTTP requests use this value. JobSpy uses its own user agents.
 user_agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0 Safari/537.36
-extra_headers: {}
-
 http:
   accept_language: fr-FR,fr;q=0.9,en;q=0.7
 
@@ -216,113 +139,16 @@ http:
 # =============================================================================
 
 jobspy:
-  google_zero_results_error: "JobSpy Google returned 0 rows. Upstream issue #302 reports 'initial cursor not found' when Google does not return the expected Jobs payload."
-  glassdoor_zero_results_error: "JobSpy Glassdoor returned 0 rows after using the city-only location fallback. Glassdoor may be blocking the Graph API or returning an unsupported payload."
   glassdoor_results_wanted_per_query: 5
-  # An empty list uses the location for each Google Jobs search.
-  google_query_places: []
   google_query_exclude_terms:
     - stage
     - alternance
     - apprentissage
     - stagiaire
-  glassdoor_regional_fallback_term: auvergne-rhône-alpes
-  glassdoor_location_override: Toulouse
 
 # =============================================================================
-# 9. Direct Custom Sources
-# =============================================================================
-
-welcome_to_the_jungle:
-  source: welcome_to_the_jungle
-  site_url: https://www.welcometothejungle.com
-  algolia_url: https://<ALGOLIA_HOST>/1/indexes/*/queries?x-algolia-agent=Algolia%20for%20JavaScript%20(4.20.0)%3B%20Browser&search_origin=jobs_search_client
-  algolia_app_id: <ALGOLIA_APP_ID>
-  job_index: example_jobs_index
-  around_lat_lng: 43.6007,1.4328
-  # Omit around_radius to use distance_km, converted to metres.
-  office_country_filter: '["offices.country_code:FR"]'
-
-# =============================================================================
-# 10. Aggregators
+# 9. Aggregators
 # =============================================================================
 
 aggregators:
-  source: aggregators
   max_detail_pages: 50
-  location_terms:
-    - toulouse
-    - blagnac
-    - grand toulouse
-    - métropole de toulouse
-    - metropole de toulouse
-    - agglomération toulousaine
-    - agglomeration toulousaine
-  direct_locations:
-    - 84R
-    - 76R
-  site_locations:
-    "Toulouse, France": {department: "31", region_slug: occitanie}
-  site_url_templates:
-    apec: https://www.apec.fr/candidat/recherche-emploi.html/emploi?q={query}&l={city_slug}-{department}&page=0
-    optioncarriere: https://www.optioncarriere.com/emploi-{query_slug}/{city}
-    cadremploi: https://www.cadremploi.fr/emploi/liste_offres?motscles={query}&ville={city_slug}-{department}
-    isarta: https://isarta.fr/cgi-bin/emplois/jobs?cat={region_slug}&query={query}
-  direct_specs:
-    - source: france_travail
-      search_url_templates:
-        - https://candidat.francetravail.fr/offres/recherche?motsCles={query}&lieux={department}&offresPartenaires=true&rayon={radius}&tri=0
-      link_prefixes:
-        - /offres/recherche/detail/
-      base_url: https://candidat.francetravail.fr
-      max_links: 12
-      use_direct_locations: true
-    - source: emploi_territorial
-      search_url_templates:
-        - https://www.emploi-territorial.fr/rechercher?adv-search={query}
-      link_prefixes:
-        - /offre/
-      base_url: https://www.emploi-territorial.fr
-      max_links: 20
-    - source: meteojob
-      search_url_templates:
-        - https://www.meteojob.com/jobsearch/offers?what={query}&where=Auvergne-Rh%C3%B4ne-Alpes
-      link_prefixes:
-        - /jobs/
-      base_url: https://www.meteojob.com
-      max_links: 18
-      query_style: quote_plus
-    - source: jobijoba
-      search_url_templates:
-        - https://www.jobijoba.com/fr/emploi/{query}/Auvergne-Rhone-Alpes
-      link_prefixes:
-        - /fr/annonce/
-      base_url: https://www.jobijoba.com
-      max_links: 18
-      blocked_direct_hosts:
-        - jobleads.com
-      blocked_provider_terms:
-        - jobleads
-    - source: makesense
-      search_url_templates:
-        - https://jobs.makesense.org/fr/s/jobs/all/all/cdi?contracts=cdd&sortBy=relevance&s={query}
-      link_prefixes:
-        - /fr/jobs/
-      base_url: https://jobs.makesense.org
-      max_links: 12
-  site_search_sources:
-    - source: apec
-      query_template: site:apec.fr/candidat/recherche-emploi emploi CDI "{location}" {query} -stage -alternance
-      host: apec.fr
-    - source: isarta
-      query_template: site:isarta.fr/emplois emploi CDI "{location}" {query} -stage -alternance
-      host: isarta.fr
-    - source: emploi_collectivites
-      query_template: site:emploi-collectivites.fr emploi CDI "{location}" {query} -stage -alternance
-      host: emploi-collectivites.fr
-    - source: cadremploi
-      query_template: site:cadremploi.fr emploi CDI "{location}" {query} -stage -alternance
-      host: cadremploi.fr
-    - source: optioncarriere
-      query_template: site:optioncarriere.com emploi CDI "{location}" {query} -stage -alternance
-      host: optioncarriere.com

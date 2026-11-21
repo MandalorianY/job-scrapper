@@ -9,18 +9,20 @@ import pytest
 from bs4 import BeautifulSoup
 
 from scrapper.config import SearchConfig
+from scrapper.config.settings import LocationScopeConfig
 from scrapper.models import JobOffer
 from scrapper.scrapers import jobspy_sources
 from scrapper.storage import JobStore
 
 
-def test_default_config_uses_google_jobs_through_jobspy() -> None:
-    assert "google" in SearchConfig().jobspy_sites
+def _jobspy_only(*sites: str) -> dict[str, bool]:
+    return {site: site in sites for site in jobspy_sources.JOBSPY_SITES}
 
 
 def test_google_jobspy_source_uses_google_search_term_and_records_rows(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    toulouse_scope: LocationScopeConfig,
 ) -> None:
     calls: list[dict[str, object]] = []
 
@@ -47,8 +49,9 @@ def test_google_jobspy_source_uses_google_search_term_and_records_rows(
     config = SearchConfig(
         queries=("example role",),
         locations=("Toulouse, France",),
-        jobspy_sites=("google",),
-        database_path=tmp_path / "jobs.duckdb",
+        location_scope=toulouse_scope,
+        enabled_sources=_jobspy_only("google"),
+        paths={"database_path": tmp_path / "jobs.duckdb"},
     )
     store = JobStore(config.database_path)
     progress_messages: list[str] = []
@@ -87,8 +90,8 @@ def test_google_jobspy_zero_rows_records_upstream_error(
     config = SearchConfig(
         queries=("example role",),
         locations=("Toulouse, France",),
-        jobspy_sites=("google",),
-        database_path=tmp_path / "jobs.duckdb",
+        enabled_sources=_jobspy_only("google"),
+        paths={"database_path": tmp_path / "jobs.duckdb"},
     )
     store = JobStore(config.database_path)
     try:
@@ -152,9 +155,9 @@ def test_jobspy_batches_compatible_sites_in_one_call(monkeypatch: pytest.MonkeyP
     config = SearchConfig(
         queries=("example role",),
         locations=("Toulouse, France",),
-        jobspy_sites=("indeed", "linkedin", "google"),
+        enabled_sources=_jobspy_only("indeed", "linkedin", "google"),
         location_scope={"enabled": False},
-        database_path=tmp_path / "jobs.duckdb",
+        paths={"database_path": tmp_path / "jobs.duckdb"},
     )
     store = JobStore(config.database_path)
     try:
@@ -169,11 +172,15 @@ def test_jobspy_batches_compatible_sites_in_one_call(monkeypatch: pytest.MonkeyP
 
 
 def test_hellowork_jobspy_retains_search_state_and_updates_existing_offer(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, toulouse_scope: LocationScopeConfig
 ) -> None:
     query, location = "example role", "Toulouse, France"
     config = SearchConfig(
-        queries=(query,), locations=(location,), jobspy_sites=("linkedin", "hellowork"), distance_km=25
+        queries=(query,),
+        locations=(location,),
+        enabled_sources=_jobspy_only("linkedin", "hellowork"),
+        distance_km=25,
+        location_scope=toulouse_scope,
     )
     offer_url = "https://www.hellowork.com/fr-fr/emplois/1.html"
     listing = {
@@ -219,7 +226,9 @@ def test_jobspy_records_failed_batch_and_successful_retry(monkeypatch: pytest.Mo
         return pd.DataFrame()
 
     monkeypatch.setattr(jobspy_sources, "scrape_jobs", fake_scrape_jobs)
-    config = SearchConfig(queries=("example",), locations=("Toulouse, France",), jobspy_sites=("indeed", "linkedin"))
+    config = SearchConfig(
+        queries=("example",), locations=("Toulouse, France",), enabled_sources=_jobspy_only("indeed", "linkedin")
+    )
     store = JobStore(tmp_path / "jobs.duckdb")
     try:
         assert jobspy_sources.scrape_jobspy_sources(config, store) == {"indeed": 0, "linkedin": 0}
@@ -244,9 +253,9 @@ def test_jobspy_hours_old_override_ignores_incremental_state(tmp_path: Path, emp
     config = SearchConfig(
         queries=("example role",),
         locations=("Toulouse, France",),
-        jobspy_sites=("indeed",),
+        enabled_sources=_jobspy_only("indeed"),
         jobspy_hours_old_override=2160,
-        database_path=tmp_path / "jobs.duckdb",
+        paths={"database_path": tmp_path / "jobs.duckdb"},
     )
     store = JobStore(config.database_path)
     try:
@@ -263,9 +272,10 @@ def test_jobspy_hours_old_override_ignores_incremental_state(tmp_path: Path, emp
 def test_glassdoor_uses_city_only_location_and_configured_country(tmp_path: Path, empty_scrape_jobs: Mock) -> None:
     config = SearchConfig(
         queries=("example role",),
-        locations=("Auvergne-Rhône-Alpes, France",),
-        jobspy_sites=("glassdoor",),
-        database_path=tmp_path / "jobs.duckdb",
+        locations=("Occitanie, France",),
+        jobspy={"glassdoor_regional_fallback_term": "occitanie", "glassdoor_location_override": "Toulouse"},
+        enabled_sources=_jobspy_only("glassdoor"),
+        paths={"database_path": tmp_path / "jobs.duckdb"},
     )
     store = JobStore(config.database_path)
     try:
@@ -372,9 +382,8 @@ def test_disabled_jobspy_source_is_skipped(monkeypatch: pytest.MonkeyPatch, tmp_
     config = SearchConfig(
         queries=("example role",),
         locations=("Toulouse, France",),
-        jobspy_sites=("google",),
-        enabled_sources={"google": False},
-        database_path=tmp_path / "jobs.duckdb",
+        enabled_sources=_jobspy_only(),
+        paths={"database_path": tmp_path / "jobs.duckdb"},
     )
     store = JobStore(config.database_path)
     try:

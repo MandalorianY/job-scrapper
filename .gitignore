@@ -35,5 +35,5 @@ storage/
 .env
 !.env.example
 *.env.yaml
-src/scrapper/config/config.local.yaml
+src/scrapper/config/*.local.yaml
 /deploy/README.local.md

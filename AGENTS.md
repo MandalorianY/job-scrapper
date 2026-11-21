@@ -20,10 +20,10 @@ Do not commit generated data or exports unless the user explicitly asks for that
 - Typer CLI exposed as `job-scrapper`
 - DuckDB for local storage and incremental search state
 - JobSpy for supported boards: Indeed, LinkedIn, Glassdoor, Google Jobs, HelloWork
-- `httpx` + BeautifulSoup for APIs, aggregator pages, and web search
+- `httpx` + BeautifulSoup for APIs, aggregator pages, and sitemaps
 - OpenPyXL and pandas for localized Excel/CSV exports
 
-The tracked `src/scrapper/config/config.yaml` is the public example template. Use `src/scrapper/config/config.local.yaml` (when present) for live repository settings such as query/location tuning and source-specific overrides.
+The tracked `src/scrapper/config/config.yaml` is the public example template. Use `src/scrapper/config/config.local.yaml` (when present) for live repository settings such as query/location tuning and source-specific overrides. Use `--profile PATH` to select an alternate YAML with its own database, export, and log paths.
 
 ## Useful Commands
 
@@ -93,12 +93,13 @@ PY
 
 ## Architecture
 
-- `src/scrapper/config/`: Pydantic Settings models plus packaged `config.yaml` defaults and `config.dev.yaml` / `config.prod.yaml` overrides for queries, include/exclude terms, source lists, limits, paths, user agent, and source-specific endpoints. Secrets belong in `.env`.
+- `src/scrapper/config/`: Pydantic Settings models, packaged `config.yaml` defaults, and `config.prod.yaml` scrape limits. `aggregator_specs.py` defines the built-in provider specs. Secrets belong in `.env`.
 - `src/scrapper/models.py`: `JobOffer`, the single normalized offer shape used by every source.
 - `src/scrapper/storage.py`: DuckDB schema, incremental search state, upsert, dedupe, canonical/raw dataframes, purge filters.
 - `src/scrapper/text.py`: text cleanup, URL keys, stable hashes, dedupe key, include/exclude matching, completeness scoring.
 - `src/scrapper/export.py`: localized Excel and CSV export, salary normalization, formulas, filters, tables, colors.
 - `src/scrapper/cli.py`: orchestration and summary output.
+- `src/scrapper/search_regions.py`: caches French municipality and region data alongside DuckDB so runs fetch only missing locations. Resolves provider routes and saves the radius filter for offline export and replay.
 - `src/scrapper/scrapers/`: one module per scraper family.
 
 Keep these responsibilities separate. New source-specific parsing belongs in `src/scrapper/scrapers/<source>.py`; shared extraction helpers belong in `scrapers/common.py`; general text/filter/dedupe behavior belongs in `text.py`; persistent schema/query behavior belongs in `storage.py`.
@@ -170,7 +171,7 @@ Custom/detail scrapers should skip known detail pages by default using `store.so
 
 ## JobSpy
 
-Use JobSpy for sources in `config.jobspy_sites`: Indeed, LinkedIn, Glassdoor, Google Jobs, HelloWork.
+Use JobSpy for Indeed, LinkedIn, Glassdoor, Google Jobs, and HelloWork. Use `enabled_sources` to disable individual boards or custom source groups.
 
 Google is intentionally attempted through JobSpy first. Direct JobSpy Google Jobs may still return 0 results with `initial cursor not found`; when that happens, preserve the search-state error and continue with the other free sources. Do not invoke a paid Google Jobs fallback from the CLI unless paid API usage is explicitly requested.
 
@@ -183,25 +184,20 @@ For JobSpy changes:
 - Normalize all row values before building `JobOffer`.
 - Filter before upsert.
 
-## Google Jobs And Site-Scoped Search
+## Google Jobs
 
 Google Jobs uses JobSpy first. The CLI should stay free by default and should not call paid search APIs. Never hardcode keys.
 
+## Aggregators And Custom Sources
+
 Supported aggregators discover offers through their own APIs, search pages, or sitemaps. Treat missing direct routes and source failures as non-fatal and record their errors in `search_state`.
 
-When adding site-scoped searches:
+When adding aggregator discovery:
 
 - Exclude the main boards already scraped directly.
 - Reject informational pages such as job guides, salary pages, training pages, and job-description articles.
 - Require a regional signal for Example Region.
-- Require a example-role title.
-
-## Aggregators And Custom Sources
-
-Aggregator scrapers are intentionally mixed:
-
-- Direct HTML/API extraction for sources with usable listing/detail pages.
-- Site-scoped web search for sources that are harder to crawl consistently.
+- Require an example-role title.
 
 Add each new direct source as a small, testable spec or module. Keep source-specific heuristics local. Reuse shared helpers for JSON-LD (`json_ld_jobposting`), company names, locations, metadata, salary text, and descriptions.
 

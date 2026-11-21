@@ -10,7 +10,7 @@ import pytest
 from openpyxl import load_workbook
 
 from scrapper import export
-from scrapper.config import SearchConfig
+from scrapper.config.settings import LocationScopeConfig
 from scrapper.export import _date_fr, _date_value, _review_note, _salary_bounds, export_jobs
 from scrapper.location_scope import location_is_in_scope
 from scrapper.models import JobOffer
@@ -510,9 +510,10 @@ def test_export_does_not_retain_existing_rows_rejected_by_current_filters(tmp_pa
         empty_store.close()
 
 
-def test_export_does_not_retain_existing_rows_rejected_by_location_scope(tmp_path: Path) -> None:
+def test_export_does_not_retain_existing_rows_rejected_by_location_scope(
+    tmp_path: Path, toulouse_scope: LocationScopeConfig
+) -> None:
     export_dir = tmp_path / "exports"
-    config = SearchConfig()
     old_store = JobStore(tmp_path / "old.duckdb")
     try:
         old_store.upsert_offer(
@@ -533,7 +534,7 @@ def test_export_does_not_retain_existing_rows_rejected_by_location_scope(tmp_pat
         _excel_path, csv_path, _raw_csv_path, total = export_jobs(
             empty_store,
             export_dir,
-            location_allowed=lambda location: location_is_in_scope(location, config.location_scope),
+            location_allowed=lambda location: location_is_in_scope(location, toulouse_scope),
         )
 
         assert total == 0
@@ -696,7 +697,7 @@ def test_export_normalizes_location_to_town_for_tracker_display(tmp_path: Path) 
                 source_url="https://candidat.francetravail.fr/offres/recherche/detail/1",
                 title="Community manager",
                 company="Example",
-                location="Chargé(e) de Communication - Relations Presse (H/F) 31 - Toulouse 2e Arrondissement",
+                location="Chargé(e) de Communication - Relations Presse (H/F) 31 - Toulouse",
             )
         )
         store.upsert_offer(
@@ -705,7 +706,7 @@ def test_export_normalizes_location_to_town_for_tracker_display(tmp_path: Path) 
                 source_url="https://www.jobijoba.com/fr/annonce/54/1",
                 title="Content manager",
                 company="Example",
-                location="Toulouse 9e",
+                location="Marseille 9e",
             )
         )
 
@@ -716,7 +717,7 @@ def test_export_normalizes_location_to_town_for_tracker_display(tmp_path: Path) 
         )
 
         frame = pd.read_csv(csv_path).sort_values("Intitulé").reset_index(drop=True)
-        assert frame["Lieu"].tolist() == ["Toulouse", "Toulouse", "Toulouse", "Cornebarrieu"]
+        assert frame["Lieu"].tolist() == ["Toulouse", "Toulouse", "Marseille", "Cornebarrieu"]
     finally:
         store.close()
 

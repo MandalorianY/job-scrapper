@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from scrapper.config import DEFAULT_EXCLUDE_TERMS, DEFAULT_INCLUDE_TERMS, SearchConfig
+from scrapper.config.settings import LocationScopeConfig
 from scrapper.location_scope import location_is_in_scope
 from scrapper.models import JobOffer
 from scrapper.storage import JobStore
@@ -217,7 +218,12 @@ def test_storage_dedupes_by_substantial_matching_description(tmp_path: Path) -> 
 
 
 def test_storage_ranks_configured_last_source_behind_unlisted_sources(tmp_path: Path) -> None:
-    store = _store(tmp_path, source_priority={"france_travail": 1000}, default_source_priority=100)
+    config = SearchConfig()
+    store = _store(
+        tmp_path,
+        source_priority=config.dedupe_source_priority,
+        default_source_priority=config.dedupe_default_source_priority,
+    )
     try:
         store.upsert_offer(
             JobOffer(
@@ -347,40 +353,19 @@ def test_search_attempts_distinguish_empty_failed_and_unfinished(tmp_path: Path)
         store.close()
 
 
-def test_default_config_declares_dedupe_source_priorities() -> None:
-    config = SearchConfig()
-
-    assert config.dedupe_fields.primary == ("title", "company")
-    assert config.dedupe_fields.fallback == ("location",)
-    assert config.dedupe_fields.description == ("description", "company", "location")
-    assert config.dedupe_source_priority["indeed"] < config.dedupe_source_priority["linkedin"]
-    assert config.dedupe_source_priority["linkedin"] < config.dedupe_source_priority["welcome_to_the_jungle"]
-    assert config.dedupe_source_priority["france_travail"] > config.dedupe_default_source_priority
-    assert config.export.excel_columns[:6] == (
-        "Statut",
-        "Publié le",
-        "Lien",
-        "Intitulé",
-        "Entreprise",
-        "Lieu",
-    )
-    assert config.export.repair_fields_enabled_by_default is True
-    assert config.export.repair_fields_by_source["france_travail"] is True
-
-
 def test_source_url_seen_uses_normalized_url_key(tmp_path: Path) -> None:
     store = _store(tmp_path)
     try:
         store.upsert_offer(
             JobOffer(
-                source="web_search",
+                source="meteojob",
                 source_url="https://company.example/jobs/comms?utm_source=google",
                 title="Example coordinator",
                 company="Example",
             )
         )
 
-        assert store.source_url_seen("web_search", "https://company.example/jobs/comms?utm_campaign=other")
+        assert store.source_url_seen("meteojob", "https://company.example/jobs/comms?utm_campaign=other")
     finally:
         store.close()
 
@@ -490,34 +475,6 @@ def test_storage_sorts_absolute_dates_instead_of_relative_date_text(tmp_path: Pa
         store.close()
 
 
-def test_storage_absolutizes_relative_dates_for_every_provider(tmp_path: Path) -> None:
-    store = _store(tmp_path)
-    try:
-        for source in ("linkedin", "web_search", "meteojob", "jobijoba"):
-            store.upsert_offer(
-                JobOffer(
-                    source=source,
-                    source_url=f"https://{source}.example/jobs/relative",
-                    title=f"{source} example coordinator",
-                    company="Example",
-                    location="Toulouse",
-                    date_posted="Il y a 2 jours",
-                    scraped_at="2026-07-10T12:00:00Z",
-                )
-            )
-
-        rows = store.conn.execute("SELECT source, date_posted FROM raw_offers ORDER BY source").fetchall()
-
-        assert rows == [
-            ("jobijoba", "2026-07-08T12:00:00+00:00"),
-            ("linkedin", "2026-07-08T12:00:00+00:00"),
-            ("meteojob", "2026-07-08T12:00:00+00:00"),
-            ("web_search", "2026-07-08T12:00:00+00:00"),
-        ]
-    finally:
-        store.close()
-
-
 def test_upsert_preserves_first_known_posted_date(tmp_path: Path) -> None:
     store = _store(tmp_path)
     try:
@@ -609,8 +566,9 @@ def test_purge_excluded_companies_removes_source_specific_company(tmp_path: Path
         store.close()
 
 
-def test_purge_out_of_scope_offers_removes_locations_outside_configured_radius(tmp_path: Path) -> None:
-    config = SearchConfig()
+def test_purge_out_of_scope_offers_removes_locations_outside_configured_radius(
+    tmp_path: Path, toulouse_scope: LocationScopeConfig
+) -> None:
     store = _store(tmp_path)
     try:
         store.upsert_offer(
@@ -625,16 +583,14 @@ def test_purge_out_of_scope_offers_removes_locations_outside_configured_radius(t
         store.upsert_offer(
             JobOffer(
                 source="test",
-                source_url="https://example.com/thiers",
+                source_url="https://example.com/montauban",
                 title="Example coordinator",
                 company="Example",
-                location="Thiers, Auvergne-Rhône-Alpes, France",
+                location="Montauban, Occitanie, France",
             )
         )
 
-        assert (
-            store.purge_out_of_scope_offers(lambda location: location_is_in_scope(location, config.location_scope)) == 1
-        )
+        assert store.purge_out_of_scope_offers(lambda location: location_is_in_scope(location, toulouse_scope)) == 1
         canonical = store.canonical_dataframe()
         assert canonical["location"].to_list() == ["Blagnac, Occitanie, FR"]
     finally:

@@ -1,0 +1,35 @@
+# Junior to mid-level graphic designer looking for brand, editorial and motion work.
+locations: ["Toulouse, France"]
+distance_km: 25
+
+location_scope:
+  city_aliases:
+    Toulouse: [Toulouse Métropole, Grand Toulouse, Métropole de Toulouse, Agglomération toulousaine]
+
+queries:
+  - graphiste
+  - infographiste
+  - designer graphique
+  - graphic designer
+  - motion designer
+  - maquettiste PAO
+
+include_terms:
+  - graphiste
+  - infographiste
+  - designer graphique
+  - graphic designer
+  - motion designer
+  - motion design
+  - maquettiste PAO
+  - opérateur PAO
+  - opératrice PAO
+
+excluded_title_patterns:
+  - '\b(?:formateur\w*|enseignant\w*|professeur\w*)\b'
+  - '^(?:preparation|formation|titre professionnel)\b'
+
+paths:
+  database_path: data/toulouse-graphiste/job_search.duckdb
+  export_dir: exports/toulouse-graphiste
+  log_file: data/toulouse-graphiste/job-scrapper.jsonl

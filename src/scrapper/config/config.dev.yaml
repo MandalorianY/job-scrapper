@@ -1,7 +1,0 @@
-app_env: dev
-
-refresh_known_details: false
-
-paths:
-  database_path: data/job_search.duckdb
-  export_dir: exports

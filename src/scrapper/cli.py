@@ -16,25 +16,35 @@ from rich.table import Table
 from rich.text import Text
 
 from scrapper.config import SearchConfig
-from scrapper.config.settings import _leaf_values
+from scrapper.config.settings import LOCAL_CONFIG_FILE, PACKAGE_CONFIG_DIR, _leaf_values
 from scrapper.export import export_jobs
 from scrapper.location_scope import location_is_in_scope
 from scrapper.logging import DEFAULT_LOG_LEVEL, LogLevel, configure_logging
 from scrapper.scrapers import (
+    JOBSPY_SITES,
     scrape_aggregators,
     scrape_jobspy_sources,
     scrape_welcome_to_the_jungle,
 )
-from scrapper.search_regions import route_location_overrides
+from scrapper.scrapers.aggregators import AGGREGATORS_SOURCE
+from scrapper.scrapers.wttj import WTTJ_SOURCE
+from scrapper.search_regions import load_location_scope, route_location_overrides, save_location_scope
 from scrapper.storage import JobStore
 
 app = typer.Typer()
 console = Console()
 log = structlog.get_logger(__name__)
 ProgressReporter = Callable[[str], None]
+_CONFIG_OVERRIDE_HELP = (
+    "Create or edit src/scrapper/config/config.local.yaml to apply overrides automatically. "
+    "Use --profile PATH to load a different YAML file."
+)
 
 
-@app.command(help="[bold cyan]Scrape example role jobs and export deduped CSV/XLSX files.[/bold cyan]")
+@app.command(
+    help="[bold cyan]Scrape example role jobs and export deduped CSV/XLSX files.[/bold cyan]",
+    epilog=_CONFIG_OVERRIDE_HELP,
+)
 def run(
     query: Annotated[
         list[str] | None,
@@ -57,9 +67,11 @@ def run(
         Path | None,
         typer.Option(exists=True, dir_okay=False, help="Rebuild from a DuckDB observation archive offline."),
     ] = None,
-    # Accept the former opt-out for existing launchers.
-    no_tracker_sync: Annotated[bool, typer.Option("--no-tracker-sync", hidden=True)] = False,
     log_file: Annotated[Path | None, typer.Option("--log-file", help="Structured JSONL log path.")] = None,
+    profile: Annotated[
+        Path | None,
+        typer.Option("--profile", exists=True, dir_okay=False, help="Use this YAML in place of config.local.yaml."),
+    ] = None,
     log_level: Annotated[
         LogLevel, typer.Option("--log-level", help="Minimum structured log level.")
     ] = DEFAULT_LOG_LEVEL,
@@ -67,7 +79,7 @@ def run(
         bool, typer.Option("--show-config", help="Print effective settings and their sources, then exit.")
     ] = False,
     status: Annotated[
-        bool, typer.Option("--status", help="Show search scope, filters, overrides, and sources, then exit.")
+        bool, typer.Option("--status", help="Show search settings, job sources, and tracker sync status offline.")
     ] = False,
 ) -> None:
     if export_only:
@@ -83,25 +95,44 @@ def run(
         results_wanted,
         custom_pages,
         config_sources,
+        profile,
     )
-    if locations is not None and replay_from is None and not (skip_jobspy and skip_custom):
-        before_routing = dict(_leaf_values(config.model_dump())) if config_sources is not None else {}
+    status_only = status and not show_config
+    if status_only:
+        _print_tracker_sync_status(config)
+    live_search = replay_from is None and not (skip_jobspy and skip_custom)
+    unrouted_config = config
+    if live_search and not config.search_locations and config_sources is None:
+        raise typer.BadParameter("Set locations in your search config or pass --location.", param_hint="--location")
+    before_routing = dict(_leaf_values(config.model_dump())) if config_sources is not None else {}
+    if live_search and config.search_locations and not status_only:
         try:
-            config = route_location_overrides(config)
+            if locations is not None and config.country.casefold() == "france":
+                # Board-specific place lists in a saved profile refer to its original towns.
+                config.jobspy.google_query_places = ()
+                config.jobspy.glassdoor_regional_fallback_term = None
+                config.jobspy.glassdoor_location_override = None
+                config.aggregators.location_terms = ()
+                config.aggregators.direct_locations = ()
+            config = route_location_overrides(config, write_cache=not show_config)
         except (httpx.HTTPError, ValueError) as exc:
             raise typer.BadParameter(
                 f"Could not route the requested locations: {exc}", param_hint="--location"
             ) from exc
-        if config_sources is not None:
-            for key, value in _leaf_values(config.model_dump()):
-                if key not in before_routing or before_routing[key] != value:
-                    config_sources[".".join(key)] = "resolved from --location"
+        scope_origin = "resolved from --location" if locations else "resolved from locations"
+    else:
+        scope = load_location_scope(config, replay_from or config.database_path)
+        config = config.model_copy(update={"location_scope": scope})
+        scope_origin = "saved geographic scope"
     if config_sources is not None:
+        for key, value in _leaf_values(config.model_dump()):
+            if key not in before_routing or before_routing[key] != value:
+                config_sources[".".join(key)] = scope_origin
         report = config.describe(config_sources)
         if show_config:
             typer.echo(json.dumps(report, ensure_ascii=False, indent=2))
         else:
-            _print_search_status(config, report["sources"])
+            _print_search_status(config, report["sources"], profile)
             _print_source_status(
                 config,
                 skip_jobspy=skip_jobspy or replay_from is not None,
@@ -109,6 +140,8 @@ def run(
             )
         return
     configured_log_file = configure_logging(config.log_file, level=log_level)
+    if live_search:
+        save_location_scope(unrouted_config, config.location_scope)
     run_id = str(uuid.uuid4())
     structlog.contextvars.clear_contextvars()
     structlog.contextvars.bind_contextvars(
@@ -128,6 +161,11 @@ def run(
         log_file=str(configured_log_file) if configured_log_file else None,
     )
     store = _job_store(config, run_id)
+    location_allowed = (
+        (lambda location: location_is_in_scope(location, config.location_scope))
+        if config.location_scope.centers
+        else None
+    )
     try:
         counts: dict[str, int] = {}
         if replay_from is None and not (skip_jobspy and skip_custom):
@@ -173,10 +211,8 @@ def run(
         purged_companies = store.purge_excluded_companies(config.excluded_companies_by_source)
         if purged_companies:
             counts["excluded_companies_removed"] = purged_companies
-        if locations is None:
-            purged_out_of_scope = store.purge_out_of_scope_offers(
-                lambda location: location_is_in_scope(location, config.location_scope)
-            )
+        if locations is None and location_allowed is not None:
+            purged_out_of_scope = store.purge_out_of_scope_offers(location_allowed)
             if purged_out_of_scope:
                 counts["out_of_scope_removed"] = purged_out_of_scope
         excel_path, csv_path, raw_csv_path, total = export_jobs(
@@ -189,7 +225,7 @@ def run(
             include_terms=config.include_terms,
             exclude_terms=config.exclude_terms,
             excluded_title_patterns=config.excluded_title_patterns,
-            location_allowed=lambda location: location_is_in_scope(location, config.location_scope),
+            location_allowed=location_allowed,
         )
         _print_summary(counts, total, excel_path, csv_path, raw_csv_path)
         log.info(
@@ -239,10 +275,29 @@ def _report_source_errors(errors: dict[str, str]) -> None:
         log.error("source_failed", source=source, error=error)
 
 
-def _print_search_status(config: SearchConfig, setting_sources: dict[str, str]) -> None:
+def _print_tracker_sync_status(config: SearchConfig) -> None:
+    # The tracker sync entry point also imports this CLI to run the scraper.
+    from scrapper.tracker_sync import load_sync_settings, sync_settings_path
+
+    try:
+        settings = load_sync_settings(sync_settings_path(config.database_path))
+    except (OSError, ValueError):
+        status = Text("⚠ Unavailable (could not read settings)", style="bold yellow")
+    else:
+        status = Text("✓ Enabled", style="bold green") if settings.enabled else Text("✕ Disabled", style="bold yellow")
+    console.print(Text.assemble(("Tracker sync  ", "bold"), status))
+    console.print()
+
+
+def _print_search_status(config: SearchConfig, setting_sources: dict[str, str], profile: Path | None) -> None:
     scope = config.location_scope
-    centers = ", ".join(center.name for center in scope.centers) or "no configured centers"
-    location_filter = f"{scope.radius_km:g} km around {centers}" if scope.enabled else "Disabled"
+    centers = ", ".join(center.name for center in scope.centers)
+    location_filter = "Disabled"
+    if scope.enabled:
+        location_filter = f"{scope.radius_km:g} km around {centers}" if centers else "No resolved towns"
+    direct_regions = ", ".join(config.aggregators.direct_locations)
+    if not direct_regions and config.country.casefold() == "france" and config.search_locations:
+        direct_regions = "Derived from search locations"
     company_exclusions = "\n".join(
         f"{source}: {', '.join(companies)}"
         for source, companies in config.excluded_companies_by_source.items()
@@ -250,23 +305,30 @@ def _print_search_status(config: SearchConfig, setting_sources: dict[str, str]) 
     )
     search_limits = (
         f"{config.results_wanted_per_query} results per query, {config.custom_max_pages} custom list pages, "
-        f"{config.custom_max_detail_pages} custom detail pages"
+        f"{config.aggregators.max_detail_pages} aggregator detail pages"
     )
     overrides: dict[str, set[str]] = {}
+    base_config = str(PACKAGE_CONFIG_DIR / "config.yaml")
     for setting, source in setting_sources.items():
-        name = Path(source).name
-        if name not in {"default", "config.yaml"}:
-            overrides.setdefault(name, set()).add(setting.split(".", 1)[0])
+        if source not in {"default", base_config}:
+            overrides.setdefault(Path(source).name, set()).add(setting.split(".", 1)[0])
+    if profile is None:
+        profile_name = LOCAL_CONFIG_FILE.name
+        profile_applied = profile_name in overrides
+    else:
+        profile_name = profile.name
+        profile_applied = str(profile.expanduser().absolute()) in setting_sources.values()
 
     sections = (
         (
             "Search scope",
             (
-                ("Profile", config.app_env),
+                ("Environment", config.app_env),
+                ("Search profile", f"{profile_name} (overrides applied)" if profile_applied else "None"),
                 ("Search locations", ", ".join(config.search_locations)),
                 ("Search radius", f"{config.distance_km} km"),
                 ("Location filter", location_filter),
-                ("Direct search regions", ", ".join(config.aggregators.direct_locations)),
+                ("Direct search regions", direct_regions),
                 ("Queries", ", ".join(config.queries)),
                 ("Search limits", search_limits),
             ),
@@ -293,6 +355,8 @@ def _print_search_status(config: SearchConfig, setting_sources: dict[str, str]) 
         console.print()
 
     console.print("Configuration overrides", style="bold cyan")
+    console.print(_CONFIG_OVERRIDE_HELP, width=width)
+    console.print()
     override_lines = "\n".join(f"{name}: {', '.join(sorted(fields))}" for name, fields in overrides.items())
     console.print(Text(override_lines or "None"), width=width)
     console.print()
@@ -301,20 +365,18 @@ def _print_search_status(config: SearchConfig, setting_sources: dict[str, str]) 
 def _print_source_status(config: SearchConfig, *, skip_jobspy: bool, skip_custom: bool) -> None:
     aggregators = config.aggregators
     groups = (
-        ("JobSpy", config.jobspy_sites, not skip_jobspy),
-        ("Custom", (config.welcome_to_the_jungle.source,), not skip_custom),
+        ("JobSpy", JOBSPY_SITES, not skip_jobspy),
+        ("Custom", (WTTJ_SOURCE,), not skip_custom),
         (
             "Aggregator",
             tuple(spec.source for spec in (*aggregators.direct_specs, *aggregators.site_search_sources)),
-            not skip_custom and config.is_custom_source_enabled(aggregators.source),
+            not skip_custom and config.is_source_enabled(AGGREGATORS_SOURCE),
         ),
     )
     table = Table("Source", "Group", "Status", title="Job sources", title_style="bold cyan", header_style="bold cyan")
     for group, sources, group_enabled in groups:
         for source in sources:
             enabled = group_enabled and config.is_source_enabled(source)
-            if group == "Custom":
-                enabled = group_enabled and config.is_custom_source_enabled(source)
             status = Text("Enabled", style="bold green") if enabled else Text("Disabled", style="bold yellow")
             table.add_row(Text(source), group, status)
     console.print(table)
@@ -338,10 +400,10 @@ async def _run_custom_sources(config: SearchConfig, store: JobStore) -> tuple[di
     semaphore = asyncio.Semaphore(max(1, config.custom_source_concurrency))
     sources: list[tuple[str, Awaitable[int | dict[str, int]]]] = []
     for source, scrape in (
-        (config.welcome_to_the_jungle.source, scrape_welcome_to_the_jungle),
-        (config.aggregators.source, scrape_aggregators),
+        (WTTJ_SOURCE, scrape_welcome_to_the_jungle),
+        (AGGREGATORS_SOURCE, scrape_aggregators),
     ):
-        if config.is_custom_source_enabled(source):
+        if config.is_source_enabled(source):
             sources.append((source, scrape(config, store)))
 
     async def run_source(
@@ -426,8 +488,9 @@ def _config_from_cli(
     results_wanted: int | None,
     custom_pages: int | None,
     config_sources: dict[str, str] | None = None,
+    profile: Path | None = None,
 ) -> SearchConfig:
-    overrides: dict[str, object] = {"_config_sources": config_sources}
+    overrides: dict[str, object] = {"_config_sources": config_sources, "_profile": profile}
     if query is not None:
         overrides["queries"] = tuple(query)
     if locations is not None:

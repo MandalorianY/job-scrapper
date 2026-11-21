@@ -19,6 +19,7 @@ from scrapper.scrapers.common import apply_url, custom_search_cutoff, json_ld_jo
 from scrapper.storage import JobStore
 from scrapper.text import clean_text, has_excluded_contract_signal, is_application_destination
 
+WTTJ_SOURCE = "welcome_to_the_jungle"
 PUBLIC_ALGOLIA_KEY_RE = re.compile(r'"ALGOLIA_API_KEY_CLIENT"\s*:\s*"([^"]+)"')
 WINDOW_ENV_MARKER_RE = re.compile(r"window\.env\s*=\s*")
 log = structlog.get_logger(__name__)
@@ -33,12 +34,12 @@ class WttjAlgoliaConfig:
 
 
 async def scrape_welcome_to_the_jungle(config: SearchConfig, store: JobStore) -> int:
-    if not config.is_source_enabled(config.welcome_to_the_jungle.source):
+    if not config.is_source_enabled(WTTJ_SOURCE):
         return 0
 
     log.info(
         "wttj_scrape_started",
-        source=config.welcome_to_the_jungle.source,
+        source=WTTJ_SOURCE,
         queries=list(config.queries),
         centers=[center_name for center_name, _center_lat_lng in _search_centers(config)],
         max_pages=config.custom_max_pages,
@@ -63,18 +64,19 @@ async def scrape_welcome_to_the_jungle(config: SearchConfig, store: JobStore) ->
         error = "Welcome to the Jungle Algolia runtime config is not available."
         for query in config.queries:
             for center_name, _center_lat_lng in _search_centers(config):
-                store.start_search(config.welcome_to_the_jungle.source, query, center_name)
+                store.start_search(WTTJ_SOURCE, query, center_name)
                 store.finish_search(
-                    config.welcome_to_the_jungle.source,
+                    WTTJ_SOURCE,
                     query,
                     center_name,
                     0,
                     error=error,
                 )
-        log.error("wttj_scrape_failed", source=config.welcome_to_the_jungle.source, error=error)
+        log.error("wttj_scrape_failed", source=WTTJ_SOURCE, error=error)
         return 0
 
     written = 0
+    processed_urls: set[str] = set()
     headers = {
         "x-algolia-application-id": algolia_app_id,
         "x-algolia-api-key": algolia_api_key,
@@ -94,12 +96,18 @@ async def scrape_welcome_to_the_jungle(config: SearchConfig, store: JobStore) ->
     ):
         for query in config.queries:
             for center_name, center_lat_lng in _search_centers(config):
-                store.start_search(config.welcome_to_the_jungle.source, query, center_name)
+                store.start_search(WTTJ_SOURCE, query, center_name)
                 seen = 0
                 try:
+                    geo_params: dict[str, str | int] = {}
+                    if center_lat_lng:
+                        geo_params["aroundLatLng"] = center_lat_lng
+                        geo_params["aroundRadius"] = (
+                            config.welcome_to_the_jungle.around_radius or config.distance_km * 1000
+                        )
                     cutoff = custom_search_cutoff(
                         store,
-                        config.welcome_to_the_jungle.source,
+                        WTTJ_SOURCE,
                         query,
                         center_name,
                         config,
@@ -114,10 +122,8 @@ async def scrape_welcome_to_the_jungle(config: SearchConfig, store: JobStore) ->
                                             "query": query,
                                             "hitsPerPage": min(config.results_wanted_per_query, 50),
                                             "page": page,
-                                            "aroundLatLng": center_lat_lng,
-                                            "aroundRadius": config.welcome_to_the_jungle.around_radius
-                                            or config.distance_km * 1000,
                                             "facetFilters": config.welcome_to_the_jungle.office_country_filter,
+                                            **geo_params,
                                         },
                                         safe=':,/[]"',
                                     ),
@@ -141,7 +147,7 @@ async def scrape_welcome_to_the_jungle(config: SearchConfig, store: JobStore) ->
                                 continue
                             offer = _hit_to_offer(hit, query, config)
                             offer.search_location = center_name
-                            if not offer.source_url:
+                            if not offer.source_url or offer.source_url in processed_urls:
                                 continue
                             if has_excluded_contract_signal(
                                 offer.title,
@@ -152,28 +158,28 @@ async def scrape_welcome_to_the_jungle(config: SearchConfig, store: JobStore) ->
                                 continue
                             if not config.title_is_allowed(offer.title):
                                 continue
-                            if config.is_company_excluded(config.welcome_to_the_jungle.source, offer.company):
+                            if config.is_company_excluded(WTTJ_SOURCE, offer.company):
                                 continue
                             if not location_is_in_scope(offer.location, config.location_scope):
                                 continue
                             if not config.refresh_known_details and store.source_url_seen(
-                                config.welcome_to_the_jungle.source, offer.source_url
+                                WTTJ_SOURCE, offer.source_url
                             ):
                                 continue
                             await _enrich_public_detail(detail_client, throttle, offer)
-                            if has_excluded_contract_signal(
+                            if not has_excluded_contract_signal(
                                 offer.title,
                                 offer.employment_type,
                                 offer.description,
                                 config.exclude_terms,
                             ):
-                                continue
-                            store.upsert_offer(offer)
-                            written += 1
-                    store.finish_search(config.welcome_to_the_jungle.source, query, center_name, seen)
+                                store.upsert_offer(offer)
+                                written += 1
+                            processed_urls.add(offer.source_url)
+                    store.finish_search(WTTJ_SOURCE, query, center_name, seen)
                     log.info(
                         "wttj_search_finished",
-                        source=config.welcome_to_the_jungle.source,
+                        source=WTTJ_SOURCE,
                         query=query,
                         location=center_name,
                         seen=seen,
@@ -181,7 +187,7 @@ async def scrape_welcome_to_the_jungle(config: SearchConfig, store: JobStore) ->
                     )
                 except Exception as exc:
                     store.finish_search(
-                        config.welcome_to_the_jungle.source,
+                        WTTJ_SOURCE,
                         query,
                         center_name,
                         seen,
@@ -189,30 +195,24 @@ async def scrape_welcome_to_the_jungle(config: SearchConfig, store: JobStore) ->
                     )
                     log.exception(
                         "wttj_search_failed",
-                        source=config.welcome_to_the_jungle.source,
+                        source=WTTJ_SOURCE,
                         query=query,
                         location=center_name,
                         seen=seen,
                     )
-    log.info("wttj_scrape_completed", source=config.welcome_to_the_jungle.source, stored=written)
+    log.info("wttj_scrape_completed", source=WTTJ_SOURCE, stored=written)
     return written
 
 
-def _search_centers(config: SearchConfig) -> tuple[tuple[str, str], ...]:
-    if config.location_scope.enabled and config.location_scope.centers:
+def _search_centers(config: SearchConfig) -> tuple[tuple[str, str | None], ...]:
+    if config.location_scope.centers:
         return tuple((center.name, f"{center.latitude},{center.longitude}") for center in config.location_scope.centers)
-    return ((config.location_label, config.welcome_to_the_jungle.around_lat_lng),)
-
-
-async def _public_algolia_api_key(config: SearchConfig) -> str | None:
-    public_config = await _public_algolia_config(config)
-    return public_config.api_key if public_config else None
+    return ((config.location_label, None),)
 
 
 async def _public_algolia_config(config: SearchConfig) -> WttjAlgoliaConfig | None:
     url = f"{config.welcome_to_the_jungle.site_url}/fr/sitemap.xml"
-    # Keep httpx's default user agent: the legacy bare Mozilla/5.0 header
-    # receives a 403 on the public runtime configuration page.
+    # Keep httpx's default user agent because a bare Mozilla/5.0 header receives a 403.
     headers = {
         "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     }
@@ -280,8 +280,8 @@ def _extract_window_env(text: str) -> dict[str, object] | None:
     return None
 
 
-def _configured_or_discovered(configured: str, discovered: str | None) -> str | None:
-    raw_value = str(configured or "")
+def _configured_or_discovered(configured: str | None, discovered: str | None) -> str | None:
+    raw_value = configured or ""
     value = clean_text(raw_value)
     if value and not _is_placeholder(raw_value) and not _is_placeholder(value):
         return value
@@ -327,7 +327,7 @@ def _hit_to_offer(hit: dict[str, object], query: str, config: SearchConfig) -> J
     )
     description = "\n\n".join(dict.fromkeys(filter(None, description_parts))) or None
     return JobOffer(
-        source=config.welcome_to_the_jungle.source,
+        source=WTTJ_SOURCE,
         source_id=clean_text(hit.get("objectID") or hit.get("reference")),
         source_url=source_url,
         direct_url=_direct_url(hit),

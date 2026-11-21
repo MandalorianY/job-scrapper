@@ -69,7 +69,7 @@ def _scrape_with_search_state(config: SearchConfig) -> tuple[int, tuple[object, 
             FROM search_state
             WHERE source = ?
             """,
-            [config.welcome_to_the_jungle.source],
+            [wttj.WTTJ_SOURCE],
         ).fetchone()
         return count, row
     finally:
@@ -83,7 +83,7 @@ def test_wttj_missing_public_algolia_config_records_search_state(
         return None
 
     monkeypatch.setattr(wttj, "_public_algolia_config", missing_public_config)
-    config = SearchConfig(queries=("example role",), database_path=tmp_path / "jobs.duckdb")
+    config = SearchConfig(queries=("example role",), paths={"database_path": tmp_path / "jobs.duckdb"})
     assert _scrape_with_search_state(config) == (
         0,
         (0, "Welcome to the Jungle Algolia runtime config is not available."),
@@ -98,7 +98,7 @@ def test_disabled_wttj_source_is_skipped(monkeypatch: pytest.MonkeyPatch, tmp_pa
     config = SearchConfig(
         queries=("example role",),
         enabled_sources={"welcome_to_the_jungle": False},
-        database_path=tmp_path / "jobs.duckdb",
+        paths={"database_path": tmp_path / "jobs.duckdb"},
     )
     store = JobStore(config.database_path)
     try:
@@ -109,7 +109,7 @@ def test_disabled_wttj_source_is_skipped(monkeypatch: pytest.MonkeyPatch, tmp_pa
             FROM search_state
             WHERE source = ?
             """,
-            [config.welcome_to_the_jungle.source],
+            [wttj.WTTJ_SOURCE],
         ).fetchone()
 
         assert count == 0
@@ -165,7 +165,7 @@ def test_blank_env_key_falls_back_to_public_algolia_key(
     monkeypatch.setenv("SCRAPPER_WELCOME_TO_THE_JUNGLE__ALGOLIA_API_KEY", "")
     config = SearchConfig(
         queries=("example role",),
-        database_path=tmp_path / "jobs.duckdb",
+        paths={"database_path": tmp_path / "jobs.duckdb"},
     )
     assert _scrape_with_search_state(config) == (0, (0, None))
 
@@ -230,7 +230,7 @@ def test_wttj_keeps_recent_hits_after_old_relevance_results(
         locations=("Toulouse, France",),
         custom_max_pages=3,
         location_scope={"enabled": False},
-        database_path=tmp_path / "jobs.duckdb",
+        paths={"database_path": tmp_path / "jobs.duckdb"},
     )
     store = JobStore(config.database_path)
     try:
@@ -244,3 +244,45 @@ def test_wttj_keeps_recent_hits_after_old_relevance_results(
         assert store.raw_dataframe()["description"].tolist() == ["Missions complètes."]
     finally:
         store.close()
+
+
+def test_wttj_refreshes_duplicate_listing_once_per_run(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, mock_public_algolia_config: None
+) -> None:
+    hit = {
+        "slug": "charge-communication",
+        "name": "Chargé de communication",
+        "organization": {"slug": "example", "name": "Example"},
+        "office": {"city": "Toulouse", "country": "France"},
+    }
+    detail_requests: list[str] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            detail_requests.append(request.url.path)
+            return httpx.Response(200, text="<html></html>")
+        params = parse_qs(json.loads(request.content)["requests"][0]["params"])
+        duplicate = dict(hit, objectID=f"{params['query'][0]}-{params['page'][0]}")
+        return httpx.Response(200, json={"results": [{"hits": [duplicate]}]})
+
+    client_class = httpx.AsyncClient
+    transport = httpx.MockTransport(respond)
+    monkeypatch.setattr(wttj.httpx, "AsyncClient", lambda **kwargs: client_class(transport=transport, **kwargs))
+
+    config = SearchConfig(
+        queries=("communication", "chargé de communication"),
+        include_terms=("communication",),
+        custom_max_pages=2,
+        http_request_delay_secs=0,
+        refresh_known_details=False,
+        location_scope={"enabled": False},
+        paths={"database_path": tmp_path / "jobs.duckdb"},
+    )
+    refresh_config = config.model_copy(update={"refresh_known_details": True})
+    listing_path = "/fr/companies/example/jobs/charge-communication"
+
+    assert _scrape_with_search_state(refresh_config) == (1, (2, None))
+    assert detail_requests == [listing_path]
+    assert _scrape_with_search_state(config) == (0, (2, None))
+    assert _scrape_with_search_state(refresh_config) == (1, (2, None))
+    assert detail_requests == [listing_path, listing_path]
