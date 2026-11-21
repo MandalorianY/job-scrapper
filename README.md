@@ -10,6 +10,34 @@ Install [uv](https://docs.astral.sh/uv/getting-started/installation/) and run fr
 uv run --locked job-scrapper
 ```
 
+## Release downloads
+
+Each [release](https://github.com/MandalorianY/job-scrapper/releases) lists the platform and architecture in the asset name. Verify downloads against `SHA256SUMS`.
+
+| Format | How to run |
+| --- | --- |
+| Windows `.exe` | Download the `windows-amd64` or `windows-arm64` executable and run it from PowerShell with `--help`. |
+| Debian `.deb` | Install the `amd64` or `arm64` package with `sudo apt install ./job-scrapper_VERSION_ARCH.deb`, then run `job-scrapper`. |
+| Linux or macOS binary tarball | Extract the platform-matching `job-scrapper-VERSION-PLATFORM-ARCH.tar.gz` and run the executable inside. Keep it alongside the `_internal` directory. |
+| Python wheel or source tarball | Install the wheel with `uv tool install --python 3.14 ./scrapper-VERSION-py3-none-any.whl`. The `scrapper-VERSION.tar.gz` source archive can be unpacked and run with `uv run --locked job-scrapper`. |
+
+The standalone releases bundle Python. Linux binaries require glibc 2.35 or later. Run the CLI from your tracker directory or use `--profile FILE` and explicit output paths. Use `--version` to confirm which installation your shell found.
+
+## Homebrew
+
+Install the latest published release from the project's tap.
+
+```sh
+brew install mandaloriany/tap/job-scrapper
+```
+
+Run `job-scrapper` from the directory where you want to keep `data/` and `exports/`. Pass `--profile /path/to/profile.yaml` to use your own search settings.
+You can also put `config.local.yaml` in that directory to load it automatically.
+
+Use `job-scrapper-install-timer --profile /path/to/profile.yaml` to schedule recurring runs with Homebrew services. [Schedule configuration](deploy/README.md)
+
+If the Docker launcher takes precedence on your `PATH`, run `"$(brew --prefix job-scrapper)/bin/job-scrapper"` to select the Homebrew installation.
+
 ## Docker CLI
 
 With Docker running, start a live scrape from the checkout root.
@@ -19,6 +47,7 @@ With Docker running, start a live scrape from the checkout root.
 ```
 
 The launcher builds the image and uses the checkout’s local config, `data/`, and `exports/`.
+Use `--profile PATH` or `--replay-from PATH` to pass in a host file. Relative input paths are looked up from the calling directory first, then from the checkout. Use relative YAML output paths under `data/` or `exports/` to keep them in the checkout. For output elsewhere on the host, pass an absolute path with `--db`, `--export-dir`, or `--log-file`.
 
 To run `job-scrapper` from any directory, link the launcher into `~/.local/bin` if it’s on your `PATH`.
 
@@ -44,12 +73,14 @@ distance_km: 10
 
 The bundled Toulouse Graphiste profile searches for graphic design, motion design, and PAO roles within 25 km of Toulouse. Save another search as a separate YAML file and select it with `--profile`. The chosen file takes the place of `config.local.yaml`. Set `paths.database_path`, `paths.export_dir`, and `paths.log_file` to separate paths for each profile. Files matching `src/scrapper/config/*.local.yaml` are ignored by Git.
 
+Relative YAML output paths resolve from the checkout when using `uv`, or from the working directory when using an installed CLI. Absolute paths and `~/` work for local installations.
+
 ```sh
 uv run --locked job-scrapper --profile src/scrapper/config/toulouse-graphiste.yaml --status
 uv run --locked job-scrapper --profile src/scrapper/config/toulouse-graphiste.yaml
 ```
 
-Use `--show-config` for the effective settings and their origins. For French searches, set the town names in `locations` and optionally list alternate names under `location_scope.city_aliases`. Live runs cache municipality and region data beside DuckDB. They look up only towns and regions missing from that cache and recalculate changes to the radius or aliases locally. The resolved scope is saved for offline exports and replay with the same location settings. Keep credentials in `.env`. See the [example configuration](src/scrapper/config/config.yaml) and [.env.example](.env.example).
+Use `--show-config` to inspect settings, their origins, and available cached geography offline. For French searches, set the town names in `locations` and optionally list alternate names under `location_scope.city_aliases`. Live runs cache municipality and region data beside DuckDB. They look up only towns and regions missing from that cache and recalculate changes to the radius or aliases locally. The resolved scope is saved for offline exports and replay with the same location settings. Keep credentials in `.env`. See the [example configuration](src/scrapper/config/config.yaml) and [.env.example](.env.example).
 
 ## Job sources
 
@@ -88,7 +119,7 @@ Built-in aggregator routes live in Python. To override one provider in a profile
 | `data/job_search.duckdb` | Listings and search history |
 | `data/job-scrapper.jsonl` | Run logs |
 
-Use `--help` for available options or `--export-only` to regenerate files from DuckDB without scraping.
+Use `--help` for available options or `--export-only` to regenerate files from an existing DuckDB without scraping.
 
 ## Replay and recovery
 
@@ -103,9 +134,24 @@ Keep the previous workbook to carry application statuses into a rebuilt tracker.
 ## Development
 
 ```sh
-uv run --locked --group test task test
+uv run --locked poe test
 ```
 
-Set `SCRAPPER_RUN_REAL_SMOKE=1` to include live smoke tests.
+Poe runs Ruff before pytest. Pytest writes the HTML coverage report to `htmlcov/index.html`. Set `SCRAPPER_RUN_REAL_SMOKE=1` to include live smoke tests.
 
-[Linux scheduling](deploy/README.md) · [MIT License](LICENSE)
+Run `uv run --locked poe lint` for lint checks or `uv run --locked poe format` to apply Ruff fixes and formatting.
+
+### Releases
+
+After CI passes on `main`, tag that commit with the version in `pyproject.toml`. For example:
+
+```sh
+git tag -a v0.1.0 -m "Release v0.1.0"
+git push origin refs/tags/v0.1.0
+```
+
+The [release workflow](.github/workflows/release.yml) builds the Python distributions, Windows executables, Debian packages, and portable Linux and macOS archives. It smoke-tests them on their build platforms before attaching the assets and checksums to a GitHub release draft. Review the generated notes and publish the draft with `gh release edit v0.1.0 --draft=false`.
+
+Publishing the latest release updates the [Homebrew tap](https://github.com/MandalorianY/homebrew-tap) with the source archive's SHA-256. The [tap workflow](.github/workflows/homebrew.yml) uses the `HOMEBREW_TAP_DEPLOY_KEY` Actions secret to push the formula to the tap.
+
+[Scheduled runs](deploy/README.md) · [MIT License](LICENSE)

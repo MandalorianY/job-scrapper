@@ -22,6 +22,7 @@ Do not commit generated data or exports unless the user explicitly asks for that
 - JobSpy for supported boards: Indeed, LinkedIn, Glassdoor, Google Jobs, HelloWork
 - `httpx` + BeautifulSoup for APIs, aggregator pages, and sitemaps
 - OpenPyXL and pandas for localized Excel/CSV exports
+- PyInstaller in the locked `release` group for native Windows, Linux, and macOS releases. The release version lives in `pyproject.toml`.
 
 The tracked `src/scrapper/config/config.yaml` is the public example template. Use `src/scrapper/config/config.local.yaml` (when present) for live repository settings such as query/location tuning and source-specific overrides. Use `--profile PATH` to select an alternate YAML with its own database, export, and log paths.
 Installed builds also look for `config.local.yaml` in the working directory. Use paths under `data/` and `exports/` in Docker YAML profiles. The Docker launcher mounts host files passed via `--profile` or `--replay-from` and host destinations passed via `--db`, `--export-dir`, or `--log-file`.
@@ -72,7 +73,14 @@ uv run python -m compileall src main.py
 Run lint plus pytest with coverage:
 
 ```bash
-uv run --locked --group test task test
+uv run --locked poe test
+```
+
+Build native release assets for the current machine and smoke-test the installed CLI with `deploy/smoke_release.py`.
+
+```bash
+uv sync --locked --no-default-groups --group release --no-editable
+uv run --locked --no-sync python deploy/build_release.py
 ```
 
 Fast pytest iteration without coverage:

@@ -14,15 +14,26 @@ concurrency:
 
 jobs:
   checks:
-    runs-on: ubuntu-latest
+    name: ${{ matrix.target.runner }} / Python ${{ matrix.python-version }}
+    runs-on: ${{ matrix.target.runner }}
     timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
+        target:
+          - {runner: ubuntu-24.04, arch: x86_64}
+          - {runner: ubuntu-24.04-arm, arch: aarch64}
+          - {runner: macos-15-intel, arch: x86_64}
+          - {runner: macos-15, arch: aarch64}
+          - {runner: windows-2025, arch: x86_64}
+          - {runner: windows-11-arm, arch: aarch64}
         python-version: ["3.13", "3.14"]
     env:
       SCRAPPER_DISABLE_LOCAL_CONFIG: "1"
       SCRAPPER_RUN_REAL_SMOKE: "0"
+      PYTHONUTF8: "1"
+      UV_PYTHON_PREFERENCE: only-managed
+      UV_PYTHON_ARCH: ${{ matrix.target.arch }}
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -36,13 +47,18 @@ jobs:
           python-version: ${{ matrix.python-version }}
 
       - name: Install locked dependencies from wheels
-        run: uv sync --locked --group test --no-build --no-cache
-
-      - name: Check installed CLI
-        run: uv run --locked --no-sync job-scrapper --show-config > /dev/null
-
-      - name: Lint and test
-        run: uv run --locked --group test task test
+        run: uv sync --locked --group test --no-install-project --no-build --no-cache
 
       - name: Build package
         run: uv build --no-sources
+
+      - name: Install built wheel
+        run: uv pip install --no-deps --no-index --find-links dist scrapper
+
+      - name: Check installed CLI
+        run: uv run --locked --no-sync job-scrapper --status
+
+      - name: Lint and test
+        env:
+          UV_NO_SYNC: "1" # Keep the built wheel installed during Poe's nested uv runs.
+        run: uv run --locked poe test
