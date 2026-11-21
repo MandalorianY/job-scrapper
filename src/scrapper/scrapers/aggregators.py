@@ -33,6 +33,13 @@ from scrapper.text import clean_text, external_url_key, has_excluded_contract_si
 
 log = structlog.get_logger(__name__)
 
+AGGREGATORS_SOURCE = "aggregators"
+SITE_SEARCH_URL_TEMPLATES = {
+    "apec": "https://www.apec.fr/candidat/recherche-emploi.html/emploi?q={query}&l={city_slug}-{department}&page=0",
+    "optioncarriere": "https://www.optioncarriere.com/emploi-{query_slug}/{city}",
+    "cadremploi": "https://www.cadremploi.fr/emploi/liste_offres?motscles={query}&ville={city_slug}-{department}",
+    "isarta": "https://isarta.fr/cgi-bin/emplois/jobs?cat={region_slug}&query={query}",
+}
 SITE_SEARCH_DIRECT_PREFIXES = {
     "apec": ("/candidat/recherche-emploi.html/emploi/detail-offre/",),
     "optioncarriere": ("/jobad/",),
@@ -44,7 +51,7 @@ SITEMAP_URL_RE = re.compile(r"<loc>(.*?)</loc>", re.IGNORECASE)
 
 
 async def scrape_aggregators(config: SearchConfig, store: JobStore) -> dict[str, int]:
-    if not config.is_source_enabled(config.aggregators.source):
+    if not config.is_source_enabled(AGGREGATORS_SOURCE):
         return {}
 
     counts: dict[str, int] = {}
@@ -235,7 +242,7 @@ def site_search_templates(spec: SiteSearchConfig, location: str, config: SearchC
     if templates is None:
         templates = spec.search_url_templates
         if not templates:
-            default = config.aggregators.site_url_templates.get(spec.source)
+            default = config.aggregators.site_url_templates.get(spec.source, SITE_SEARCH_URL_TEMPLATES.get(spec.source))
             templates = (default,) if default else ()
     city = location.split(",", 1)[0].strip()
     metadata = config.aggregators.site_locations.get(location) or config.aggregators.site_locations.get(
@@ -604,8 +611,7 @@ def _is_meteojob_placeholder_offer(offer: JobOffer) -> bool:
 
 
 def _search_urls(spec: DirectAggregatorConfig, query: str, config: SearchConfig) -> list[str]:
-    query_value = query.title().replace(" ", "-") if spec.query_style == "title_slug" else query
-    encoded_query = quote_plus(query_value)
+    encoded_query = quote_plus(query)
     departments = config.aggregators.direct_locations if spec.use_direct_locations else (None,)
     urls = []
     for department in departments:

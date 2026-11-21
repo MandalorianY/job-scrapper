@@ -25,7 +25,11 @@ def test_isarta_discovers_absolute_job_query_links() -> None:
         transport = httpx.MockTransport(lambda _: httpx.Response(200, text=html, headers={"content-type": "text/html"}))
         async with httpx.AsyncClient(transport=transport) as client:
             return await aggregators._direct_site_search_results(
-                client, "isarta", "communication", SearchConfig(include_terms=("communication",))
+                client,
+                "isarta",
+                "communication",
+                SearchConfig(include_terms=("communication",)),
+                ("https://isarta.fr/cgi-bin/emplois/jobs?cat=occitanie&query={query}",),
             )
 
     assert asyncio.run(run()) == ["https://isarta.fr/?job=123"]
@@ -38,7 +42,11 @@ def test_cadremploi_all_blocked_pages_raise_instead_of_empty_success(monkeypatch
 
     async def run() -> list[str]:
         async with httpx.AsyncClient(transport=httpx.MockTransport(lambda _: httpx.Response(403))) as client:
-            return await aggregators._direct_site_search_results(client, "cadremploi", "communication", SearchConfig())
+            config = SearchConfig(
+                locations=("Toulouse, France",),
+                aggregators={"site_locations": {"Toulouse, France": {"department": "31", "region_slug": "occitanie"}}},
+            )
+            return await aggregators._direct_site_search_results(client, "cadremploi", "communication", config)
 
     with pytest.raises(RuntimeError, match="cadremploi discovery failed: HTTP 403"):
         asyncio.run(run())
@@ -50,7 +58,7 @@ def test_cadremploi_continues_to_working_location_after_http_error(monkeypatch: 
     )
 
     def respond(request: httpx.Request) -> httpx.Response:
-        if request.url.params.get("ville") != "grenoble-38":
+        if request.url.params.get("ville") != "nantes-44":
             return httpx.Response(403)
         return httpx.Response(
             200,
@@ -61,7 +69,14 @@ def test_cadremploi_continues_to_working_location_after_http_error(monkeypatch: 
     async def run() -> list[str]:
         async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
             return await aggregators._direct_site_search_results(
-                client, "cadremploi", "communication", SearchConfig(include_terms=("communication",))
+                client,
+                "cadremploi",
+                "communication",
+                SearchConfig(include_terms=("communication",)),
+                (
+                    "https://www.cadremploi.fr/emploi/liste_offres?motscles={query}&ville=toulouse-31",
+                    "https://www.cadremploi.fr/emploi/liste_offres?motscles={query}&ville=nantes-44",
+                ),
             )
 
     assert asyncio.run(run()) == ["https://www.cadremploi.fr/emploi/detail_offre?annonceId=123"]
@@ -101,11 +116,11 @@ def test_blocked_detail_page_does_not_become_unverified_offer() -> None:
 
 
 def test_provider_search_urls_honor_title_and_requested_radius() -> None:
-    config = SearchConfig(distance_km=10)
+    config = SearchConfig(distance_km=10, aggregators={"direct_locations": ["76R"]})
     specs = {spec.source: spec for spec in config.aggregators.direct_specs}
 
     france_travail = aggregators._search_urls(specs["france_travail"], "chargé communication", config)
-    assert all("rayon=10" in url for url in france_travail)
+    assert france_travail and all("rayon=10" in url for url in france_travail)
     makesense = specs["makesense"].model_copy(
         update={
             "search_url_templates": ("https://jobs.makesense.org/fr/s/jobs/all/communication/cdi?sortBy=relevance",)
@@ -144,7 +159,7 @@ def test_site_search_attempts_every_query_and_skips_disabled_sources(
         queries=("example role", "sample coordinator", "demo lead", "placeholder specialist"),
         locations=("Toulouse, France",),
         enabled_sources={"apec": False},
-        database_path=tmp_path / "jobs.duckdb",
+        paths={"database_path": tmp_path / "jobs.duckdb"},
     )
     store = JobStore(config.database_path)
     headers = {"user-agent": config.user_agent, "accept-language": config.http.accept_language}

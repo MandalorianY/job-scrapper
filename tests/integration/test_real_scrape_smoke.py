@@ -14,10 +14,12 @@ from openpyxl.utils import get_column_letter
 from scrapper.config import SearchConfig
 from scrapper.export import export_jobs
 from scrapper.scrapers import (
+    JOBSPY_SITES,
     scrape_aggregators,
     scrape_jobspy_sources,
     scrape_welcome_to_the_jungle,
 )
+from scrapper.search_regions import route_location_overrides
 from scrapper.storage import JobStore
 
 RUN_REAL_SMOKE_ENV = "SCRAPPER_RUN_REAL_SMOKE"
@@ -32,7 +34,8 @@ class SmokeSource:
 
 def _jobspy_source(source: str) -> SmokeSource:
     def run(config: SearchConfig, store: JobStore) -> dict[str, int]:
-        return scrape_jobspy_sources(config.model_copy(update={"jobspy_sites": (source,)}), store)
+        enabled_sources = config.enabled_sources | {site: False for site in JOBSPY_SITES if site != source}
+        return scrape_jobspy_sources(config.model_copy(update={"enabled_sources": enabled_sources}), store)
 
     return SmokeSource(source, run)
 
@@ -59,7 +62,7 @@ def _site_search_source(source: str) -> SmokeSource:
 
 _SMOKE_CONFIG = SearchConfig()
 REAL_SMOKE_SOURCES = (
-    *(_jobspy_source(source) for source in _SMOKE_CONFIG.jobspy_sites),
+    *(_jobspy_source(source) for source in JOBSPY_SITES),
     SmokeSource(
         "welcome_to_the_jungle", lambda config, store: asyncio.run(scrape_welcome_to_the_jungle(config, store))
     ),
@@ -84,11 +87,10 @@ def test_real_small_scrape_by_website(smoke_source: SmokeSource, tmp_path: Path)
         queries=_SMOKE_CONFIG.queries[:1],
         results_wanted_per_query=1,
         custom_max_pages=1,
-        custom_max_detail_pages=3,
         aggregators={"max_detail_pages": 2},
-        database_path=tmp_path / "job_search.duckdb",
-        export_dir=tmp_path / "exports",
+        paths={"database_path": tmp_path / "job_search.duckdb", "export_dir": tmp_path / "exports"},
     )
+    config = route_location_overrides(config)
     store = JobStore(config.database_path)
     try:
         with warnings.catch_warnings():

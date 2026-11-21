@@ -2,10 +2,14 @@ from __future__ import annotations
 
 import os
 from collections.abc import Callable
+from typing import TYPE_CHECKING
 
 import httpx
 import pytest
 from hypothesis import HealthCheck, settings
+
+if TYPE_CHECKING:
+    from scrapper.config.settings import LocationScopeConfig
 
 os.environ.setdefault("SCRAPPER_DISABLE_LOCAL_CONFIG", "1")
 
@@ -13,6 +17,23 @@ settings.register_profile("local", max_examples=50)
 settings.register_profile("ci", max_examples=500)
 settings.register_profile("fast", max_examples=10, suppress_health_check=[HealthCheck.too_slow])
 settings.load_profile(os.getenv("PROFILE", "local"))
+
+
+@pytest.fixture
+def toulouse_scope() -> LocationScopeConfig:
+    from scrapper.config.settings import LocationCenterConfig, LocationScopeConfig
+
+    return LocationScopeConfig(
+        radius_km=25,
+        centers=(LocationCenterConfig(name="Toulouse", latitude=43.6007, longitude=1.4328),),
+        city_coordinates={
+            "Blagnac": (43.6410, 1.3770),
+            "Léguevin": (43.5928, 1.2353),
+            "Ramonville-Saint-Agne": (43.5438, 1.4784),
+            "Saint-Orens-de-Gameville": (43.5550, 1.5332),
+            "Montauban": (44.0198, 1.3550),
+        },
+    )
 
 
 @pytest.fixture
@@ -64,7 +85,7 @@ def jobijoba_alternance_page() -> tuple[str, str]:
 @pytest.fixture
 def emploi_territorial_page() -> tuple[str, str]:
     return (
-        "https://www.emploi-territorial.fr/offre/o069-example-charge-communication",
+        "https://www.emploi-territorial.fr/offre/o031-example-charge-communication",
         """
         <html>
           <head>

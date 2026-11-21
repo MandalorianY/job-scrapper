@@ -1,7 +1,5 @@
 app_env: prod
 
 custom_max_pages: 3
-custom_max_detail_pages: 120
-refresh_known_details: false
 aggregators:
   max_detail_pages: 80

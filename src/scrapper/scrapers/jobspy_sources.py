@@ -26,6 +26,7 @@ from scrapper.models import JobOffer
 from scrapper.storage import JobStore
 from scrapper.text import clean_text, has_excluded_contract_signal
 
+JOBSPY_SITES = ("indeed", "linkedin", "glassdoor", "google", "hellowork")
 LINKEDIN_RELATIVE_DATE_RE = re.compile(
     r"(?P<count>\d+)\s*(?P<unit>minute?s?|min|hour?s?|h|day?s?|d|week?s?|month?s?|"
     r"heure?s?|jour?s?|semaine?s?|mois)",
@@ -68,7 +69,7 @@ def scrape_jobspy_sources(
     progress: ProgressReporter | None = None,
 ) -> dict[str, int]:
     counts: dict[str, int] = {}
-    enabled_sites = [site for site in config.jobspy_sites if config.is_source_enabled(site)]
+    enabled_sites = [site for site in JOBSPY_SITES if config.is_source_enabled(site)]
     for site in enabled_sites:
         counts[site] = 0
     plans = _jobspy_search_plans(enabled_sites, config, store)
@@ -247,7 +248,6 @@ def _run_jobspy_plan(
             plan.location,
             seen_by_site[site],
             stored_by_site[site],
-            config,
             store,
             progress,
             search_index,
@@ -263,14 +263,13 @@ def _finish_successful_site(
     location: str,
     seen: int,
     stored: int,
-    config: SearchConfig,
     store: JobStore,
     progress: ProgressReporter | None,
     search_index: int,
     total_searches: int,
     source_error: str | None = None,
 ) -> None:
-    error = source_error or _zero_rows_error(site, seen, config)
+    error = source_error or _zero_rows_error(site, seen)
     if error:
         store.finish_search(site, query, location, seen, error=error)
         log.warning(
@@ -333,13 +332,19 @@ def _finish_failed_plan(
             )
 
 
-def _zero_rows_error(site: str, seen: int, config: SearchConfig) -> str | None:
+def _zero_rows_error(site: str, seen: int) -> str | None:
     if seen:
         return None
     if site == "google":
-        return config.jobspy.google_zero_results_error
+        return (
+            "JobSpy Google returned 0 rows. Upstream issue #302 reports 'initial cursor not found' "
+            "when Google does not return the expected Jobs payload."
+        )
     if site == "glassdoor":
-        return config.jobspy.glassdoor_zero_results_error
+        return (
+            "JobSpy Glassdoor returned 0 rows after using the city-only location fallback. "
+            "Glassdoor may be blocking the Graph API or returning an unsupported payload."
+        )
     return None
 
 
@@ -574,9 +579,11 @@ def _linkedin_relative_date(value: str | None, now: datetime | None = None) -> d
 
 
 def _site_location(site: str, location: str, config: SearchConfig) -> str:
-    if site == "glassdoor" and config.jobspy.glassdoor_regional_fallback_term in location.lower():
-        return _glassdoor_location(config.jobspy.glassdoor_location_override)
     if site == "glassdoor":
+        fallback_term = config.jobspy.glassdoor_regional_fallback_term
+        override = config.jobspy.glassdoor_location_override
+        if fallback_term and override and fallback_term.casefold() in location.casefold():
+            return _glassdoor_location(override)
         return _glassdoor_location(location)
     return location
 

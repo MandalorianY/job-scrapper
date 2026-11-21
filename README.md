@@ -31,27 +31,31 @@ Recreate the link if you move the checkout.
 
 ## Configuration
 
-The bundled settings use sample roles in Auvergne-Rhône-Alpes. Set your roles and search area in `src/scrapper/config/config.local.yaml`.
+The bundled configuration uses Toulouse as its example town. Set your roles and one or more French municipalities in `src/scrapper/config/config.local.yaml`.
 
 ```yaml
 queries: [data analyst]
 include_terms: [data analyst, analyste de données]
-locations: ["Toulouse, France"]
-location_label: "Toulouse, France"
+locations: ["Nantes, France"]
 distance_km: 10
-location_scope:
-  radius_km: 10
-  centers:
-    - name: Toulouse
-      latitude: 43.6007
-      longitude: 1.4328
 ```
 
-Pass `--location` once per French town to update search routing for a run. Use `--show-config` to inspect settings and their origins. Keep credentials in `.env`. See the [example configuration](src/scrapper/config/config.yaml) and [.env.example](.env.example).
+`queries` tells boards what to search for. `include_terms` controls which job titles pass the filter. For live searches the CLI resolves each municipality's coordinates, department, and region to build provider routes. The location filter uses `distance_km` unless `location_scope.radius_km` is set separately. Pass `--location` once per town to override the saved locations for a run.
+
+The bundled Toulouse Graphiste profile searches for graphic design, motion design, and PAO roles within 25 km of Toulouse. Save another search as a separate YAML file and select it with `--profile`. The chosen file takes the place of `config.local.yaml`. Set `paths.database_path`, `paths.export_dir`, and `paths.log_file` to separate paths for each profile. Files matching `src/scrapper/config/*.local.yaml` are ignored by Git.
+
+```sh
+uv run --locked job-scrapper --profile src/scrapper/config/toulouse-graphiste.yaml --status
+uv run --locked job-scrapper --profile src/scrapper/config/toulouse-graphiste.yaml
+```
+
+Use `--show-config` for the effective settings and their origins. For French searches, set the town names in `locations` and optionally list alternate names under `location_scope.city_aliases`. Live runs cache municipality and region data beside DuckDB. They look up only towns and regions missing from that cache and recalculate changes to the radius or aliases locally. The resolved scope is saved for offline exports and replay with the same location settings. Keep credentials in `.env`. See the [example configuration](src/scrapper/config/config.yaml) and [.env.example](.env.example).
 
 ## Job sources
 
-Use `--status` to see enabled sources. Set a source to `false` under `enabled_sources` in `config.local.yaml` to disable it.
+Use `--status` for an offline summary of search settings, enabled sources, and tracker sync. It uses saved geographic scope when available. Set a source to `false` under `enabled_sources` in `config.local.yaml` to disable it.
+
+Built-in aggregator routes live in Python. To override one provider in a profile, use its source name as a key under `aggregators.direct_specs` or `aggregators.site_search_sources`. Keep existing `query_template` values to reuse the search history in DuckDB.
 
 ✅ Working · ⚠️ Unverified · ⛔ Blocked or disabled
 

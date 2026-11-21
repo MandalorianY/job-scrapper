@@ -6,6 +6,7 @@ from datetime import UTC, date, datetime
 from bs4 import BeautifulSoup
 
 from scrapper.config import SearchConfig
+from scrapper.config.settings import LocationScopeConfig
 from scrapper.dates import absolute_posted_date
 from scrapper.models import JobOffer
 from scrapper.scrapers.aggregators import _company_from_domain as aggregator_company_from_domain
@@ -125,8 +126,8 @@ def test_custom_search_cutoff_uses_last_success_with_overlap() -> None:
     assert cutoff == datetime(2026, 6, 3, 12, 0, tzinfo=UTC)
 
 
-def test_aggregator_offer_usability_requires_title_contract_and_region() -> None:
-    config = SearchConfig()
+def test_aggregator_offer_usability_requires_title_contract_and_region(toulouse_scope: LocationScopeConfig) -> None:
+    config = SearchConfig(location_scope=toulouse_scope)
     usable = JobOffer(
         source="example",
         source_url="https://example.com/jobs/1",
@@ -140,5 +141,5 @@ def test_aggregator_offer_usability_requires_title_contract_and_region() -> None
     assert _offer_is_usable(usable, config)
     assert not _offer_is_usable(bad_contract, config)
     assert _infer_contract("CDI ou CDD possible") == "CDI, CDD"
-    assert _has_regional_signal(None, "Hybrid role with presence in Grenoble")
+    assert _has_regional_signal(None, "Hybrid role with presence in Blagnac", config)
     assert aggregator_company_from_domain("https://www.emploi-collectivites.fr/offres/1") == "Emploi Collectivites"
