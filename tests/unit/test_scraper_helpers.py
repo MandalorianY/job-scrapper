@@ -10,8 +10,8 @@ from scrapper.config.settings import LocationScopeConfig
 from scrapper.dates import absolute_posted_date
 from scrapper.location_scope import mentions_location_in_scope
 from scrapper.models import JobOffer
-from scrapper.scrapers.aggregators import _company_from_domain as aggregator_company_from_domain
-from scrapper.scrapers.aggregators import _infer_contract, _offer_is_usable
+from scrapper.scrapers.aggregators.detail import _company_from_domain as aggregator_company_from_domain
+from scrapper.scrapers.aggregators.detail import _infer_contract, _offer_is_usable
 from scrapper.scrapers.common import (
     apply_url,
     custom_search_cutoff,
@@ -147,7 +147,9 @@ def test_aggregator_offer_usability_requires_title_contract_and_region(toulouse_
     assert aggregator_company_from_domain("https://www.emploi-collectivites.fr/offres/1") == "Emploi Collectivites"
 
 
-def test_shared_offer_validation_rejects_title_only_and_independent_business_ads(toulouse_scope: LocationScopeConfig) -> None:
+def test_shared_offer_validation_rejects_title_only_and_independent_business_ads(
+    toulouse_scope: LocationScopeConfig,
+) -> None:
     config = SearchConfig(location_scope=toulouse_scope)
     listing = JobOffer(
         source="example",

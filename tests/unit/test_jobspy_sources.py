@@ -8,18 +8,21 @@ import httpx
 import pandas as pd
 import pytest
 from bs4 import BeautifulSoup
-from requests import PreparedRequest, Response, Session
+from jobspy.linkedin import LinkedIn as JobSpyLinkedIn
+from jobspy.model import JobType, ScraperInput, Site
+from jobspy.util import RequestsRotating
+from requests import PreparedRequest, Response
 from requests.adapters import HTTPAdapter
 
 from scrapper.config import SearchConfig
 from scrapper.config.settings import LocationScopeConfig
 from scrapper.models import JobOffer
-from scrapper.scrapers import jobspy_sources
+from scrapper.scrapers.jobspy_sources import JOBSPY_SITES, linkedin, scrape, scrape_jobspy_sources
 from scrapper.storage import JobStore
 
 
 def _jobspy_only(*sites: str) -> dict[str, bool]:
-    return {site: site in sites for site in jobspy_sources.JOBSPY_SITES}
+    return {site: site in sites for site in JOBSPY_SITES}
 
 
 def test_google_jobspy_source_uses_google_search_term_and_records_rows(
@@ -48,7 +51,7 @@ def test_google_jobspy_source_uses_google_search_term_and_records_rows(
             ]
         )
 
-    monkeypatch.setattr(jobspy_sources, "scrape_jobs", fake_scrape_jobs)
+    monkeypatch.setattr(scrape, "scrape_jobs", fake_scrape_jobs)
     config = SearchConfig(
         queries=("example role",),
         locations=("Toulouse, France",),
@@ -59,7 +62,7 @@ def test_google_jobspy_source_uses_google_search_term_and_records_rows(
     store = JobStore(config.database_path)
     progress_messages: list[str] = []
     try:
-        counts = jobspy_sources.scrape_jobspy_sources(config, store, progress=progress_messages.append)
+        counts = scrape_jobspy_sources(config, store, progress=progress_messages.append)
         search_state = store.conn.execute("SELECT last_error FROM search_state WHERE source = 'google'").fetchone()
         canonical = store.canonical_dataframe()
 
@@ -89,7 +92,7 @@ def test_google_jobspy_zero_rows_records_upstream_error(
     jobs = pd.DataFrame()
     if source_error:
         jobs.attrs["errors"] = {"google": source_error}
-    monkeypatch.setattr(jobspy_sources, "scrape_jobs", lambda **_: jobs)
+    monkeypatch.setattr(scrape, "scrape_jobs", lambda **_: jobs)
     config = SearchConfig(
         queries=("example role",),
         locations=("Toulouse, France",),
@@ -98,7 +101,7 @@ def test_google_jobspy_zero_rows_records_upstream_error(
     )
     store = JobStore(config.database_path)
     try:
-        counts = jobspy_sources.scrape_jobspy_sources(config, store)
+        counts = scrape_jobspy_sources(config, store)
         row = store.conn.execute(
             "SELECT last_success_at, last_error FROM search_state WHERE source = 'google'"
         ).fetchone()
@@ -154,7 +157,7 @@ def test_jobspy_batches_compatible_sites_in_one_call(monkeypatch: pytest.MonkeyP
             ]
         )
 
-    monkeypatch.setattr(jobspy_sources, "scrape_jobs", fake_scrape_jobs)
+    monkeypatch.setattr(scrape, "scrape_jobs", fake_scrape_jobs)
     config = SearchConfig(
         queries=("example role",),
         locations=("Toulouse, France",),
@@ -164,7 +167,7 @@ def test_jobspy_batches_compatible_sites_in_one_call(monkeypatch: pytest.MonkeyP
     )
     store = JobStore(config.database_path)
     try:
-        counts = jobspy_sources.scrape_jobspy_sources(config, store)
+        counts = scrape_jobspy_sources(config, store)
 
         assert len(calls) == 1
         assert calls[0]["site_name"] == ["indeed", "linkedin", "google"]
@@ -200,7 +203,7 @@ def test_hellowork_jobspy_retains_search_state_and_updates_existing_offer(
     jobs = Mock(
         side_effect=lambda **options: pd.DataFrame([listing, internship] if options["site_name"] == "hellowork" else [])
     )
-    monkeypatch.setattr(jobspy_sources, "scrape_jobs", jobs)
+    monkeypatch.setattr(scrape, "scrape_jobs", jobs)
 
     store = JobStore(tmp_path / "jobs.duckdb")
     try:
@@ -208,7 +211,7 @@ def test_hellowork_jobspy_retains_search_state_and_updates_existing_offer(
         store.start_search("hellowork", query, location)
         store.finish_search("hellowork", query, location, 1)
 
-        assert jobspy_sources.scrape_jobspy_sources(config, store) == {"linkedin": 0, "hellowork": 1}
+        assert scrape_jobspy_sources(config, store) == {"linkedin": 0, "hellowork": 1}
         calls = {call.kwargs["site_name"]: call.kwargs for call in jobs.call_args_list}
         assert calls["hellowork"]["fetch_description"] is True
         assert calls["hellowork"]["distance"] == 16
@@ -228,13 +231,13 @@ def test_jobspy_records_failed_batch_and_successful_retry(monkeypatch: pytest.Mo
             raise RuntimeError("Batch unavailable")
         return pd.DataFrame()
 
-    monkeypatch.setattr(jobspy_sources, "scrape_jobs", fake_scrape_jobs)
+    monkeypatch.setattr(scrape, "scrape_jobs", fake_scrape_jobs)
     config = SearchConfig(
         queries=("example",), locations=("Toulouse, France",), enabled_sources=_jobspy_only("indeed", "linkedin")
     )
     store = JobStore(tmp_path / "jobs.duckdb")
     try:
-        assert jobspy_sources.scrape_jobspy_sources(config, store) == {"indeed": 0, "linkedin": 0}
+        assert scrape_jobspy_sources(config, store) == {"indeed": 0, "linkedin": 0}
         assert store.conn.execute(
             "SELECT error, count(*) FROM search_attempts GROUP BY error ORDER BY error NULLS LAST"
         ).fetchall() == [("Batch unavailable", 2), (None, 2)]
@@ -248,7 +251,7 @@ def test_jobspy_records_failed_batch_and_successful_retry(monkeypatch: pytest.Mo
 @pytest.fixture
 def empty_scrape_jobs(monkeypatch: pytest.MonkeyPatch) -> Mock:
     scrape_jobs = Mock(return_value=pd.DataFrame())
-    monkeypatch.setattr(jobspy_sources, "scrape_jobs", scrape_jobs)
+    monkeypatch.setattr(scrape, "scrape_jobs", scrape_jobs)
     return scrape_jobs
 
 
@@ -265,7 +268,7 @@ def test_jobspy_hours_old_override_ignores_incremental_state(tmp_path: Path, emp
         store.start_search("indeed", "example role", "Toulouse, France")
         store.finish_search("indeed", "example role", "Toulouse, France", 0)
 
-        jobspy_sources.scrape_jobspy_sources(config, store)
+        scrape_jobspy_sources(config, store)
 
         assert empty_scrape_jobs.call_args_list[0].kwargs["hours_old"] == 2160
     finally:
@@ -282,7 +285,7 @@ def test_glassdoor_uses_city_only_location_and_configured_country(tmp_path: Path
     )
     store = JobStore(config.database_path)
     try:
-        counts = jobspy_sources.scrape_jobspy_sources(config, store)
+        counts = scrape_jobspy_sources(config, store)
         search_state = store.conn.execute(
             "SELECT location, last_error FROM search_state WHERE source = 'glassdoor'"
         ).fetchone()
@@ -301,38 +304,36 @@ def test_glassdoor_uses_city_only_location_and_configured_country(tmp_path: Path
 
 def test_glassdoor_respects_smaller_general_result_limit() -> None:
     config = SearchConfig(results_wanted_per_query=1, jobspy={"glassdoor_results_wanted_per_query": 5})
-    assert jobspy_sources._results_wanted("glassdoor", config) == 1
+    assert scrape._results_wanted("glassdoor", config) == 1
 
 
 def test_glassdoor_strips_france_from_city_location() -> None:
     config = SearchConfig()
 
-    assert jobspy_sources._site_location("glassdoor", "Toulouse, France", config) == "Toulouse"
-    assert jobspy_sources._site_location("glassdoor", "Paris", config) == "Paris"
+    assert scrape._site_location("glassdoor", "Toulouse, France", config) == "Toulouse"
+    assert scrape._site_location("glassdoor", "Paris", config) == "Paris"
 
 
 def test_linkedin_fetches_detail_without_changing_other_sites(monkeypatch: pytest.MonkeyPatch) -> None:
     scrape = Mock(return_value=[])
-    monkeypatch.setattr(jobspy_sources.JobSpyLinkedIn, "scrape", scrape)
-    scraper_input = jobspy_sources.ScraperInput.model_validate(
-        {"site_name": [jobspy_sources.Site.LINKEDIN, jobspy_sources.Site.INDEED]}
-    )
+    monkeypatch.setattr(JobSpyLinkedIn, "scrape", scrape)
+    scraper_input = ScraperInput.model_validate({"site_name": [Site.LINKEDIN, Site.INDEED]})
 
-    assert jobspy_sources.TolerantLinkedIn().scrape(scraper_input) == []
+    assert linkedin.TolerantLinkedIn().scrape(scraper_input) == []
     assert scrape.call_args.args[0].fetch_description
     assert not scraper_input.fetch_description
 
 
 @pytest.mark.parametrize(
     ("label", "expected_type"),
-    [("Temps plein", jobspy_sources.JobType.FULL_TIME), ("Stage / Alternance", jobspy_sources.JobType.INTERNSHIP)],
+    [("Temps plein", JobType.FULL_TIME), ("Stage / Alternance", JobType.INTERNSHIP)],
 )
 def test_linkedin_uses_guest_detail_when_listing_page_omits_fields(
-    monkeypatch: pytest.MonkeyPatch, label: str, expected_type: jobspy_sources.JobType
+    monkeypatch: pytest.MonkeyPatch, label: str, expected_type: JobType
 ) -> None:
-    monkeypatch.setattr(jobspy_sources.JobSpyLinkedIn, "_fetch_details", lambda self, job_id: {})
-    scraper = jobspy_sources.TolerantLinkedIn()
-    scraper.scraper_input = jobspy_sources.ScraperInput.model_validate({"site_name": [jobspy_sources.Site.LINKEDIN]})
+    monkeypatch.setattr(JobSpyLinkedIn, "_fetch_details", lambda self, job_id: {})
+    scraper = linkedin.TolerantLinkedIn()
+    scraper.scraper_input = ScraperInput.model_validate({"site_name": [Site.LINKEDIN]})
     scraper.session = Mock(hooks={"response": []})
     scraper.session.get.return_value = Mock(
         status_code=200,
@@ -355,9 +356,9 @@ def test_linkedin_uses_guest_detail_when_listing_page_omits_fields(
 def test_linkedin_guest_detail_uses_structured_data_when_visible_metadata_is_missing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(jobspy_sources.JobSpyLinkedIn, "_fetch_details", lambda self, job_id: {})
-    scraper = jobspy_sources.TolerantLinkedIn()
-    scraper.scraper_input = jobspy_sources.ScraperInput.model_validate({"site_name": [jobspy_sources.Site.LINKEDIN]})
+    monkeypatch.setattr(JobSpyLinkedIn, "_fetch_details", lambda self, job_id: {})
+    scraper = linkedin.TolerantLinkedIn()
+    scraper.scraper_input = ScraperInput.model_validate({"site_name": [Site.LINKEDIN]})
     scraper.session = Mock(hooks={"response": []})
     scraper.session.get.return_value = Mock(
         status_code=200,
@@ -368,7 +369,7 @@ def test_linkedin_guest_detail_uses_structured_data_when_visible_metadata_is_mis
     details = scraper._fetch_details("123")
 
     assert details["description"] == "Manage campaigns."
-    assert details["job_type"] == [jobspy_sources.JobType.INTERNSHIP]
+    assert details["job_type"] == [JobType.INTERNSHIP]
     scraper.session.get.assert_called_once_with("https://www.linkedin.com/jobs-guest/jobs/api/jobPosting/123")
 
 
@@ -386,8 +387,8 @@ def test_linkedin_date_parser_handles_new_class_and_relative_age() -> None:
 
     job_card = soup.select_one(".base-search-card")
     assert job_card is not None
-    assert jobspy_sources._linkedin_date_posted(job_card) == date(2026, 6, 3)
-    assert jobspy_sources._linkedin_relative_date("20 hours ago", now=datetime(2026, 6, 4, 15, 0, tzinfo=UTC)) == date(
+    assert linkedin._linkedin_date_posted(job_card) == date(2026, 6, 3)
+    assert linkedin._linkedin_relative_date("20 hours ago", now=datetime(2026, 6, 4, 15, 0, tzinfo=UTC)) == date(
         2026,
         6,
         3,
@@ -395,8 +396,8 @@ def test_linkedin_date_parser_handles_new_class_and_relative_age() -> None:
 
 
 def test_indeed_expired_message_detector() -> None:
-    assert jobspy_sources._indeed_html_is_expired("<main>Cette offre a expiré sur Indeed</main>")
-    assert not jobspy_sources._indeed_html_is_expired("<main>Cette offre est disponible</main>")
+    assert scrape._indeed_html_is_expired("<main>Cette offre a expiré sur Indeed</main>")
+    assert not scrape._indeed_html_is_expired("<main>Cette offre est disponible</main>")
 
 
 @pytest.mark.parametrize("fail_first", [False, True])
@@ -424,11 +425,15 @@ def test_indeed_reuses_successful_expiry_checks_across_searches(
         requests.append(request.url)
         if fail_first and len(requests) == 1:
             raise httpx.ReadTimeout("timeout", request=request)
-        return httpx.Response(200, headers={"content-type": "text/html"}, text="<main>Cette offre est disponible</main>")
+        return httpx.Response(
+            200, headers={"content-type": "text/html"}, text="<main>Cette offre est disponible</main>"
+        )
 
     client_class = httpx.Client
-    monkeypatch.setattr(jobspy_sources, "scrape_jobs", fake_scrape_jobs)
-    monkeypatch.setattr(httpx, "Client", lambda **kwargs: client_class(transport=httpx.MockTransport(respond), **kwargs))
+    monkeypatch.setattr(scrape, "scrape_jobs", fake_scrape_jobs)
+    monkeypatch.setattr(
+        httpx, "Client", lambda **kwargs: client_class(transport=httpx.MockTransport(respond), **kwargs)
+    )
     config = SearchConfig(
         queries=("communication", "marketing"),
         locations=("Toulouse, France",),
@@ -438,7 +443,7 @@ def test_indeed_reuses_successful_expiry_checks_across_searches(
     )
     store = JobStore(tmp_path / "jobs.duckdb")
     try:
-        assert jobspy_sources.scrape_jobspy_sources(config, store) == {"indeed": 2}
+        assert scrape_jobspy_sources(config, store) == {"indeed": 2}
     finally:
         store.close()
     assert len(requests) == 1 + fail_first
@@ -467,14 +472,14 @@ def test_linkedin_uses_guest_detail_only_when_primary_page_lacks_job_type(
         return response
 
     monkeypatch.setattr(HTTPAdapter, "send", send)
-    scraper = jobspy_sources.TolerantLinkedIn()
-    scraper.scraper_input = jobspy_sources.ScraperInput(site_name=[jobspy_sources.Site.LINKEDIN], country_indeed="france")
-    with Session() as session:
+    scraper = linkedin.TolerantLinkedIn()
+    scraper.scraper_input = ScraperInput.model_validate({"site_name": [Site.LINKEDIN], "country_indeed": "france"})
+    with RequestsRotating() as session:
         scraper.session = session
         details = scraper._fetch_details("123")
         assert session.hooks["response"] == []
 
-    assert details["job_type"] == [jobspy_sources.JobType.FULL_TIME]
+    assert details["job_type"] == [JobType.FULL_TIME]
     assert "Work description" in str(details["description"])
     assert urls[0].endswith("/jobs/view/123")
     assert len(urls) == 1 + needs_fallback
@@ -490,7 +495,7 @@ def test_disabled_jobspy_source_is_skipped(monkeypatch: pytest.MonkeyPatch, tmp_
         called = True
         return pd.DataFrame()
 
-    monkeypatch.setattr(jobspy_sources, "scrape_jobs", fake_scrape_jobs)
+    monkeypatch.setattr(scrape, "scrape_jobs", fake_scrape_jobs)
     config = SearchConfig(
         queries=("example role",),
         locations=("Toulouse, France",),
@@ -499,7 +504,7 @@ def test_disabled_jobspy_source_is_skipped(monkeypatch: pytest.MonkeyPatch, tmp_
     )
     store = JobStore(config.database_path)
     try:
-        counts = jobspy_sources.scrape_jobspy_sources(config, store)
+        counts = scrape_jobspy_sources(config, store)
         row = store.conn.execute("SELECT COUNT(*) FROM search_state WHERE source = 'google'").fetchone()
 
         assert counts == {}

@@ -19,7 +19,7 @@ NON_APPLICATION_PATH_RE = re.compile(
     re.IGNORECASE,
 )
 GENERIC_LISTING_PATHS = frozenset({
-    "apply", "apply-now", "application", "article", "career", "careers", "detail", "details",
+    "apply", "apply-now", "application", "article", "career", "careers", "detail", "details", "detail_offre",
     "emploi", "emplois", "home", "index", "job", "jobs", "offres", "postuler", "redirect", "view",
 })
 JOB_ID_PARAMETERS = ("jk", "jl", "currentJobId", "jobId", "gh_jid", "job", "offreId", "annonceId", "id_job")

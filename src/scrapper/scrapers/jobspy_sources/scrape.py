@@ -1,44 +1,31 @@
 from __future__ import annotations
 
 import logging
-import re
 from collections import defaultdict
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, datetime
 from functools import partial
-from typing import SupportsFloat, SupportsIndex, cast
 from urllib.parse import parse_qs, urlparse
 
 import httpx
 import structlog
-from bs4 import BeautifulSoup, Tag
-from jobspy import SCRAPER_MAPPING, scrape_jobs
-from jobspy.linkedin import LinkedIn as JobSpyLinkedIn
-from jobspy.linkedin.util import criteria
-from jobspy.model import JobPost, JobType, ScraperInput, Site
-from jobspy.util import description_fields, get_enum_from_job_type
-from requests import Response
-from requests.exceptions import RequestException
+from bs4 import BeautifulSoup
+from jobspy import scrape_jobs
 
 from scrapper.config import SearchConfig
 from scrapper.models import JobOffer
-from scrapper.scrapers.common import json_ld_jobposting, offer_matches_search
+from scrapper.scrapers.jobspy_sources.linkedin import patch_linkedin_scraper
+from scrapper.scrapers.jobspy_sources.offers import offer_is_usable, row_to_offer, string_or_none
 from scrapper.storage import JobStore
-from scrapper.text import clean_text, has_excluded_contract_signal, is_application_destination
 
 JOBSPY_SITES = ("indeed", "linkedin", "glassdoor", "google", "hellowork")
-LINKEDIN_RELATIVE_DATE_RE = re.compile(
-    r"(?P<count>\d+)\s*(?P<unit>minute?s?|min|hour?s?|h|day?s?|d|week?s?|month?s?|"
-    r"heure?s?|jour?s?|semaine?s?|mois)",
-    re.IGNORECASE,
-)
 INDEED_EXPIRED_MESSAGE = "cette offre a expiré sur indeed"
 DETAIL_FETCH_SITES = {"glassdoor", "hellowork"}
 KM_PER_MILE = 1.609344
 ProgressReporter = Callable[[str], None]
-log = structlog.get_logger(__name__)
+log = structlog.get_logger(__package__)
 
 
 @dataclass(frozen=True)
@@ -95,7 +82,9 @@ def _run_jobspy_searches(
         for site in plan.sites:
             store.start_search(site, plan.query, plan.location)
         try:
-            plan_counts = _run_jobspy_plan(plan, config, store, progress, search_index, total_searches, is_expired_indeed)
+            plan_counts = _run_jobspy_plan(
+                plan, config, store, progress, search_index, total_searches, is_expired_indeed
+            )
             for site, count in plan_counts.items():
                 counts[site] += count
         except Exception as exc:
@@ -210,7 +199,7 @@ def _run_jobspy_plan(
     is_expired_indeed: Callable[[JobOffer], bool],
 ) -> dict[str, int]:
     if "linkedin" in plan.sites:
-        _patch_linkedin_scraper()
+        patch_linkedin_scraper()
     log.info(
         "jobspy_plan_started",
         sites=list(plan.sites),
@@ -253,8 +242,8 @@ def _run_jobspy_plan(
         if site not in seen_by_site:
             continue
         seen_by_site[site] += 1
-        offer = _row_to_offer(row, site, plan.query, plan.location, config)
-        if not _offer_is_usable(offer, row, config) or is_expired_indeed(offer):
+        offer = row_to_offer(row, site, plan.query, plan.location)
+        if not offer_is_usable(offer, row, config) or is_expired_indeed(offer):
             continue
         store.upsert_offer(offer)
         stored_by_site[site] += 1
@@ -369,45 +358,8 @@ def _zero_rows_error(site: str, seen: int) -> str | None:
 def _row_site(row: Mapping[str, object], plan: JobSpySearchPlan) -> str:
     if len(plan.sites) == 1:
         return plan.sites[0]
-    value = _string_or_none(row.get("site"))
+    value = string_or_none(row.get("site"))
     return value.casefold() if value else ""
-
-
-def _row_to_offer(
-    row: Mapping[str, object], site: str, query: str, search_location: str, config: SearchConfig
-) -> JobOffer:
-    direct_url = _string_or_none(row.get("job_url_direct"))
-    return JobOffer(
-        source=site,
-        source_id=_string_or_none(row.get("id")),
-        source_url=_string_or_none(row.get("job_url")) or "",
-        direct_url=direct_url if is_application_destination(direct_url) else None,
-        title=_string_or_none(row.get("title")),
-        company=_string_or_none(row.get("company")),
-        location=_string_or_none(row.get("location")),
-        description=_string_or_none(row.get("description")),
-        date_posted=_string_or_none(row.get("date_posted")),
-        employment_type=_string_or_none(row.get("job_type")),
-        min_amount=_float_or_none(row.get("min_amount")),
-        max_amount=_float_or_none(row.get("max_amount")),
-        currency=_string_or_none(row.get("currency")),
-        interval=_string_or_none(row.get("interval")),
-        is_remote=_bool_or_none(row.get("is_remote")),
-        company_url=_string_or_none(row.get("company_url")),
-        company_description=_string_or_none(row.get("company_description")),
-        emails=_string_or_none(row.get("emails")),
-        search_query=query,
-        search_location=search_location,
-        raw=dict(row),
-    )
-
-
-def _offer_is_usable(offer: JobOffer, row: Mapping[str, object], config: SearchConfig) -> bool:
-    extra_contract_labels = (row.get("listing_type"), row.get("job_level"))
-    return (
-        offer_matches_search(offer, config)
-        and not any(has_excluded_contract_signal(None, label, None, config.exclude_terms) for label in extra_contract_labels)
-    )
 
 
 def _jobspy_verbose(site: str) -> int | None:
@@ -506,123 +458,6 @@ def _quiet_known_noisy_loggers_for_sites(sites: tuple[str, ...]) -> Iterator[Non
         yield
 
 
-def _patch_linkedin_scraper() -> None:
-    SCRAPER_MAPPING[Site.LINKEDIN] = TolerantLinkedIn
-
-
-class TolerantLinkedIn(JobSpyLinkedIn):
-    def scrape(self, scraper_input: ScraperInput) -> list[JobPost]:
-        # The batch shares its input across boards, so enable detail requests on LinkedIn only.
-        return super().scrape(scraper_input.model_copy(update={"fetch_description": True}))
-
-    def _process_job(self, job_card: Tag, job_id: str) -> JobPost:
-        job_post = super()._process_job(job_card, job_id)
-        if job_post and not job_post.date_posted:
-            job_post.date_posted = _linkedin_date_posted(job_card)
-        return job_post
-
-    def _fetch_details(self, job_id: str) -> dict[str, object]:
-        primary_response: Response | None = None
-
-        def capture_response(response: Response, **_kwargs: object) -> None:
-            nonlocal primary_response
-            primary_response = response
-
-        # Reuse JobSpy's fields and inspect the same response for localized criteria.
-        response_hooks = self.session.hooks["response"]
-        response_hooks.append(capture_response)
-        try:
-            details = super()._fetch_details(job_id)
-        finally:
-            response_hooks.remove(capture_response)
-        if details and primary_response is not None and not (details.get("description") and details.get("job_type")):
-            self._fill_missing_details(details, primary_response.text)
-        if details.get("description") and details.get("job_type"):
-            return details
-        try:
-            response = self.session.get(f"{self.base_url}/jobs-guest/jobs/api/jobPosting/{job_id}")
-        except RequestException:
-            return details
-        if response.status_code == 200:
-            self._fill_missing_details(details, response.text)
-        return details
-
-    def _fill_missing_details(self, details: dict[str, object], html: str) -> None:
-        soup = BeautifulSoup(html, "lxml")
-        job = json_ld_jobposting(soup) or {}
-        if not details.get("description"):
-            description_node = soup.select_one(".show-more-less-html__markup")
-            description = str(description_node) if description_node else _string_or_none(job.get("description"))
-            if description:
-                details.update(description_fields(description, self.scraper_input.description_format))
-        if not details.get("job_type"):
-            value = criteria(soup, "Employment type") or criteria(soup, "Type d") or job.get("employmentType")
-            localized = {
-                "temps plein": JobType.FULL_TIME,
-                "temps partiel": JobType.PART_TIME,
-                "intérim": JobType.TEMPORARY,
-                "contrat": JobType.CONTRACT,
-                "stage": JobType.INTERNSHIP,
-            }
-            label = (_string_or_none(value) or "").casefold()
-            if has_excluded_contract_signal(
-                None, label, None, ("stage", "alternance", "apprentissage", "intern", "internship", "apprenticeship")
-            ):
-                job_type = JobType.INTERNSHIP
-            else:
-                job_type = localized.get(label) or get_enum_from_job_type(label.replace("-", "").replace(" ", ""))
-            if job_type:
-                details["job_type"] = [job_type]
-
-
-def _linkedin_date_posted(job_card: Tag) -> date | None:
-    metadata_card = job_card.find("div", class_="base-search-card__metadata")
-    if not metadata_card:
-        return None
-    datetime_tag = metadata_card.find(
-        "time",
-        class_=lambda value: bool(value and "job-search-card__listdate" in value),
-    )
-    if not datetime_tag:
-        return None
-    raw_datetime = datetime_tag.get("datetime")
-    if isinstance(raw_datetime, str) and raw_datetime:
-        try:
-            return date.fromisoformat(raw_datetime[:10])
-        except ValueError:
-            pass
-    return _linkedin_relative_date(clean_text(datetime_tag.get_text(" ")))
-
-
-def _linkedin_relative_date(value: str | None, now: datetime | None = None) -> date | None:
-    text = (value or "").strip().casefold()
-    if not text:
-        return None
-    now = now or datetime.now(UTC)
-    if "yesterday" in text or "hier" in text:
-        return (now - timedelta(days=1)).date()
-    if "today" in text or "aujourd'hui" in text or "aujourdhui" in text:
-        return now.date()
-    match = LINKEDIN_RELATIVE_DATE_RE.search(text)
-    if not match:
-        return None
-    count = int(match.group("count"))
-    unit = match.group("unit")
-    if unit.startswith("min"):
-        posted = now - timedelta(minutes=count)
-    elif unit.startswith(("h", "hour", "heure")):
-        posted = now - timedelta(hours=count)
-    elif unit.startswith(("d", "day", "jour")):
-        posted = now - timedelta(days=count)
-    elif unit.startswith(("w", "week", "semaine")):
-        posted = now - timedelta(weeks=count)
-    elif unit.startswith(("month", "mois")):
-        posted = now - timedelta(days=30 * count)
-    else:
-        return None
-    return posted.date()
-
-
 def _site_location(site: str, location: str, config: SearchConfig) -> str:
     if site == "glassdoor":
         fallback_term = config.jobspy.glassdoor_regional_fallback_term
@@ -657,35 +492,3 @@ def _google_search_term_for_sites(
     if "google" not in sites:
         return None
     return _google_search_term("google", query, location, config)
-
-
-def _string_or_none(value: object) -> str | None:
-    if value is None:
-        return None
-    text = str(value).strip()
-    if not text or text.lower() in {"nan", "none", "nat"}:
-        return None
-    return text
-
-
-def _float_or_none(value: object) -> float | None:
-    if value is None:
-        return None
-    try:
-        if str(value).lower() == "nan":
-            return None
-        return float(cast("str | bytes | bytearray | SupportsFloat | SupportsIndex", value))
-    except (TypeError, ValueError):
-        return None
-
-
-def _bool_or_none(value: object) -> bool | None:
-    if value is None:
-        return None
-    if isinstance(value, bool):
-        return value
-    if str(value).lower() in {"true", "1", "yes"}:
-        return True
-    if str(value).lower() in {"false", "0", "no"}:
-        return False
-    return None

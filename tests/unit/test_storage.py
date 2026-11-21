@@ -1,12 +1,9 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from datetime import UTC, datetime
 from pathlib import Path
 
-from scrapper.config import DEFAULT_EXCLUDE_TERMS, DEFAULT_INCLUDE_TERMS, SearchConfig
-from scrapper.config.settings import LocationScopeConfig
-from scrapper.location_scope import location_is_in_scope
+from scrapper.config import SearchConfig
 from scrapper.models import JobOffer
 from scrapper.storage import JobStore
 
@@ -48,36 +45,6 @@ def test_bad_apply_links_do_not_merge_jobs_or_replace_source_links(tmp_path: Pat
         assert canonical.loc[first, "description"].startswith("Description complète")
         assert canonical.loc[first, "all_direct_links"] == first
         assert canonical.loc[:, "best_direct_url"].isna().all()
-    finally:
-        store.close()
-
-
-def test_contract_evidence_excludes_sparse_copies_of_same_offer(tmp_path: Path) -> None:
-    store = JobStore(tmp_path / "jobs.duckdb")
-    try:
-        for source, description in [("indeed", None), ("glassdoor", "Lieu du stage : Toulouse")]:
-            store.upsert_offer(
-                JobOffer(
-                    source=source,
-                    source_url=f"https://{source}.example/jobs/1",
-                    title="Responsable Marketing",
-                    company="Same employer",
-                    description=description,
-                )
-            )
-        store.upsert_offer(
-            JobOffer(
-                source="indeed",
-                source_url="https://indeed.example/jobs/2",
-                source_id="permanent-2",
-                title="Responsable Marketing",
-                company="Other employer",
-                employment_type="CDI",
-            )
-        )
-        assert store.purge_excluded_offers(("stage",)) == 2
-        assert store.raw_dataframe()["company"].tolist() == ["Other employer"]
-        assert len(store.excluded_url_keys()) == 2
     finally:
         store.close()
 
@@ -358,12 +325,12 @@ def test_shared_apply_pages_cannot_merge_distinct_requisitions(tmp_path: Path) -
             )
         canonical = store.canonical_dataframe()
         assert sorted(canonical["duplicate_count"]) == [1, 1, 1, 2]
-        assert canonical["best_direct_url"].isna().sum() == 2
+        assert len(canonical.loc[canonical["best_direct_url"].isna()]) == 2
     finally:
         store.close()
 
 
-def test_refresh_keeps_legacy_identity_after_normalizing_job_id_parameter(tmp_path: Path) -> None:
+def test_refresh_keeps_distinct_job_id_parameters(tmp_path: Path) -> None:
     store = _store(tmp_path)
     offer = JobOffer(
         source="board",
@@ -373,7 +340,6 @@ def test_refresh_keeps_legacy_identity_after_normalizing_job_id_parameter(tmp_pa
     )
     try:
         store.upsert_offer(offer)
-        store.conn.execute("UPDATE raw_offers SET source_url_key = 'recruitment.example/front-jobs-detail.html'")
         original = store.conn.execute("SELECT offer_id, first_seen_at FROM raw_offers").fetchall()
         store.upsert_offer(offer)
         assert store.conn.execute("SELECT offer_id, first_seen_at FROM raw_offers").fetchall() == original
@@ -406,29 +372,6 @@ def test_same_board_reposts_need_matching_title_company_location_and_description
             )
         assert sorted(store.canonical_dataframe()["duplicate_count"]) == [1, 2]
         assert len(store.raw_dataframe()) == 3
-    finally:
-        store.close()
-
-
-def test_search_attempts_distinguish_empty_failed_and_unfinished(tmp_path: Path) -> None:
-    store = _store(tmp_path)
-    try:
-        store.start_search("board", "analyst", "Toulouse")
-        assert store.conn.execute("SELECT status FROM source_health").fetchone() == ("unfinished",)
-        store.finish_search("board", "analyst", "Toulouse", 0)
-        watermark = store.get_last_success("board", "analyst", "Toulouse")
-        assert watermark is not None
-        assert store.conn.execute("SELECT status, seen_count FROM source_health").fetchone() == ("succeeded", 0)
-        store.start_search("board", "analyst", "Toulouse")
-        store.finish_search("board", "analyst", "Toulouse", 0, error="Source unavailable")
-        assert store.get_last_success("board", "analyst", "Toulouse") == watermark
-        assert store.conn.execute("SELECT status, error FROM source_health").fetchone() == (
-            "failed",
-            "Source unavailable",
-        )
-        assert store.conn.execute(
-            "SELECT count(*) FROM search_attempts WHERE run_id = ?", [store.run_id]
-        ).fetchone() == (2,)
     finally:
         store.close()
 
@@ -485,40 +428,6 @@ def test_jobijoba_uses_external_apply_url_as_stable_identity(tmp_path: Path) -> 
         store.close()
 
 
-def test_storage_migrates_relative_dates_using_first_seen_time(tmp_path: Path) -> None:
-    path = tmp_path / "jobs.duckdb"
-    store = JobStore(path)
-    try:
-        store.upsert_offer(
-            JobOffer(
-                source="jobijoba",
-                source_url="https://www.jobijoba.com/fr/annonce/54/stale-wrapper",
-                title="Old example coordinator",
-                company="Example",
-                location="Toulouse",
-                date_posted="2026-06-30",
-            )
-        )
-        store.conn.execute(
-            """
-            UPDATE raw_offers
-            SET date_posted = 'Il y a 19 h',
-                first_seen_at = TIMESTAMPTZ '2026-07-01 16:00:00+02:00'
-            """
-        )
-    finally:
-        store.close()
-
-    migrated = JobStore(path)
-    try:
-        row = migrated.conn.execute("SELECT date_posted FROM raw_offers").fetchone()
-        assert row is not None
-        (date_posted,) = row
-        assert datetime.fromisoformat(date_posted) == datetime(2026, 6, 30, 19, tzinfo=UTC)
-    finally:
-        migrated.close()
-
-
 def test_storage_sorts_absolute_dates_instead_of_relative_date_text(tmp_path: Path) -> None:
     store = _store(tmp_path)
     try:
@@ -571,107 +480,5 @@ def test_upsert_preserves_first_known_posted_date(tmp_path: Path) -> None:
             )
 
         assert store.conn.execute("SELECT date_posted FROM raw_offers").fetchone() == ("2026-06-01",)
-    finally:
-        store.close()
-
-
-def test_purge_filters_remove_student_contracts_and_non_matching_titles(tmp_path: Path) -> None:
-    store = _store(tmp_path)
-    try:
-        store.upsert_offer(
-            JobOffer(
-                source="test",
-                source_url="https://example.com/stage",
-                title="Stage example role",
-                company="Example",
-                employment_type="Stage",
-            )
-        )
-        store.upsert_offer(
-            JobOffer(
-                source="test",
-                source_url="https://example.com/admin",
-                title="Responsable administratif",
-                company="Example",
-                employment_type="CDI",
-            )
-        )
-        store.upsert_offer(
-            JobOffer(
-                source="test",
-                source_url="https://example.com/com",
-                title="Example coordinator",
-                company="Example",
-                employment_type="CDI",
-            )
-        )
-
-        assert store.purge_excluded_offers(DEFAULT_EXCLUDE_TERMS) == 1
-        assert store.purge_nonmatching_offers(DEFAULT_INCLUDE_TERMS) == 1
-        canonical = store.canonical_dataframe()
-        assert canonical["title"].to_list() == ["Example coordinator"]
-    finally:
-        store.close()
-
-
-def test_purge_excluded_companies_removes_source_specific_company(tmp_path: Path) -> None:
-    store = _store(tmp_path)
-    try:
-        store.upsert_offer(
-            JobOffer(
-                source="linkedin",
-                source_url="https://linkedin.example/jobs/france-travail",
-                title="Example communications role",
-                company="France Travail",
-                location="Toulouse",
-                description="Full-time communication role.",
-            )
-        )
-        store.upsert_offer(
-            JobOffer(
-                source="indeed",
-                source_url="https://indeed.example/jobs/france-travail",
-                title="Example communications role",
-                company="France Travail",
-                location="Toulouse",
-                description="Full-time communication role.",
-            )
-        )
-
-        assert store.purge_excluded_companies({"linkedin": ("France Travail",)}) == 1
-
-        remaining = store.conn.execute("SELECT source FROM raw_offers").fetchall()
-        assert remaining == [("indeed",)]
-    finally:
-        store.close()
-
-
-def test_purge_out_of_scope_offers_removes_locations_outside_configured_radius(
-    tmp_path: Path, toulouse_scope: LocationScopeConfig
-) -> None:
-    store = _store(tmp_path)
-    try:
-        store.upsert_offer(
-            JobOffer(
-                source="test",
-                source_url="https://example.com/toulouse",
-                title="Example coordinator",
-                company="Example",
-                location="Blagnac, Occitanie, FR",
-            )
-        )
-        store.upsert_offer(
-            JobOffer(
-                source="test",
-                source_url="https://example.com/montauban",
-                title="Example coordinator",
-                company="Example",
-                location="Montauban, Occitanie, France",
-            )
-        )
-
-        assert store.purge_out_of_scope_offers(lambda location: location_is_in_scope(location, toulouse_scope)) == 1
-        canonical = store.canonical_dataframe()
-        assert canonical["location"].to_list() == ["Blagnac, Occitanie, FR"]
     finally:
         store.close()

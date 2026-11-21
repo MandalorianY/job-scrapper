@@ -12,9 +12,10 @@ import pytest
 from scrapper.config import DirectAggregatorConfig, SearchConfig
 from scrapper.config.settings import LocationScopeConfig
 from scrapper.models import JobOffer
-from scrapper.scrapers import aggregators, cadremploi, france_travail
+from scrapper.scrapers import cadremploi, france_travail
+from scrapper.scrapers.aggregators import detail, discovery, scrape
 from scrapper.storage import JobStore
-from scrapper.text import url_key
+from scrapper.text import listing_url_key, url_key
 
 
 @pytest.mark.parametrize("explicit_workplace", [False, True])
@@ -38,7 +39,7 @@ def test_france_travail_reads_public_component_data(explicit_workplace: bool) ->
 
     async def run() -> JobOffer | None:
         async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
-            return await aggregators._extract_detail_offer(
+            return await detail._extract_detail_offer(
                 client,
                 "https://candidat.francetravail.fr/offres/recherche/detail/215HLNT",
                 "france_travail",
@@ -105,7 +106,7 @@ def test_isarta_uses_canonical_detail_and_preserves_original_link(toulouse_scope
 
     async def run() -> JobOffer | None:
         async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
-            return await aggregators._extract_detail_offer(
+            return await detail._extract_detail_offer(
                 client, "https://isarta.fr/?job=76715", "isarta", "communication", config
             )
 
@@ -119,7 +120,7 @@ def test_isarta_uses_canonical_detail_and_preserves_original_link(toulouse_scope
     assert offer.date_posted == "12/11/2026"
     assert offer.employment_type == "CDI"
     assert offer.direct_url == "https://isarta.fr/cgi-bin/emplois/externe_candidature.cgi?login=76715"
-    assert aggregators._offer_is_usable(offer, config)
+    assert detail._offer_is_usable(offer, config)
 
 
 def test_emploi_collectivites_uses_visible_duties_and_rejects_unavailable_offers() -> None:
@@ -140,7 +141,7 @@ def test_emploi_collectivites_uses_visible_duties_and_rejects_unavailable_offers
         transport = httpx.MockTransport(lambda _: httpx.Response(200, text=html, headers={"content-type": "text/html"}))
         config = SearchConfig()
         async with httpx.AsyncClient(transport=transport) as client:
-            return await aggregators._extract_detail_offer(client, url, "emploi_collectivites", "communication", config)
+            return await detail._extract_detail_offer(client, url, "emploi_collectivites", "communication", config)
 
     assert asyncio.run(run(opening)) is None
     offer = asyncio.run(run(opening + duties))
@@ -188,6 +189,11 @@ def test_cadremploi_query_ids_do_not_collide() -> None:
     assert url_key("https://www.cadremploi.fr/emploi/detail_offre?offreId=123") != url_key(
         "https://www.cadremploi.fr/emploi/detail_offre?offreId=456"
     )
+    url = "https://www.cadremploi.fr/emploi/detail_offre"
+    assert detail._offer_source_id("cadremploi", f"{url}?offreId=123", None) == "123"
+    assert detail._offer_source_id("cadremploi", f"{url}?annonceId=456", None) == "456"
+    assert detail._offer_source_id("cadremploi", url, None) is None
+    assert listing_url_key(url) is None
 
 
 @pytest.mark.parametrize("use_modified_date", [False, True])
@@ -212,8 +218,8 @@ def test_direct_relevance_order_keeps_recent_offer_after_old_offer(
             raw={"public_offer": {"dateDerniereModification": date}} if use_modified_date else None,
         )
 
-    monkeypatch.setattr(aggregators, "_detail_links", links)
-    monkeypatch.setattr(aggregators, "_extract_detail_offer", extract)
+    monkeypatch.setattr(scrape, "_detail_links", links)
+    monkeypatch.setattr(scrape, "_extract_detail_offer", extract)
     config = SearchConfig(
         queries=("example role",), location_scope={"enabled": False}, aggregators={"direct_locations": ["76R"]}
     )
@@ -221,7 +227,7 @@ def test_direct_relevance_order_keeps_recent_offer_after_old_offer(
 
     async def run() -> int:
         async with httpx.AsyncClient() as client:
-            return await aggregators._scrape_direct_spec(client, config.aggregators.direct_specs[0], config, store)
+            return await scrape._scrape_direct_spec(client, config.aggregators.direct_specs[0], config, store)
 
     try:
         assert asyncio.run(run()) == 1
@@ -240,12 +246,17 @@ def test_direct_budget_allows_later_titles_and_regions(monkeypatch: pytest.Monke
         client: httpx.AsyncClient, url: str, source: str, query: str, config: SearchConfig, **kwargs: object
     ) -> JobOffer:
         return JobOffer(
-            source=source, source_url=url, title="Example role", company="Example", location="Paris",
-            employment_type="CDI", search_query=query
+            source=source,
+            source_url=url,
+            title="Example role",
+            company="Example",
+            location="Paris",
+            employment_type="CDI",
+            search_query=query,
         )
 
-    monkeypatch.setattr(aggregators, "_detail_links", links)
-    monkeypatch.setattr(aggregators, "_extract_detail_offer", extract)
+    monkeypatch.setattr(scrape, "_detail_links", links)
+    monkeypatch.setattr(scrape, "_extract_detail_offer", extract)
     config = SearchConfig(
         queries=("example role", "sample role"), aggregators={"max_detail_pages": 1}, location_scope={"enabled": False}
     )
@@ -259,7 +270,7 @@ def test_direct_budget_allows_later_titles_and_regions(monkeypatch: pytest.Monke
 
     async def run() -> int:
         async with httpx.AsyncClient() as client:
-            return await aggregators._scrape_direct_spec(client, spec, config, store)
+            return await scrape._scrape_direct_spec(client, spec, config, store)
 
     try:
         assert asyncio.run(run()) == 4
@@ -291,7 +302,7 @@ def test_makesense_prioritizes_matching_local_cards_before_consuming_detail_budg
 
     async def run() -> list[str]:
         async with httpx.AsyncClient(transport=httpx.MockTransport(lambda _: httpx.Response(200, text=html))) as client:
-            return await aggregators._detail_links(
+            return await discovery._detail_links(
                 client, spec, "https://jobs.makesense.org/fr/s/jobs/all", config=config
             )
 
@@ -308,7 +319,7 @@ def test_optioncarriere_verification_page_is_a_failure_not_empty_search() -> Non
             )
         )
         async with httpx.AsyncClient(transport=transport) as client:
-            return await aggregators._direct_site_search_results(
+            return await discovery._direct_site_search_results(
                 client,
                 "optioncarriere",
                 "communication",
@@ -352,6 +363,6 @@ def test_isarta_honors_configured_regional_discovery_page(toulouse_scope: Locati
 
     async def run() -> list[str]:
         async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
-            return await aggregators._site_search_results(client, spec, "communication", config)
+            return await discovery._site_search_results(client, spec, "communication", config)
 
     assert asyncio.run(run()) == ["https://isarta.fr/?job=123"]
