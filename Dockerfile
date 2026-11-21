@@ -26,10 +26,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 
 FROM gcr.io/distroless/cc-debian13:nonroot@sha256:cb87acc574abe719b6e5c547384defa2f7b1f24af9605d3f618cf852495d8be2
 ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1 \
-    SCRAPPER_PATHS__DATABASE_PATH=/work/data/job_search.duckdb \
-    SCRAPPER_PATHS__LOG_FILE=/work/data/job-scrapper.jsonl \
-    SCRAPPER_PATHS__EXPORT_DIR=/work/exports
+    PYTHONUNBUFFERED=1
 COPY --from=build /opt/python /opt/python
 COPY --from=build /opt/venv /opt/venv
 COPY --from=build --chown=65532:65532 /work /work

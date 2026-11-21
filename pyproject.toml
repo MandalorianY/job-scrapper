@@ -22,6 +22,7 @@ dependencies = [
     "httpx>=0.28.1",
     "lxml>=6.1.3",
     "openpyxl>=3.1.5",
+    "pandas==3.1.1",
     "pydantic>=2.14.4",
     "pydantic-settings[yaml]>=2.16.3",
     "python-dotenv>=1.2.4",
@@ -29,18 +30,30 @@ dependencies = [
     "rich>=15.0.0",
     "structlog>=26.1.0",
     "typer>=0.29.2",
+    "tzdata>=2026.1",
     "xlsxwriter>=3.3.3",
 ]
 
 [project.scripts]
 job-scrapper = "scrapper.cli:app"
+job-scrapper-install-timer = "scrapper.scheduling:main"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
+[tool.hatch.build]
+exclude = ["**/.env", "**/*.local.yaml", "**/README.local.md"]
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/scrapper"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "/src/scrapper", "/deploy", "/tests", "/.github/workflows", "/.dockerignore",
+    "/.env.example", "/.gitignore", "/.python-version", "/AGENTS.md", "/Dockerfile",
+    "/main.py", "/uv.lock",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -93,16 +106,22 @@ target-version = "py313"
 [tool.ruff.lint]
 extend-select = ["ANN"]
 
-[tool.taskipy.tasks]
-pre_test = "task lint"
-test = "PROFILE=local uv run --locked --group test pytest --cov --cov-config=pyproject.toml --cov-report=term-missing --cov-report=html -vv"
-post_test = "echo \"Coverage report generated in htmlcov/index.html\""
-lint = "ruff check . && ruff check . --diff"
-format = "ruff check . --fix && ruff format ."
+[tool.poe.executor]
+type = "uv"
+locked = true
+
+[tool.poe.tasks]
+lint = "ruff check ."
+test = ["lint", "_pytest"]
+_pytest = {cmd = "pytest -vv", env = {PROFILE = "local"}, executor = {group = "test"}}
+format = [{cmd = "ruff check . --fix"}, {cmd = "ruff format ."}]
 
 [dependency-groups]
-dev = ["ruff>=0.17.6", "taskipy>=1.14.1"]
+dev = [{include-group = "lint"}, "poethepoet>=0.49.0"]
+lint = ["ruff>=0.17.6"]
+release = ["pyinstaller>=6.22.3"]
 test = [
+    {include-group = "lint"},
     "anyio>=4.16.0",
     "hypothesis>=6.170.17",
     "pytest>=9.2.0",

@@ -24,6 +24,7 @@ Do not commit generated data or exports unless the user explicitly asks for that
 - OpenPyXL and pandas for localized Excel/CSV exports
 
 The tracked `src/scrapper/config/config.yaml` is the public example template. Use `src/scrapper/config/config.local.yaml` (when present) for live repository settings such as query/location tuning and source-specific overrides. Use `--profile PATH` to select an alternate YAML with its own database, export, and log paths.
+Installed builds also look for `config.local.yaml` in the working directory. Use paths under `data/` and `exports/` in Docker YAML profiles. The Docker launcher mounts host files passed via `--profile` or `--replay-from` and host destinations passed via `--db`, `--export-dir`, or `--log-file`.
 
 ## Useful Commands
 
@@ -44,6 +45,11 @@ Run the full scraper and export with Docker:
 ```bash
 ./deploy/run-docker.sh
 ```
+
+Install or update the schedule using `./deploy/install-timer.sh` on Linux or
+`job-scrapper-install-timer` from the Homebrew installation on macOS. Both
+commands accept `--profile PATH` and use the YAML `schedule.days` and
+`schedule.time` settings.
 
 Re-export from the existing DuckDB without scraping:
 
@@ -252,7 +258,7 @@ For most scraper/storage/export changes, run:
 
 ```bash
 uv run python -m compileall src main.py
-uv run --locked --group test task test
+uv run --locked poe test
 uv run job-scrapper --export-only
 ```
 
