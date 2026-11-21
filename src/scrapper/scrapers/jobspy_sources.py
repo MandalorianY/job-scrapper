@@ -7,8 +7,9 @@ from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
+from functools import partial
 from typing import SupportsFloat, SupportsIndex, cast
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 import httpx
 import structlog
@@ -18,13 +19,14 @@ from jobspy.linkedin import LinkedIn as JobSpyLinkedIn
 from jobspy.linkedin.util import criteria
 from jobspy.model import JobPost, JobType, ScraperInput, Site
 from jobspy.util import description_fields, get_enum_from_job_type
+from requests import Response
 from requests.exceptions import RequestException
 
 from scrapper.config import SearchConfig
-from scrapper.location_scope import location_is_in_scope
 from scrapper.models import JobOffer
+from scrapper.scrapers.common import json_ld_jobposting, offer_matches_search
 from scrapper.storage import JobStore
-from scrapper.text import clean_text, has_excluded_contract_signal
+from scrapper.text import clean_text, has_excluded_contract_signal, is_application_destination
 
 JOBSPY_SITES = ("indeed", "linkedin", "glassdoor", "google", "hellowork")
 LINKEDIN_RELATIVE_DATE_RE = re.compile(
@@ -68,6 +70,20 @@ def scrape_jobspy_sources(
     store: JobStore,
     progress: ProgressReporter | None = None,
 ) -> dict[str, int]:
+    with httpx.Client(
+        headers={"user-agent": config.user_agent, "accept-language": config.http.accept_language},
+        follow_redirects=True,
+        timeout=15,
+    ) as client:
+        return _run_jobspy_searches(config, store, progress, partial(_is_expired_indeed_offer, client, {}))
+
+
+def _run_jobspy_searches(
+    config: SearchConfig,
+    store: JobStore,
+    progress: ProgressReporter | None,
+    is_expired_indeed: Callable[[JobOffer], bool],
+) -> dict[str, int]:
     counts: dict[str, int] = {}
     enabled_sites = [site for site in JOBSPY_SITES if config.is_source_enabled(site)]
     for site in enabled_sites:
@@ -79,7 +95,7 @@ def scrape_jobspy_sources(
         for site in plan.sites:
             store.start_search(site, plan.query, plan.location)
         try:
-            plan_counts = _run_jobspy_plan(plan, config, store, progress, search_index, total_searches)
+            plan_counts = _run_jobspy_plan(plan, config, store, progress, search_index, total_searches, is_expired_indeed)
             for site, count in plan_counts.items():
                 counts[site] += count
         except Exception as exc:
@@ -111,6 +127,7 @@ def scrape_jobspy_sources(
                             progress,
                             fallback_index,
                             len(fallback_plans),
+                            is_expired_indeed,
                         )
                         for site, count in plan_counts.items():
                             counts[site] += count
@@ -190,6 +207,7 @@ def _run_jobspy_plan(
     progress: ProgressReporter | None,
     search_index: int,
     total_searches: int,
+    is_expired_indeed: Callable[[JobOffer], bool],
 ) -> dict[str, int]:
     if "linkedin" in plan.sites:
         _patch_linkedin_scraper()
@@ -236,7 +254,7 @@ def _run_jobspy_plan(
             continue
         seen_by_site[site] += 1
         offer = _row_to_offer(row, site, plan.query, plan.location, config)
-        if not _offer_is_usable(offer, row, site, config):
+        if not _offer_is_usable(offer, row, config) or is_expired_indeed(offer):
             continue
         store.upsert_offer(offer)
         stored_by_site[site] += 1
@@ -358,11 +376,12 @@ def _row_site(row: Mapping[str, object], plan: JobSpySearchPlan) -> str:
 def _row_to_offer(
     row: Mapping[str, object], site: str, query: str, search_location: str, config: SearchConfig
 ) -> JobOffer:
+    direct_url = _string_or_none(row.get("job_url_direct"))
     return JobOffer(
         source=site,
         source_id=_string_or_none(row.get("id")),
         source_url=_string_or_none(row.get("job_url")) or "",
-        direct_url=_string_or_none(row.get("job_url_direct")),
+        direct_url=direct_url if is_application_destination(direct_url) else None,
         title=_string_or_none(row.get("title")),
         company=_string_or_none(row.get("company")),
         location=_string_or_none(row.get("location")),
@@ -383,23 +402,12 @@ def _row_to_offer(
     )
 
 
-def _offer_is_usable(offer: JobOffer, row: Mapping[str, object], site: str, config: SearchConfig) -> bool:
-    if has_excluded_contract_signal(
-        row.get("title"),
-        row.get("job_type") or row.get("listing_type"),
-        row.get("description"),
-        config.exclude_terms,
-    ):
-        return False
-    if not config.title_is_allowed(row.get("title")):
-        return False
-    if config.is_company_excluded(site, row.get("company")):
-        return False
-    if not location_is_in_scope(offer.location, config.location_scope):
-        return False
-    if _is_expired_indeed_offer(offer, config):
-        return False
-    return bool(offer.source_url)
+def _offer_is_usable(offer: JobOffer, row: Mapping[str, object], config: SearchConfig) -> bool:
+    extra_contract_labels = (row.get("listing_type"), row.get("job_level"))
+    return (
+        offer_matches_search(offer, config)
+        and not any(has_excluded_contract_signal(None, label, None, config.exclude_terms) for label in extra_contract_labels)
+    )
 
 
 def _jobspy_verbose(site: str) -> int | None:
@@ -427,11 +435,23 @@ def _results_wanted(site: str, config: SearchConfig) -> int:
     return config.results_wanted_per_query
 
 
-def _is_expired_indeed_offer(offer: JobOffer, config: SearchConfig) -> bool:
+def _is_expired_indeed_offer(
+    client: httpx.Client,
+    checked: dict[tuple[str, str], bool],
+    offer: JobOffer,
+) -> bool:
     if offer.source != "indeed":
         return False
-    for url in (offer.direct_url, offer.source_url):
-        if url and _is_indeed_url(url) and _indeed_url_is_expired(url, config):
+    for url in dict.fromkeys((offer.source_url, offer.direct_url)):
+        if not url or not _is_indeed_url(url):
+            continue
+        parsed = urlparse(url)
+        host = (parsed.hostname or "").removeprefix("www.")
+        job_key = parse_qs(parsed.query).get("jk", [url])[0]
+        key = (host, job_key)
+        if key not in checked and (expired := _indeed_url_is_expired(client, url)) is not None:
+            checked[key] = expired
+        if checked.get(key):
             return True
     return False
 
@@ -439,21 +459,22 @@ def _is_expired_indeed_offer(offer: JobOffer, config: SearchConfig) -> bool:
 def _is_indeed_url(url: str | None) -> bool:
     if not url:
         return False
-    return "indeed." in urlparse(url).netloc.lower()
+    hostname = urlparse(url).hostname or ""
+    return hostname.startswith("indeed.") or ".indeed." in hostname
 
 
-def _indeed_url_is_expired(url: str, config: SearchConfig) -> bool:
+def _indeed_url_is_expired(client: httpx.Client, url: str) -> bool | None:
     try:
-        response = httpx.get(
-            url,
-            headers={"user-agent": config.user_agent, "accept-language": config.http.accept_language},
-            follow_redirects=True,
-            timeout=15,
-        )
+        response = client.get(url)
     except httpx.HTTPError:
-        return False
-    if response.status_code >= 400 or "text/html" not in response.headers.get("content-type", ""):
-        return False
+        return None
+    if (
+        response.status_code != 200
+        or "text/html" not in response.headers.get("content-type", "")
+        or not _is_indeed_url(str(response.url))
+        or response.headers.get("cf-mitigated", "").strip().lower() == "challenge"
+    ):
+        return None
     return _indeed_html_is_expired(response.text)
 
 
@@ -501,21 +522,41 @@ class TolerantLinkedIn(JobSpyLinkedIn):
         return job_post
 
     def _fetch_details(self, job_id: str) -> dict[str, object]:
-        details = super()._fetch_details(job_id)
+        primary_response: Response | None = None
+
+        def capture_response(response: Response, **_kwargs: object) -> None:
+            nonlocal primary_response
+            primary_response = response
+
+        # Reuse JobSpy's fields and inspect the same response for localized criteria.
+        response_hooks = self.session.hooks["response"]
+        response_hooks.append(capture_response)
+        try:
+            details = super()._fetch_details(job_id)
+        finally:
+            response_hooks.remove(capture_response)
+        if details and primary_response is not None and not (details.get("description") and details.get("job_type")):
+            self._fill_missing_details(details, primary_response.text)
         if details.get("description") and details.get("job_type"):
             return details
         try:
             response = self.session.get(f"{self.base_url}/jobs-guest/jobs/api/jobPosting/{job_id}")
-            if response.status_code != 200:
-                return details
         except RequestException:
             return details
-        soup = BeautifulSoup(response.text, "lxml")
-        description = soup.select_one(".show-more-less-html__markup")
-        if not details.get("description") and description:
-            details.update(description_fields(str(description), self.scraper_input.description_format))
+        if response.status_code == 200:
+            self._fill_missing_details(details, response.text)
+        return details
+
+    def _fill_missing_details(self, details: dict[str, object], html: str) -> None:
+        soup = BeautifulSoup(html, "lxml")
+        job = json_ld_jobposting(soup) or {}
+        if not details.get("description"):
+            description_node = soup.select_one(".show-more-less-html__markup")
+            description = str(description_node) if description_node else _string_or_none(job.get("description"))
+            if description:
+                details.update(description_fields(description, self.scraper_input.description_format))
         if not details.get("job_type"):
-            value = criteria(soup, "Employment type") or criteria(soup, "Type d")
+            value = criteria(soup, "Employment type") or criteria(soup, "Type d") or job.get("employmentType")
             localized = {
                 "temps plein": JobType.FULL_TIME,
                 "temps partiel": JobType.PART_TIME,
@@ -523,11 +564,15 @@ class TolerantLinkedIn(JobSpyLinkedIn):
                 "contrat": JobType.CONTRACT,
                 "stage": JobType.INTERNSHIP,
             }
-            label = (value or "").casefold()
-            job_type = localized.get(label) or get_enum_from_job_type(label.replace("-", "").replace(" ", ""))
+            label = (_string_or_none(value) or "").casefold()
+            if has_excluded_contract_signal(
+                None, label, None, ("stage", "alternance", "apprentissage", "intern", "internship", "apprenticeship")
+            ):
+                job_type = JobType.INTERNSHIP
+            else:
+                job_type = localized.get(label) or get_enum_from_job_type(label.replace("-", "").replace(" ", ""))
             if job_type:
                 details["job_type"] = [job_type]
-        return details
 
 
 def _linkedin_date_posted(job_card: Tag) -> date | None:

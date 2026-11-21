@@ -37,3 +37,26 @@ def test_location_scope_rejects_out_of_radius_or_broad_locations(
     location: str | None, toulouse_scope: LocationScopeConfig
 ) -> None:
     assert not location_is_in_scope(location, toulouse_scope)
+
+
+def test_location_scope_checks_complete_towns_and_explicit_regions(toulouse_scope: LocationScopeConfig) -> None:
+    scope = toulouse_scope.model_copy(
+        update={"region_names": ("Occitanie",), "city_coordinates": {"Rochefort": (43.6007, 1.4328)}}
+    )
+    assert location_is_in_scope("Toulouse, Occitanie, France", scope)
+    assert location_is_in_scope("Greater Toulouse Area", scope)
+    assert location_is_in_scope("31000 Toulouse", scope)
+    assert location_is_in_scope("Paris, Île-de-France, France / Toulouse, Occitanie, France", scope)
+    assert not location_is_in_scope("Toulouse, Île-de-France, France", scope)
+    assert not location_is_in_scope("Rochefort-Montagne", scope)
+
+
+def test_location_scope_accepts_known_former_municipalities_and_abbreviations(
+    toulouse_scope: LocationScopeConfig,
+) -> None:
+    scope = toulouse_scope.model_copy(
+        update={"city_coordinates": {"Oullins-Pierre-Bénite": (43.60, 1.43), "Saint-Fons": (43.59, 1.43)}}
+    )
+    assert location_is_in_scope("Oullins", scope)
+    assert location_is_in_scope("69 - St Fons", scope)
+    assert not location_is_in_scope("Saint-Fons-sur-Mer", scope)

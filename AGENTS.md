@@ -136,6 +136,8 @@ Use the existing helpers instead of ad hoc substring checks:
 Use `config.title_is_allowed(title)` in scrapers to apply both include terms and
 `excluded_title_patterns`. These patterns match normalized titles (lowercase,
 without accents or punctuation); real-search exclusions belong in `config.local.yaml`.
+Use `offer_matches_search` on normalized offers before upsert for title, contract,
+company, and location validation. Offers need a description or a contract type.
 Contract cleanup applies to the whole canonical duplicate group, so a sparse copy
 cannot hide internship evidence from another source. Purged URL keys are retained
 in `excluded_offer_urls` to prevent historical tracker copies from restoring them.
@@ -164,6 +166,12 @@ All sources should call:
 - `store.finish_search(..., error=str(exc))` on recoverable failure.
 
 Scrapers should continue when one board fails. A single source outage should not block the Excel export.
+Custom scrapers stop searching a source for the current run when they detect a
+verification challenge. Record the failed search and include the source in the
+CLI summary. The next run can try the source again. Timeouts, connection
+failures, and retryable HTTP errors get one retry. Honor the host's Retry-After
+window on HTTP 429 and 503. If the delay exceeds the wait budget, defer requests
+to that host until the window expires and keep processing other sources.
 
 Search attempts keep their run ID, outcome, and seen count in DuckDB. `source_health` shows the latest attempt and successful watermark. The 90-day observation archive records offers accepted at ingestion and supports offline `--replay-from`.
 

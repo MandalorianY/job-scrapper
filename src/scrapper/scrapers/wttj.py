@@ -12,15 +12,19 @@ import structlog
 from bs4 import BeautifulSoup
 
 from scrapper.config import SearchConfig
-from scrapper.location_scope import location_is_in_scope
 from scrapper.models import JobOffer
-from scrapper.scrapers.async_http import HostThrottle
-from scrapper.scrapers.common import apply_url, custom_search_cutoff, json_ld_jobposting, posted_date_is_before_cutoff
+from scrapper.scrapers.async_http import HostThrottle, SourceBlockedError, get_checked_page
+from scrapper.scrapers.common import (
+    apply_url,
+    custom_search_cutoff,
+    json_ld_jobposting,
+    offer_matches_search,
+    posted_date_is_before_cutoff,
+)
 from scrapper.storage import JobStore
-from scrapper.text import clean_text, has_excluded_contract_signal, is_application_destination
+from scrapper.text import clean_text, is_application_destination
 
 WTTJ_SOURCE = "welcome_to_the_jungle"
-PUBLIC_ALGOLIA_KEY_RE = re.compile(r'"ALGOLIA_API_KEY_CLIENT"\s*:\s*"([^"]+)"')
 WINDOW_ENV_MARKER_RE = re.compile(r"window\.env\s*=\s*")
 log = structlog.get_logger(__name__)
 
@@ -34,7 +38,7 @@ class WttjAlgoliaConfig:
 
 
 async def scrape_welcome_to_the_jungle(config: SearchConfig, store: JobStore) -> int:
-    if not config.is_source_enabled(WTTJ_SOURCE):
+    if not config.is_source_enabled(WTTJ_SOURCE) or not config.queries:
         return 0
 
     log.info(
@@ -46,7 +50,15 @@ async def scrape_welcome_to_the_jungle(config: SearchConfig, store: JobStore) ->
     )
     configured_key = config.welcome_to_the_jungle.algolia_api_key
     configured_value = configured_key.get_secret_value().strip() if configured_key else ""
-    discovered = await _public_algolia_config(config)
+    throttle = HostThrottle(config.http_per_host_concurrency, config.http_request_delay_secs)
+    try:
+        discovered = await _public_algolia_config(config, throttle)
+    except SourceBlockedError as exc:
+        query = config.queries[0]
+        center_name, _ = _search_centers(config)[0]
+        store.start_search(WTTJ_SOURCE, query, center_name)
+        store.finish_search(WTTJ_SOURCE, query, center_name, 0, error=str(exc))
+        return 0
     algolia_api_key = configured_value or (discovered.api_key if discovered else "")
     algolia_app_id = _configured_or_discovered(
         config.welcome_to_the_jungle.algolia_app_id,
@@ -89,7 +101,6 @@ async def scrape_welcome_to_the_jungle(config: SearchConfig, store: JobStore) ->
     limits = httpx.Limits(
         max_connections=config.http_max_connections, max_keepalive_connections=config.http_max_connections
     )
-    throttle = HostThrottle(config.http_per_host_concurrency, config.http_request_delay_secs)
     async with (
         httpx.AsyncClient(headers=headers, timeout=30, follow_redirects=True, limits=limits) as client,
         httpx.AsyncClient(timeout=15, follow_redirects=True) as detail_client,
@@ -149,30 +160,14 @@ async def scrape_welcome_to_the_jungle(config: SearchConfig, store: JobStore) ->
                             offer.search_location = center_name
                             if not offer.source_url or offer.source_url in processed_urls:
                                 continue
-                            if has_excluded_contract_signal(
-                                offer.title,
-                                offer.employment_type,
-                                offer.description,
-                                config.exclude_terms,
-                            ):
-                                continue
-                            if not config.title_is_allowed(offer.title):
-                                continue
-                            if config.is_company_excluded(WTTJ_SOURCE, offer.company):
-                                continue
-                            if not location_is_in_scope(offer.location, config.location_scope):
+                            if not offer_matches_search(offer, config, require_details=False):
                                 continue
                             if not config.refresh_known_details and store.source_url_seen(
                                 WTTJ_SOURCE, offer.source_url
                             ):
                                 continue
                             await _enrich_public_detail(detail_client, throttle, offer)
-                            if not has_excluded_contract_signal(
-                                offer.title,
-                                offer.employment_type,
-                                offer.description,
-                                config.exclude_terms,
-                            ):
+                            if offer_matches_search(offer, config):
                                 store.upsert_offer(offer)
                                 written += 1
                             processed_urls.add(offer.source_url)
@@ -186,19 +181,23 @@ async def scrape_welcome_to_the_jungle(config: SearchConfig, store: JobStore) ->
                         stored=written,
                     )
                 except Exception as exc:
+                    error = str(exc) or type(exc).__name__
                     store.finish_search(
                         WTTJ_SOURCE,
                         query,
                         center_name,
                         seen,
-                        error=str(exc),
+                        error=error,
                     )
+                    if isinstance(exc, SourceBlockedError):
+                        return written
                     log.exception(
                         "wttj_search_failed",
                         source=WTTJ_SOURCE,
                         query=query,
                         location=center_name,
                         seen=seen,
+                        error=error,
                     )
     log.info("wttj_scrape_completed", source=WTTJ_SOURCE, stored=written)
     return written
@@ -210,7 +209,9 @@ def _search_centers(config: SearchConfig) -> tuple[tuple[str, str | None], ...]:
     return ((config.location_label, None),)
 
 
-async def _public_algolia_config(config: SearchConfig) -> WttjAlgoliaConfig | None:
+async def _public_algolia_config(
+    config: SearchConfig, throttle: HostThrottle | None = None
+) -> WttjAlgoliaConfig | None:
     url = f"{config.welcome_to_the_jungle.site_url}/fr/sitemap.xml"
     # Keep httpx's default user agent because a bare Mozilla/5.0 header receives a 403.
     headers = {
@@ -218,20 +219,16 @@ async def _public_algolia_config(config: SearchConfig) -> WttjAlgoliaConfig | No
     }
     async with httpx.AsyncClient(headers=headers, timeout=15, follow_redirects=True) as client:
         try:
-            response = await client.get(url)
+            response = await get_checked_page(client, url, throttle)
             response.raise_for_status()
         except httpx.HTTPError:
             return None
     env = _extract_window_env(response.text)
     if not env:
-        match = PUBLIC_ALGOLIA_KEY_RE.search(response.text)
-        api_key = match.group(1) if match else None
-        app_id = None
-        jobs_prefix = None
-    else:
-        api_key = clean_text(env.get("ALGOLIA_API_KEY_CLIENT"))
-        app_id = clean_text(env.get("ALGOLIA_APPLICATION_ID"))
-        jobs_prefix = clean_text(env.get("ALGOLIA_JOBS_INDEX_PREFIX"))
+        return None
+    api_key = clean_text(env.get("ALGOLIA_API_KEY_CLIENT"))
+    app_id = clean_text(env.get("ALGOLIA_APPLICATION_ID"))
+    jobs_prefix = clean_text(env.get("ALGOLIA_JOBS_INDEX_PREFIX"))
     if not (api_key and app_id and jobs_prefix):
         return None
     return WttjAlgoliaConfig(
@@ -353,10 +350,10 @@ def _hit_to_offer(hit: dict[str, object], query: str, config: SearchConfig) -> J
 
 
 async def _enrich_public_detail(client: httpx.AsyncClient, throttle: HostThrottle, offer: JobOffer) -> None:
-    try:
-        response = await throttle.get(client, offer.source_url)
-    except httpx.HTTPError:
+    response = await throttle.get(client, offer.source_url)
+    if response.status_code in {403, 404, 410}:
         return
+    response.raise_for_status()
     if response.status_code != 200 or "text/html" not in response.headers.get("content-type", ""):
         return
     soup = BeautifulSoup(response.text, "lxml")

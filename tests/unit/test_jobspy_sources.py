@@ -4,9 +4,12 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 from unittest.mock import Mock
 
+import httpx
 import pandas as pd
 import pytest
 from bs4 import BeautifulSoup
+from requests import PreparedRequest, Response, Session
+from requests.adapters import HTTPAdapter
 
 from scrapper.config import SearchConfig
 from scrapper.config.settings import LocationScopeConfig
@@ -320,17 +323,23 @@ def test_linkedin_fetches_detail_without_changing_other_sites(monkeypatch: pytes
     assert not scraper_input.fetch_description
 
 
-def test_linkedin_uses_guest_detail_when_listing_page_omits_fields(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize(
+    ("label", "expected_type"),
+    [("Temps plein", jobspy_sources.JobType.FULL_TIME), ("Stage / Alternance", jobspy_sources.JobType.INTERNSHIP)],
+)
+def test_linkedin_uses_guest_detail_when_listing_page_omits_fields(
+    monkeypatch: pytest.MonkeyPatch, label: str, expected_type: jobspy_sources.JobType
+) -> None:
     monkeypatch.setattr(jobspy_sources.JobSpyLinkedIn, "_fetch_details", lambda self, job_id: {})
     scraper = jobspy_sources.TolerantLinkedIn()
     scraper.scraper_input = jobspy_sources.ScraperInput.model_validate({"site_name": [jobspy_sources.Site.LINKEDIN]})
-    scraper.session = Mock()
+    scraper.session = Mock(hooks={"response": []})
     scraper.session.get.return_value = Mock(
         status_code=200,
-        text="""
+        text=f"""
         <div class="show-more-less-html__markup"><p>Définir les campagnes.</p></div>
         <h3 class="description__job-criteria-subheader">Type d’emploi</h3>
-        <span class="description__job-criteria-text">Temps plein</span>
+        <span class="description__job-criteria-text">{label}</span>
     """,
     )
 
@@ -339,7 +348,27 @@ def test_linkedin_uses_guest_detail_when_listing_page_omits_fields(monkeypatch: 
     description = detail["description"]
     assert isinstance(description, str)
     assert "Définir les campagnes." in description
-    assert detail["job_type"] == [jobspy_sources.JobType.FULL_TIME]
+    assert detail["job_type"] == [expected_type]
+    scraper.session.get.assert_called_once_with("https://www.linkedin.com/jobs-guest/jobs/api/jobPosting/123")
+
+
+def test_linkedin_guest_detail_uses_structured_data_when_visible_metadata_is_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(jobspy_sources.JobSpyLinkedIn, "_fetch_details", lambda self, job_id: {})
+    scraper = jobspy_sources.TolerantLinkedIn()
+    scraper.scraper_input = jobspy_sources.ScraperInput.model_validate({"site_name": [jobspy_sources.Site.LINKEDIN]})
+    scraper.session = Mock(hooks={"response": []})
+    scraper.session.get.return_value = Mock(
+        status_code=200,
+        text='<script type="application/ld+json">{"@type":"JobPosting","description":"Manage campaigns.",'
+        '"employmentType":"INTERN"}</script>',
+    )
+
+    details = scraper._fetch_details("123")
+
+    assert details["description"] == "Manage campaigns."
+    assert details["job_type"] == [jobspy_sources.JobType.INTERNSHIP]
     scraper.session.get.assert_called_once_with("https://www.linkedin.com/jobs-guest/jobs/api/jobPosting/123")
 
 
@@ -368,6 +397,89 @@ def test_linkedin_date_parser_handles_new_class_and_relative_age() -> None:
 def test_indeed_expired_message_detector() -> None:
     assert jobspy_sources._indeed_html_is_expired("<main>Cette offre a expiré sur Indeed</main>")
     assert not jobspy_sources._indeed_html_is_expired("<main>Cette offre est disponible</main>")
+
+
+@pytest.mark.parametrize("fail_first", [False, True])
+def test_indeed_reuses_successful_expiry_checks_across_searches(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, fail_first: bool
+) -> None:
+    def fake_scrape_jobs(*, search_term: str, **_kwargs: object) -> pd.DataFrame:
+        return pd.DataFrame(
+            [
+                {
+                    "site": "indeed",
+                    "id": "job1",
+                    "job_url": "https://fr.indeed.com/viewjob?jk=job1",
+                    "job_url_direct": f"https://fr.indeed.com/viewjob?jk=job1&from={search_term}",
+                    "title": "Communication",
+                    "company": "Example",
+                    "description": "Full-time role.",
+                },
+            ]
+        )
+
+    requests: list[httpx.URL] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        requests.append(request.url)
+        if fail_first and len(requests) == 1:
+            raise httpx.ReadTimeout("timeout", request=request)
+        return httpx.Response(200, headers={"content-type": "text/html"}, text="<main>Cette offre est disponible</main>")
+
+    client_class = httpx.Client
+    monkeypatch.setattr(jobspy_sources, "scrape_jobs", fake_scrape_jobs)
+    monkeypatch.setattr(httpx, "Client", lambda **kwargs: client_class(transport=httpx.MockTransport(respond), **kwargs))
+    config = SearchConfig(
+        queries=("communication", "marketing"),
+        locations=("Toulouse, France",),
+        include_terms=("communication",),
+        location_scope={"enabled": False},
+        enabled_sources=_jobspy_only("indeed"),
+    )
+    store = JobStore(tmp_path / "jobs.duckdb")
+    try:
+        assert jobspy_sources.scrape_jobspy_sources(config, store) == {"indeed": 2}
+    finally:
+        store.close()
+    assert len(requests) == 1 + fail_first
+
+
+@pytest.mark.parametrize("needs_fallback", [False, True])
+def test_linkedin_uses_guest_detail_only_when_primary_page_lacks_job_type(
+    monkeypatch: pytest.MonkeyPatch, needs_fallback: bool
+) -> None:
+    urls: list[str] = []
+
+    def send(_adapter: HTTPAdapter, request: PreparedRequest, **_kwargs: object) -> Response:
+        assert request.url is not None
+        urls.append(request.url)
+        html = '<div class="show-more-less-html__markup">Work description</div>'
+        if not needs_fallback or len(urls) > 1:
+            html += (
+                '<h3 class="description__job-criteria-subheader">Type d’emploi</h3>'
+                '<span class="description__job-criteria-text">Temps plein</span>'
+            )
+        response = Response()
+        response.status_code = 200
+        response.url = request.url
+        response.encoding = "utf-8"
+        response._content = html.encode("utf-8")
+        return response
+
+    monkeypatch.setattr(HTTPAdapter, "send", send)
+    scraper = jobspy_sources.TolerantLinkedIn()
+    scraper.scraper_input = jobspy_sources.ScraperInput(site_name=[jobspy_sources.Site.LINKEDIN], country_indeed="france")
+    with Session() as session:
+        scraper.session = session
+        details = scraper._fetch_details("123")
+        assert session.hooks["response"] == []
+
+    assert details["job_type"] == [jobspy_sources.JobType.FULL_TIME]
+    assert "Work description" in str(details["description"])
+    assert urls[0].endswith("/jobs/view/123")
+    assert len(urls) == 1 + needs_fallback
+    if needs_fallback:
+        assert urls[1].endswith("/jobs-guest/jobs/api/jobPosting/123")
 
 
 def test_disabled_jobspy_source_is_skipped(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

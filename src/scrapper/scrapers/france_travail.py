@@ -11,7 +11,8 @@ from bs4 import Tag
 from scrapper.config import SearchConfig
 from scrapper.dates import parse_posted_date
 from scrapper.models import JobOffer
-from scrapper.scrapers.async_http import HostThrottle
+from scrapper.scrapers.async_http import HostThrottle, get_checked_page
+from scrapper.source_rules.france_travail import public_offer_location
 from scrapper.text import clean_text
 
 
@@ -38,7 +39,7 @@ async def extract_public_offer(
         return None
     offer_id = match.group(1)
     endpoint = f"https://candidat.francetravail.fr/api-descriptifoffre/offre/{offer_id}"
-    response = await throttle.get(client, endpoint) if throttle else await client.get(endpoint)
+    response = await get_checked_page(client, endpoint, throttle)
     if response.status_code in {404, 410}:
         return None
     response.raise_for_status()
@@ -46,9 +47,7 @@ async def extract_public_offer(
     if not isinstance(data, dict) or not data.get("intituleOffre"):
         raise ValueError("France Travail returned no offer details")
     employer = data.get("etablissement") or {}
-    workplace = data.get("lieuTravail")
-    if isinstance(workplace, dict):
-        workplace = workplace.get("libelleLieuTravail") or workplace.get("libelleCommuneLieuTravail")
+    description = data.get("descriptif")
     return JobOffer(
         source="france_travail",
         source_id=offer_id,
@@ -56,8 +55,8 @@ async def extract_public_offer(
         direct_url=url,
         title=clean_text(data.get("intituleOffre")),
         company=clean_text(employer.get("libelleEnseigne")),
-        location=clean_text(workplace),
-        description=clean_text(data.get("descriptif")),
+        location=public_offer_location(data.get("lieuTravail"), description),
+        description=clean_text(description),
         employment_type=clean_text(data.get("syntheseContrat")),
         date_posted=clean_text(data.get("datePublication") or data.get("dateCreation")),
         salary=clean_text(data.get("salaire")),
