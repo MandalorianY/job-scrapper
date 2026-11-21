@@ -124,8 +124,8 @@ def main() -> None:
         bundle = _freeze(work, notices, onefile=sys.platform == "win32")
         if sys.platform == "win32":
             prefix = f"{NAME}-{__version__}-windows-{arch}"
-            shutil.copy2(bundle, output / f"{prefix}.exe")
-            with zipfile.ZipFile(output / f"{prefix}-notices.zip", "w", zipfile.ZIP_DEFLATED) as archive:
+            with zipfile.ZipFile(output / f"{prefix}.zip", "w", zipfile.ZIP_DEFLATED) as archive:
+                archive.write(bundle, f"{prefix}.exe")
                 for path in sorted(notices.rglob("*")):
                     if path.is_file():
                         archive.write(path, path.relative_to(work))

@@ -10,6 +10,20 @@ schedule:
 
 Run the installer again after changing the schedule. The same profile is passed to the scraper on each run.
 
+## Export folder
+
+Scheduled runs write `jobs.xlsx`, `jobs.csv`, and `jobs_raw.csv` to `paths.export_dir` in your configuration. The default is `exports/`. When you use `--profile`, set the folder in that profile.
+
+- On macOS, `exports/` and other relative paths are based on the directory where you run `job-scrapper-install-timer`.
+- On Linux, relative paths are based on the repository checkout.
+
+Use an absolute path or a path starting with `~/` to choose a fixed folder.
+
+```yaml
+paths:
+  export_dir: ~/Documents/Job Search/exports
+```
+
 ## macOS with Homebrew
 
 Install the formula and run the timer installer from the directory where you keep your tracker. Pass `--profile` to use your own search and schedule settings.

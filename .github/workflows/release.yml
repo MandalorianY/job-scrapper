@@ -74,8 +74,8 @@ jobs:
           - {runner: ubuntu-22.04-arm, arch: aarch64}
           - {runner: windows-2025, arch: x86_64}
           - {runner: windows-11-arm, arch: aarch64}
-          - {runner: macos-15-intel, arch: x86_64}
-          - {runner: macos-15, arch: aarch64}
+          - {runner: macos-26-intel, arch: x86_64}
+          - {runner: macos-26, arch: aarch64}
     env:
       PYTHONUTF8: '1'
       UV_PYTHON_ARCH: ${{ matrix.arch }}
@@ -96,11 +96,17 @@ jobs:
           uv sync --locked --no-default-groups --group release --no-editable --no-build-package pyinstaller
           uv run --locked --no-sync python deploy/build_release.py
 
-      - name: Smoke-test Windows executable
+      - name: Smoke-test Windows archive
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $executable = (Get-ChildItem dist/*.exe | Select-Object -First 1).FullName
+          $archive = Get-Item dist/*.zip
+          $destination = Join-Path $env:RUNNER_TEMP $archive.BaseName
+          Expand-Archive -LiteralPath $archive.FullName -DestinationPath $destination
+          if (-not (Test-Path -LiteralPath (Join-Path $destination 'notices/job-scrapper.txt') -PathType Leaf)) {
+            throw 'Windows archive is missing its license notices.'
+          }
+          $executable = Join-Path $destination "$($archive.BaseName).exe"
           uv run --locked --no-sync python deploy/smoke_release.py "$executable"
 
       - name: Smoke-test portable archive
