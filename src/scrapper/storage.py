@@ -15,7 +15,9 @@ import pandas as pd
 
 from scrapper.dates import absolute_posted_date
 from scrapper.models import JobOffer
+from scrapper.source_rules.france_travail import public_offer_location
 from scrapper.text import (
+    GENERIC_LISTING_PATHS,
     clean_text,
     completeness_score,
     dedupe_key_for_fields,
@@ -23,8 +25,10 @@ from scrapper.text import (
     external_url_key,
     has_excluded_contract_signal,
     is_application_destination,
+    listing_url_key,
     matches_job_title,
     normalize_text,
+    offer_link_keys,
     stable_hash,
     url_key,
 )
@@ -82,38 +86,24 @@ def _offer_url_key(record: Mapping[str, object]) -> str | None:
     blocked_host = SOURCE_DIRECT_URL_IDENTITY_HOST_BLOCKLIST.get(source)
     if blocked_host:
         direct_url = clean_text(record.get("direct_url"))
-        direct_key = external_url_key(direct_url, blocked_host) if is_application_destination(direct_url) else None
+        direct_key = external_url_key(direct_url, blocked_host)
         if direct_key:
             return direct_key
     return url_key(clean_text(record.get("source_url")))
 
 
-GENERIC_LISTING_PATHS = {
-    "apply",
-    "apply-now",
-    "application",
-    "career",
-    "careers",
-    "emploi",
-    "emplois",
-    "job",
-    "jobs",
-    "offres",
-    "postuler",
-    "redirect",
-    "view",
-}
-
-
-def _listing_link_key(value: str | None) -> str | None:
-    parsed = urlparse(value or "")
-    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-        return None
-    key = url_key(value)
-    leaf = parsed.path.rstrip("/").rsplit("/", 1)[-1].lower()
-    if key and ("?" in key or (leaf and leaf not in GENERIC_LISTING_PATHS)):
-        return key
-    return None
+def _repair_source_details(record: dict[str, object], raw: object) -> None:
+    if not isinstance(raw, dict):
+        return
+    if record.get("source") == "france_travail" and isinstance(public_offer := raw.get("public_offer"), dict):
+        workplace = public_offer_location(public_offer.get("lieuTravail"), public_offer.get("descriptif"))
+        if workplace:
+            record["location"] = workplace
+    elif record.get("source") == "jobijoba":
+        posting = raw.get("json_ld")
+        description = posting.get("description") if isinstance(posting, dict) else None
+        if isinstance(description, str) and (cleaned := clean_text(description)):
+            record["description"] = cleaned
 
 
 def _location_key(value: object | None) -> str:
@@ -247,6 +237,33 @@ class JobStore:
         )
         self._ensure_optional_columns()
         self._normalize_existing_posted_dates()
+        self._normalize_existing_source_details()
+
+    def _normalize_existing_source_details(self) -> None:
+        rows = self.conn.execute(
+            """
+            SELECT * FROM raw_offers
+            WHERE (source = 'france_travail' AND json_exists(raw_json, '$.public_offer.lieuTravail'))
+               OR (source = 'jobijoba' AND json_type(raw_json, '$.json_ld.description') = 'VARCHAR')
+            """
+        ).df()
+        updates = []
+        for row in rows.to_dict("records"):
+            previous = (row["location"], row["description"])
+            _repair_source_details(row, json.loads(row["raw_json"]))
+            repaired = (row["location"], row["description"])
+            if repaired != previous:
+                dedupe_key = dedupe_key_for_fields(row, self.dedupe_primary_fields, self.dedupe_fallback_fields)
+                description_key = description_dedupe_key_for_fields(row, self.dedupe_description_fields)
+                updates.append((*repaired, dedupe_key, description_key, row["offer_id"]))
+        if updates:
+            self.conn.executemany(
+                """
+                UPDATE raw_offers SET location = ?, description = ?, dedupe_key = ?, description_key = ?
+                WHERE offer_id = ?
+                """,
+                updates,
+            )
 
     def _ensure_optional_columns(self) -> None:
         columns = {row[1] for row in self.conn.execute("PRAGMA table_info('raw_offers')").fetchall()}
@@ -410,11 +427,18 @@ class JobStore:
             record.get("date_posted"),
             now=_datetime_value(record.get("scraped_at")),
         )
+        _repair_source_details(record, record.get("raw"))
         source_url_key = _offer_url_key(record)
         source = record["source"]
         identity = source_url_key or record["source_url"]
         existing = self.conn.execute(
-            "SELECT offer_id FROM raw_offers WHERE source = ? AND source_url_key = ?", [source, identity]
+            """
+            SELECT offer_id FROM raw_offers
+            WHERE source = ? AND (source_url_key = ? OR source_url = ?)
+            ORDER BY (source_url = ?) DESC, (source_url_key = ?) DESC NULLS LAST, first_seen_at, offer_id
+            LIMIT 1
+            """,
+            [source, identity, record["source_url"], record["source_url"], identity],
         ).fetchone()
         offer_id = existing[0] if existing else sha256(f"{source}\0{identity}".encode()).hexdigest()
         duplicate_key = dedupe_key_for_fields(
@@ -479,6 +503,10 @@ class JobStore:
                 company = COALESCE(excluded.company, raw_offers.company),
                 location = COALESCE(excluded.location, raw_offers.location),
                 description = CASE
+                    WHEN excluded.source = 'jobijoba'
+                         AND json_type(excluded.raw_json, '$.json_ld.description') = 'VARCHAR'
+                         AND excluded.description IS NOT NULL
+                    THEN excluded.description
                     WHEN length(COALESCE(excluded.description, '')) > length(COALESCE(raw_offers.description, ''))
                     THEN excluded.description ELSE raw_offers.description END,
                 date_posted = COALESCE(raw_offers.date_posted, excluded.date_posted),
@@ -503,9 +531,8 @@ class JobStore:
             params,
         )
         # An accepted, freshly scraped offer can replace a previously excluded listing.
-        for link in (record.get("source_url"), record.get("direct_url")):
-            if isinstance(link, str) and (key := url_key(link)):
-                self.conn.execute("DELETE FROM excluded_offer_urls WHERE url_key = ?", [key])
+        for key in offer_link_keys(record.get("source_url"), record.get("direct_url")):
+            self.conn.execute("DELETE FROM excluded_offer_urls WHERE url_key = ?", [key])
         return True
 
     def canonical_dataframe(self) -> pd.DataFrame:
@@ -549,7 +576,9 @@ class JobStore:
             return pd.DataFrame(columns=pd.Index(CANONICAL_COLUMNS))
 
         frame["date_posted"] = frame.apply(
-            lambda row: absolute_posted_date(row["date_posted"], now=row["first_seen_at"]),
+            lambda row: absolute_posted_date(row["date_posted"], now=row["first_seen_at"])
+            if pd.notna(row["date_posted"])
+            else None,
             axis=1,
         )
         frame["direct_url"] = frame["direct_url"].where(frame["direct_url"].map(is_application_destination), None)
@@ -581,10 +610,9 @@ class JobStore:
             result["date_posted"].notna() & (result["date_posted"].astype(str).str.strip() != ""),
             result["group_date_posted"],
         )
-        result["sort_date"] = pd.to_datetime(result["date_posted"], errors="coerce", utc=True)
-        result["sort_date"] = result["sort_date"].fillna(
-            pd.to_datetime(result["last_seen_at"], errors="coerce", utc=True)
-        )
+        posted_dates = pd.to_datetime(result["date_posted"], errors="coerce", utc=True).dt.as_unit("us")
+        last_seen_dates = pd.to_datetime(result["last_seen_at"], errors="coerce", utc=True).dt.as_unit("us")
+        result["sort_date"] = posted_dates.fillna(last_seen_dates)
         result = result.sort_values(by=["sort_date", "company", "title"], ascending=[False, True, True], kind="stable")
 
         result = result.rename(
@@ -601,6 +629,13 @@ class JobStore:
         rows = cast("list[_OfferRow]", list(frame.itertuples(index=False)))
         sources = [{row.source} for row in rows]
         locations = [{key} if (key := _location_key(row.location)) else set() for row in rows]
+        apply_urls = [
+            row.direct_url if is_application_destination(row.direct_url) else None for row in rows
+        ]
+        destinations = [
+            {(urlparse(url).hostname, key)} if url and (key := listing_url_key(url)) else set()
+            for url in apply_urls
+        ]
         use_location = any(
             "location" in fields
             for fields in (self.dedupe_primary_fields, self.dedupe_fallback_fields, self.dedupe_description_fields)
@@ -616,16 +651,22 @@ class JobStore:
             parents[right] = left
             sources[left].update(sources[right])
             locations[left].update(locations[right])
+            destinations[left].update(destinations[right])
 
         seen_identity: dict[tuple[str, ...], int] = {}
         for index, row in enumerate(rows):
-            direct_url = row.direct_url if is_application_destination(row.direct_url) else None
             keys: list[tuple[str, ...]] = [
-                ("url", key) for link in (row.source_url, direct_url) if (key := _listing_link_key(link))
+                ("url", key) for link in (row.source_url, apply_urls[index]) if (key := listing_url_key(link))
             ]
-            if row.source_id and str(row.source_id).lower() not in GENERIC_LISTING_PATHS:
+            source_id = row.source_id
+            if (
+                isinstance(source_id, str)
+                and source_id
+                and "/" not in source_id
+                and source_id.lower() not in GENERIC_LISTING_PATHS
+            ):
                 host = (urlparse(row.source_url).hostname or "").removeprefix("www.")
-                keys.append(("id", row.source, host, str(row.source_id)))
+                keys.append(("id", row.source, host, source_id))
             for key in keys:
                 left, right = find(index), find(seen_identity.setdefault(key, index))
                 if left != right:
@@ -637,13 +678,25 @@ class JobStore:
                 row._asdict(),
                 fields=self.dedupe_description_fields,
             )
-            for kind, value in (("title", row.dedupe_key), ("description", description_key)):
+            fields = row._asdict()
+            repost_key = None
+            if self.dedupe_description_fields and all(fields.get(k) for k in ("title", "company", "location")):
+                repost_key = description_dedupe_key_for_fields(
+                    fields, fields=("description", "title", "company", "location")
+                )
+            for kind, value in (("repost", repost_key), ("title", row.dedupe_key), ("description", description_key)):
                 if not value:
                     continue
                 bucket = candidates.setdefault((kind, value), set())
                 for previous in sorted(bucket):
                     left, right = find(index), find(previous)
-                    if left == right or sources[left] & sources[right]:
+                    if left == right or (kind != "repost" and sources[left] & sources[right]):
+                        continue
+                    if any(
+                        left_host == right_host and left_key != right_key
+                        for left_host, left_key in destinations[left]
+                        for right_host, right_key in destinations[right]
+                    ):
                         continue
                     if (
                         use_location
@@ -713,7 +766,7 @@ class JobStore:
         frame = self.conn.execute(
             """
             SELECT offer_id, dedupe_key, description_key, source, source_id, source_url, direct_url,
-                   location, title, employment_type, description
+                   location, title, company, employment_type, description
             FROM raw_offers ORDER BY offer_id
             """
         ).df()
@@ -781,7 +834,7 @@ class JobStore:
         rows = self.conn.execute(
             "SELECT source_url, direct_url FROM raw_offers WHERE offer_id IN (SELECT unnest(?))", [offer_ids]
         ).fetchall()
-        keys = {(url_key(link),) for row in rows for link in row if link}
+        keys = {(key,) for source_url, direct_url in rows for key in offer_link_keys(source_url, direct_url)}
         if keys:
             self.conn.executemany("INSERT OR IGNORE INTO excluded_offer_urls VALUES (?)", list(keys))
         params = [(offer_id,) for offer_id in offer_ids]

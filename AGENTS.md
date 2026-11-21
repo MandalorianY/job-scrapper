@@ -141,6 +141,8 @@ company, and location validation. Offers need a description or a contract type.
 Contract cleanup applies to the whole canonical duplicate group, so a sparse copy
 cannot hide internship evidence from another source. Purged URL keys are retained
 in `excluded_offer_urls` to prevent historical tracker copies from restoring them.
+Geographic scope controls discovery and export. Keep existing raw listings when
+their stored location falls outside the current profile.
 
 Be careful with false positives. Do not remove an offer just because a description mentions managing an intern/alternant, internal example role, or international work. The stricter contract-stage logic lives in `text.py`; extend the phrase patterns there with focused examples when needed.
 
@@ -148,7 +150,7 @@ For broad sources, keep the include filter title-focused unless there is an expl
 
 ## Dedupe And Completeness
 
-Deduping matches provider IDs and listing-specific URLs first. Title/company and description matches across boards also consider location with the default settings. The canonical export ranks source priority, completeness, and scrape time, and preserves duplicate counts and links.
+Deduping matches provider IDs and listing-specific URLs first. Title/company and description matches across boards also consider location with the default settings. Same-board reposts require a matching title, employer, location, and substantial description. The canonical export ranks source priority, completeness, and scrape time, and preserves duplicate counts and links.
 
 When changing dedupe behavior:
 
@@ -173,7 +175,7 @@ failures, and retryable HTTP errors get one retry. Honor the host's Retry-After
 window on HTTP 429 and 503. If the delay exceeds the wait budget, defer requests
 to that host until the window expires and keep processing other sources.
 
-Search attempts keep their run ID, outcome, and seen count in DuckDB. `source_health` shows the latest attempt and successful watermark. The 90-day observation archive records offers accepted at ingestion and supports offline `--replay-from`.
+Search attempts keep their run ID, outcome, and seen count in DuckDB. `source_health` shows the latest attempt and successful watermark. The 90-day observation archive records offers accepted at ingestion and supports offline `--replay-from`. Back up the full DuckDB file to retain listings that predate the archive or its retention window.
 
 Custom/detail scrapers should skip known detail pages by default using `store.source_url_seen(...)`, unless `config.refresh_known_details` is true. Search/list pages may still be revisited to discover new links.
 

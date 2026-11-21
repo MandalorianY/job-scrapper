@@ -258,6 +258,14 @@ def test_export_can_disable_direct_links_by_source(tmp_path: Path) -> None:
         store.close()
 
 
+@pytest.mark.parametrize("missing_direct_url", [float("nan"), pd.NA])
+def test_tracker_link_falls_back_to_source_url_for_missing_direct_url(missing_direct_url: object) -> None:
+    source_url = "https://example.com/jobs/1"
+    row = pd.Series({"best_source": "example", "best_source_url": source_url, "best_direct_url": missing_direct_url})
+
+    assert export._tracker_apply_link(row, {}) == source_url
+
+
 def test_export_adds_status_dropdown_validation(tmp_path: Path) -> None:
     store = JobStore(tmp_path / "jobs.duckdb")
     try:
@@ -654,7 +662,7 @@ def test_export_repairs_france_travail_tracker_fields(
             repair_fields_by_source={} if repairs_enabled else {"france_travail": False},
         )
 
-        frame = pd.read_csv(csv_path).fillna("")
+        frame = pd.read_csv(csv_path, keep_default_na=False)
         assert frame.iloc[0].to_dict() == {
             "Intitulé": expected_title,
             "Entreprise": expected_company,
@@ -934,6 +942,19 @@ def test_review_notes_distinguish_teaching_recruitment_from_mentoring() -> None:
     assert "formation" in _review_note(pd.Series({"description": "Nous recrutons des formateurs/trices indépendants."}))
     assert not _review_note(
         pd.Series({"description": "Vous encadrez les stagiaires et préparez les contenus marketing."})
+    )
+
+
+def test_export_flags_expiry_and_uses_only_unambiguous_text_salary() -> None:
+    assert _salary_bounds(pd.Series({"description": "Rémunération : entre 39 000€ et 41600€ par an"})) == (
+        39000,
+        41600,
+    )
+    assert _salary_bounds(pd.Series({"description": "Salaire : 2\u00a0000€ brut par mois"})) == (24000, 24000)
+    assert _salary_bounds(pd.Series({"description": "Budget publicitaire : 42 000€ par an"})) == (None, None)
+    assert _salary_bounds(pd.Series({"description": "Salaire : 50 000 USD par an"})) == (None, None)
+    assert "Date limite dépassée" in _review_note(
+        pd.Series({"description": "Example description", "raw_json": {"json_ld": {"validThrough": "2020-04-04"}}})
     )
 
 
