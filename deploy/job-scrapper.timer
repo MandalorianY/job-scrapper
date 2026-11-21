@@ -1,0 +1,11 @@
+[Unit]
+Description=Run the job scraper on weekdays at 15:30 Paris time
+
+[Timer]
+OnCalendar=Mon..Fri *-*-* 15:30:00 Europe/Paris
+Persistent=false
+AccuracySec=1s
+Unit=job-scrapper.service
+
+[Install]
+WantedBy=timers.target

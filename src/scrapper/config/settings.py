@@ -240,12 +240,6 @@ class ExportConfig(BaseModel):
     direct_links_enabled_by_source: dict[str, bool] = Field(default_factory=dict)
 
 
-class TrackerSyncConfig(BaseModel):
-    local_dir: Path | None = None
-    remote_dir: str | None = None
-    workbook_name: str | None = None
-
-
 JobOfferField = Literal["title", "company", "location", "description"]
 
 
@@ -305,7 +299,6 @@ class Settings(BaseSettings):
     extra_headers: dict[str, str] = Field(default_factory=dict)
     paths: PathsConfig
     export: ExportConfig = Field(default_factory=ExportConfig)
-    tracker_sync: TrackerSyncConfig = Field(default_factory=TrackerSyncConfig)
     http: HttpConfig
     jobspy: JobspyConfig
     welcome_to_the_jungle: WelcomeToTheJungleConfig

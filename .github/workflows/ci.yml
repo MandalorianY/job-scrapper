@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.13", "3.14"]
+    env:
+      SCRAPPER_DISABLE_LOCAL_CONFIG: "1"
+      SCRAPPER_RUN_REAL_SMOKE: "0"
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: "0.13.9"
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install locked dependencies from wheels
+        run: uv sync --locked --group test --no-build --no-cache
+
+      - name: Check installed CLI
+        run: uv run --locked --no-sync job-scrapper --show-config > /dev/null
+
+      - name: Lint and test
+        run: uv run --locked --group test task test
+
+      - name: Build package
+        run: uv build --no-sources
