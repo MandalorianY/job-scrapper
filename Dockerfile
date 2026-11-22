@@ -21,6 +21,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --locked --no-default-groups --no-install-project --no-build
 COPY README.md LICENSE ./
 COPY src/scrapper ./src/scrapper
+COPY datasets/employers/v1/company_types.csv ./datasets/employers/v1/company_types.csv
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --locked --no-default-groups --no-editable
 

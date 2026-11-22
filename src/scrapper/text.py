@@ -12,6 +12,8 @@ from bs4 import BeautifulSoup
 
 SPACE_RE = re.compile(r"\s+")
 NON_WORD_RE = re.compile(r"[^a-z0-9]+")
+MATCH_SEPARATORS = str.maketrans({character: " " for character in "'’‐‑‒–—―−"})
+_COMPANY_LEGAL_SUFFIX_RE = re.compile(r" (?:s ?a ?s(?: ?u)?|s ?a ?r ?l|s ?a|s ?n ?c|e ?u ?r ?l)$")
 DESCRIPTION_DEDUPE_MIN_LENGTH = 80
 NON_APPLICATION_PATH_RE = re.compile(
     r"/[^/]*bookmark(?:/|$)|/editorial/conseils/|/media/guide-candidat(?:/|$)|"
@@ -242,9 +244,9 @@ def unwrap_redirect(url: str | None) -> str | None:
 
 
 def contains_excluded_terms(values: Iterable[object | None], exclude_terms: Iterable[str]) -> bool:
-    haystack = " ".join(_normalize_for_match(value) for value in values if value)
+    haystack = " ".join(normalize_match_text(value) for value in values if value)
     for term in exclude_terms:
-        normalized = _normalize_for_match(term)
+        normalized = normalize_match_text(term)
         if normalized and re.search(rf"(^|\s){re.escape(normalized)}($|\s)", haystack):
             return True
     return False
@@ -265,13 +267,13 @@ def has_excluded_contract_signal(
         "alternance": ("alternants", "alternantes"),
         "apprenti": ("apprentis", "apprenties"),
     }
-    expanded = terms + tuple(alias for term in terms for alias in aliases.get(_normalize_for_match(term), ()))
+    expanded = terms + tuple(alias for term in terms for alias in aliases.get(normalize_match_text(term), ()))
     if contains_excluded_terms((title, employment_type), expanded):
         return True
-    if _normalize_for_match(employment_type) in {"franchise", "franchise emploi non salarie"}:
+    if normalize_match_text(employment_type) in {"franchise", "franchise emploi non salarie"}:
         return True
-    normalized_title = _normalize_for_match(title)
-    if "alternance" in {_normalize_for_match(term) for term in terms} and re.search(
+    normalized_title = normalize_match_text(title)
+    if "alternance" in {normalize_match_text(term) for term in terms} and re.search(
         r"(?:^alt\b|\ben alt\b|\b(?:bts|bachelor|master|mba)\b.*\balt\b)", normalized_title
     ):
         return True
@@ -282,7 +284,7 @@ def has_excluded_contract_signal(
 
 @lru_cache(maxsize=4096)
 def _description_has_excluded_contract(description: str | None) -> bool:
-    normalized_description = _normalize_for_match(description)
+    normalized_description = normalize_match_text(description)
     if not normalized_description:
         return False
     if re.search(r"\bcreer votre entreprise\b", normalized_description) and re.search(
@@ -293,9 +295,9 @@ def _description_has_excluded_contract(description: str | None) -> bool:
 
 
 def contains_any_terms(values: Iterable[object | None], include_terms: Iterable[str]) -> bool:
-    haystack = " ".join(_normalize_for_match(value) for value in values if value)
+    haystack = " ".join(normalize_match_text(value) for value in values if value)
     for term in include_terms:
-        normalized = _normalize_for_match(term)
+        normalized = normalize_match_text(term)
         if normalized and re.search(rf"(^|\s){re.escape(normalized)}($|\s)", haystack):
             return True
     return False
@@ -306,17 +308,21 @@ def matches_job_title(
 ) -> bool:
     """Require an included title term and reject configured, normalized title patterns."""
     return contains_any_terms((title,), include_terms) and not any(
-        re.search(pattern, _normalize_for_match(title)) for pattern in excluded_patterns
+        re.search(pattern, normalize_match_text(title)) for pattern in excluded_patterns
     )
 
 
-def _normalize_for_match(value: object | None) -> str:
+def normalize_match_text(value: object | None) -> str:
     text = clean_text(value) or ""
-    text = text.replace("’", " ").replace("'", " ")
+    text = text.translate(MATCH_SEPARATORS)
     text = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode("ascii")
     text = text.lower()
     text = NON_WORD_RE.sub(" ", text)
     return SPACE_RE.sub(" ", text).strip()
+
+
+def company_name_key(name: str) -> str:
+    return _COMPANY_LEGAL_SUFFIX_RE.sub("", normalize_match_text(name))
 
 
 def completeness_score(record: dict[str, object | None]) -> int:

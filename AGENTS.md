@@ -22,6 +22,7 @@ Do not commit generated data or exports unless the user explicitly asks for that
 - JobSpy for supported boards: Indeed, LinkedIn, Glassdoor, Google Jobs, HelloWork
 - `httpx` + BeautifulSoup for APIs, aggregator pages, and sitemaps
 - OpenPyXL and pandas for localized Excel/CSV exports
+- Pandera for validating the community employer CSV catalog
 - PyInstaller in the locked `release` group for native Windows, Linux, and macOS releases. The release version lives in `pyproject.toml`.
 
 The tracked `src/scrapper/config/config.yaml` is the public example template. Use `src/scrapper/config/config.local.yaml` (when present) for live repository settings such as query/location tuning and source-specific overrides. Use `--profile PATH` to select an alternate YAML with its own database, export, and log paths.
@@ -138,6 +139,7 @@ PY
 ## Architecture
 
 - `src/scrapper/config/`: Pydantic Settings models, packaged `config.yaml` defaults, and `config.prod.yaml` scrape limits. `aggregator_specs.py` defines the built-in provider specs. Secrets belong in `.env`.
+- `datasets/employers/v1/`: community-maintained employer catalog, bundled as a snapshot at build time. `company_types.py` loads and indexes it, `schemas/company_catalog.py` validates it, and `catalog_updates.py` refreshes the runtime cache from the default branch.
 - `src/scrapper/models.py`: `JobOffer`, the single normalized offer shape used by every source.
 - `src/scrapper/storage/`: DuckDB access in `store.py`, schema setup in `schema.py`, and canonical grouping in `dedupe.py`.
 - `src/scrapper/text.py`: text cleanup, URL keys, stable hashes, dedupe key, include/exclude matching, completeness scoring.

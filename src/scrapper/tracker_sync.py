@@ -3,12 +3,9 @@
 from __future__ import annotations
 
 import argparse
-import errno
 import shutil
 import subprocess
 import sys
-from collections.abc import Iterator
-from contextlib import contextmanager
 from dataclasses import dataclass
 from hashlib import file_digest
 from pathlib import Path, PurePosixPath
@@ -22,6 +19,7 @@ from scrapper.config import SearchConfig
 from scrapper.export import export_paths
 from scrapper.export.jobs import _publish_exports, read_tracker, tracker_paths
 from scrapper.export.tracker import LOCALIZED_TRACKER_COLUMNS
+from scrapper.file_lock import file_lock as _sync_lock
 
 
 class SyncError(Exception):
@@ -153,33 +151,6 @@ def _check_destination(target: str | None, incoming: Path) -> Remote:
 
 def sync_settings_path(database_path: Path) -> Path:
     return database_path.parent / ".tracker-sync" / "settings.json"
-
-
-@contextmanager
-def _sync_lock(path: Path) -> Iterator[None]:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("ab") as lock:
-        if sys.platform == "win32":
-            import msvcrt
-
-            lock.seek(0)
-            while True:
-                try:
-                    msvcrt.locking(lock.fileno(), msvcrt.LK_LOCK, 1)
-                    break
-                except OSError as exc:
-                    # The Windows blocking mode gives up after ten attempts.
-                    if exc.errno != errno.EDEADLK:
-                        raise
-            try:
-                yield
-            finally:
-                msvcrt.locking(lock.fileno(), msvcrt.LK_UNLCK, 1)
-        else:
-            import fcntl
-
-            fcntl.flock(lock, fcntl.LOCK_EX)
-            yield
 
 
 def load_sync_settings(path: Path) -> SyncSettings:

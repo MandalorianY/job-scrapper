@@ -67,8 +67,10 @@ jobs:
       - name: Install built wheel
         run: uv pip install --no-deps --no-index --find-links dist scrapper
 
-      - name: Check installed CLI
-        run: uv run --locked --no-sync job-scrapper --status
+      - name: Check installed CLI and employer catalog
+        run: |
+          uv run --locked --no-sync job-scrapper --status
+          uv run --locked --no-sync python -c "from scrapper.company_types import company_types; company_types()"
 
       - name: Type-check Windows, Linux, and macOS
         if: matrix.target.runner == 'ubuntu-24.04' && matrix.python-version == '3.14'

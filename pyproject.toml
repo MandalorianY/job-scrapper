@@ -23,6 +23,7 @@ dependencies = [
     "lxml>=6.1.3",
     "openpyxl>=3.1.5",
     "pandas==3.1.1",
+    "pandera[pandas]>=0.36.0",
     "pydantic>=2.14.4",
     "pydantic-settings[yaml]>=2.16.3",
     "python-dotenv>=1.2.4",
@@ -39,9 +40,7 @@ job-scrapper = "scrapper.cli:main"
 job-scrapper-install-timer = "scrapper.scheduling:main"
 
 [project.optional-dependencies]
-ods = [
-    "odfpy>=1.4.1",
-]
+ods = ["odfpy>=1.4.1"]
 
 [build-system]
 requires = ["hatchling"]
@@ -53,11 +52,24 @@ exclude = ["**/.env", "**/*.local.yaml", "**/README.local.md"]
 [tool.hatch.build.targets.wheel]
 packages = ["src/scrapper"]
 
+[tool.hatch.build.targets.wheel.force-include]
+"datasets/employers/v1/company_types.csv" = "scrapper/catalogs/company_types.csv"
+
 [tool.hatch.build.targets.sdist]
 include = [
-    "/src/scrapper", "/deploy", "/tests", "/.github/workflows", "/.dockerignore",
-    "/.env.example", "/.gitignore", "/.python-version", "/AGENTS.md", "/Dockerfile",
-    "/main.py", "/uv.lock",
+    "/src/scrapper",
+    "/datasets/employers/v1/company_types.csv",
+    "/deploy",
+    "/tests",
+    "/.github/workflows",
+    "/.dockerignore",
+    "/.env.example",
+    "/.gitignore",
+    "/.python-version",
+    "/AGENTS.md",
+    "/Dockerfile",
+    "/main.py",
+    "/uv.lock",
 ]
 
 [tool.pytest.ini_options]
@@ -124,19 +136,19 @@ _pyright_windows = "pyright --warnings --pythonplatform Windows ."
 _pyright_linux = "pyright --warnings --pythonplatform Linux ."
 _pyright_macos = "pyright --warnings --pythonplatform Darwin ."
 test = ["lint", "_pytest"]
-_pytest = {cmd = "pytest -vv", env = {PROFILE = "local"}, executor = {group = "test"}}
-format = [{cmd = "ruff check . --fix"}, {cmd = "ruff format ."}]
+_pytest = { cmd = "pytest -vv", env = { PROFILE = "local" }, executor = { group = "test" } }
+format = [{ cmd = "ruff check . --fix" }, { cmd = "ruff format ." }]
 
 [tool.poe.tasks.check]
 sequence = ["lint", "typecheck", "_pytest"]
-env = {SCRAPPER_DISABLE_LOCAL_CONFIG = "1", SCRAPPER_RUN_REAL_SMOKE = "0", PYTHONUTF8 = "1", UV_NO_SYNC = "1"}
+env = { SCRAPPER_DISABLE_LOCAL_CONFIG = "1", SCRAPPER_RUN_REAL_SMOKE = "0", PYTHONUTF8 = "1", UV_NO_SYNC = "1" }
 
 [dependency-groups]
-dev = [{include-group = "lint"}, "poethepoet>=0.49.0", "pyright>=1.1.414"]
+dev = [{ include-group = "lint" }, "poethepoet>=0.49.0", "pyright>=1.1.414"]
 lint = ["ruff>=0.17.6"]
 release = ["pyinstaller>=6.22.3"]
 test = [
-    {include-group = "lint"},
+    { include-group = "lint" },
     "anyio>=4.16.0",
     "hypothesis>=6.170.17",
     "pytest>=9.2.0",

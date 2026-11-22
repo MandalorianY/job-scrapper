@@ -15,6 +15,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from scrapper import __version__
+from scrapper.company_types import COMPANY_TYPES_PATH
 from scrapper.config.settings import PACKAGE_CONFIG_DIR
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -70,6 +71,8 @@ def _freeze(work: Path, notices: Path, *, onefile: bool) -> Path:
         "certifi",
         "--add-data",
         f"{notices}:notices",
+        "--add-data",
+        f"{COMPANY_TYPES_PATH}:scrapper/catalogs",
     ]
     for filename in ("config.yaml", "config.prod.yaml", "toulouse-graphiste.yaml"):
         command.extend(("--add-data", f"{PACKAGE_CONFIG_DIR / filename}:scrapper/config"))

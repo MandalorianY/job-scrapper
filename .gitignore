@@ -25,6 +25,7 @@ wheels/
 
 # Local scraper state and exports
 data/
+.catalogs/
 exports/
 /jobs.xlsx
 trouve-un-travail/
