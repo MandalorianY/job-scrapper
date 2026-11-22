@@ -116,6 +116,11 @@ export:
   repair_fields_by_source:
     france_travail: true
 
+# Add this block to config.local.yaml to enable tracker sync with rclone.
+# sync:
+#   enabled: true
+#   target: "mydrive:Job Search/jobs.xlsx"
+
 # =============================================================================
 # 5. Enabled Sources
 # =============================================================================

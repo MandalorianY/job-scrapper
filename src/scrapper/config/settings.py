@@ -218,6 +218,17 @@ class ExportConfig(BaseModel):
         return value
 
 
+class TrackerSyncConfig(BaseModel):
+    enabled: bool = False
+    target: str | None = None
+
+    @model_validator(mode="after")
+    def _require_target_when_enabled(self) -> TrackerSyncConfig:
+        if self.enabled and not self.target:
+            raise ValueError("Set sync.target to an rclone destination when sync.enabled is true.")
+        return self
+
+
 JobOfferField = Literal["title", "company", "location", "description"]
 
 
@@ -278,6 +289,7 @@ class Settings(BaseSettings):
     paths: PathsConfig
     schedule: ScheduleConfig = Field(default_factory=ScheduleConfig)
     export: ExportConfig = Field(default_factory=ExportConfig)
+    sync: TrackerSyncConfig | None = None
     http: HttpConfig
     jobspy: JobspyConfig
     welcome_to_the_jungle: WelcomeToTheJungleConfig = Field(default_factory=WelcomeToTheJungleConfig)

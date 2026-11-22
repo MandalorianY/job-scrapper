@@ -26,7 +26,7 @@ def print_tracker_sync_status(config: SearchConfig) -> None:
     from scrapper.tracker_sync import load_sync_settings, sync_settings_path
 
     try:
-        settings = load_sync_settings(sync_settings_path(config.database_path))
+        settings = config.sync or load_sync_settings(sync_settings_path(config.database_path))
     except (OSError, ValueError):
         status = Text("⚠ Unavailable (could not read settings)", style="bold yellow")
     else:

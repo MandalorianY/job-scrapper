@@ -3,7 +3,16 @@ name: CI
 on:
   push:
     branches: [main]
+    paths-ignore:
+      # The root README.md is used in package metadata.
+      - AGENTS.md
+      - 'docs/**/*.md'
+      - deploy/README.md
   pull_request:
+    paths-ignore:
+      - AGENTS.md
+      - 'docs/**/*.md'
+      - deploy/README.md
 
 permissions:
   contents: read

@@ -1,6 +1,7 @@
 import shutil
 import sys
 from collections.abc import Sequence
+from importlib import import_module
 from pathlib import Path
 from typing import Never
 
@@ -87,12 +88,24 @@ def test_sync_lock_excludes_a_second_file_handle(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("kind", ("xlsx", "ods", "csv"))
+@pytest.mark.parametrize("configured_in_yaml", (False, True))
 def test_tracker_sync_saves_incremental_updates_and_recovers_from_conflicts(
-    kind: ExportFormat, remote_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    kind: ExportFormat,
+    configured_in_yaml: bool,
+    remote_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     if kind == "ods":
         pytest.importorskip("odf")
     formats = ("xlsx", "csv") if kind == "xlsx" else (kind, "xlsx")
+    remote = remote_dir / f"tracker.{kind}"
+    target = f"fixture:{remote.name}"
+    if configured_in_yaml:
+        local_config = tmp_path / "config.local.yaml"
+        local_config.write_text(f'sync:\n  enabled: true\n  target: "{target}"\n', encoding="utf-8")
+        monkeypatch.setattr(import_module("scrapper.config.settings"), "LOCAL_CONFIG_FILE", local_config)
+        monkeypatch.delenv("SCRAPPER_DISABLE_LOCAL_CONFIG", raising=False)
     config = SearchConfig(
         paths={"database_path": tmp_path / "jobs.duckdb", "export_dir": tmp_path / "exports"},
         export={"formats": formats, "excel_columns": ("Statut", "Lien", "Intitulé")},
@@ -112,7 +125,6 @@ def test_tracker_sync_saves_incremental_updates_and_recovers_from_conflicts(
         paths, _ = export_job_formats(store, tmp_path / "seed", config.export.excel_columns, formats=(kind,))
     finally:
         store.close()
-    remote = remote_dir / f"tracker.{kind}"
     shutil.copy2(paths[0], remote)
     _edit_status(remote, "Postulé")
 
@@ -127,8 +139,9 @@ def test_tracker_sync_saves_incremental_updates_and_recovers_from_conflicts(
 
     monkeypatch.setattr(tracker_sync, "SearchConfig", lambda: config)
     monkeypatch.setattr(tracker_sync, "run", run)
-    monkeypatch.setattr(sys, "argv", ["tracker_sync", "--enable", f"fixture:{remote.name}"])
-    tracker_sync.main()
+    if not configured_in_yaml:
+        tracker_sync.main(["--enable", target])
+    tracker_sync.main(["--status"])
     assert {path.name for path in remote_dir.iterdir()} == {remote.name}
 
     monkeypatch.setattr(sys, "argv", ["tracker_sync"])
@@ -156,7 +169,11 @@ def test_tracker_sync_saves_incremental_updates_and_recovers_from_conflicts(
         store.close()
     expected = {"Example coordinator": "Refusé", "Example analyst": "En Attente"}
     settings_path = tracker_sync.sync_settings_path(config.database_path)
-    checkpoint = tracker_sync.load_sync_settings(settings_path).last_synced_hash
+    saved_settings = tracker_sync.load_sync_settings(settings_path)
+    checkpoint = saved_settings.checkpoint_for(target)
+    assert checkpoint is not None
+    assert saved_settings.checkpoint_for(f"fixture:other.{kind}") is None
+    assert saved_settings.enabled == (not configured_in_yaml)
 
     def fail_upload(_remote: tracker_sync.Remote, _path: Path, *, first_upload: bool) -> Never:
         assert not first_upload
@@ -194,6 +211,56 @@ def test_tracker_sync_saves_incremental_updates_and_recovers_from_conflicts(
 def test_remote_extension_must_match_primary_format(remote_dir: Path) -> None:
     with pytest.raises(tracker_sync.SyncError, match=r"--enable REMOTE:folder/jobs\.ods"):
         tracker_sync.Remote.connect("fixture:jobs.xlsx", ".ods")
+    assert not list(remote_dir.iterdir())
+
+
+@pytest.mark.parametrize(
+    ("rclone_available", "target", "message"),
+    [
+        (False, "fixture:jobs.xlsx", "Please install rclone"),
+        (True, "unknown:jobs.xlsx", "Run rclone config"),
+        (True, "fixture:jobs.ods", "Set sync.target in YAML"),
+        (True, "fixture:jobs.xlsx", "Could not verify write access to the tracker folder. Read-only remote."),
+    ],
+)
+def test_sync_reports_prerequisite_failure_before_scraping(
+    rclone_available: bool,
+    target: str,
+    message: str,
+    remote_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    config = SearchConfig(
+        paths={"database_path": tmp_path / "jobs.duckdb", "export_dir": tmp_path / "exports"},
+        sync={"enabled": True, "target": target},
+    )
+    ran_local = False
+
+    def deny_write(_remote: tracker_sync.Remote, _workspace: Path) -> Never:
+        raise PermissionError("Read-only remote.")
+
+    def run_locally() -> None:
+        nonlocal ran_local
+        warning = capsys.readouterr().err
+        assert message in warning
+        assert "Running local export." in warning
+        ran_local = True
+
+    monkeypatch.setattr(tracker_sync, "SearchConfig", lambda: config)
+    monkeypatch.setattr(tracker_sync.shutil, "which", lambda _: "rclone" if rclone_available else None)
+    monkeypatch.setattr(tracker_sync.Remote, "check_write", deny_write)
+    monkeypatch.setattr(tracker_sync, "run", run_locally)
+
+    with pytest.raises(SystemExit) as failure:
+        tracker_sync.main(["--status"])
+    assert failure.value.code == 1
+    assert message in capsys.readouterr().err
+    assert not ran_local
+
+    tracker_sync.main([])
+    assert ran_local
     assert not list(remote_dir.iterdir())
 
 

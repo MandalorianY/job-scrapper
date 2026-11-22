@@ -32,6 +32,10 @@ class SyncSettings(BaseModel):
     target: str | None = None
     enabled: bool = False
     last_synced_hash: str | None = None
+    last_synced_target: str | None = None
+
+    def checkpoint_for(self, target: str) -> str | None:
+        return self.last_synced_hash if target == self.last_synced_target else None
 
 
 @dataclass(frozen=True)
@@ -44,9 +48,9 @@ class Remote:
         executable = shutil.which("rclone")
         if executable is None:
             raise SyncError("Please install rclone, then run rclone config to set up a remote.")
-        example = f"REMOTE:folder/jobs{suffix}"
+        hint = f"Set sync.target in YAML or use --enable REMOTE:folder/jobs{suffix}."
         if not target:
-            raise SyncError(f"Set a destination with --enable {example}.")
+            raise SyncError(hint)
         name, separator, path = target.partition(":")
         if sys.platform == "win32" and len(name) == 1 and name.isascii() and name.isalpha():
             raise SyncError("On Windows, use an rclone remote name with more than one letter to avoid drive letters.")
@@ -57,7 +61,7 @@ class Remote:
             or path.endswith("/")
             or PurePosixPath(path).suffix.lower() != suffix
         ):
-            raise SyncError(f"Set a named rclone destination matching the first export format with --enable {example}.")
+            raise SyncError(f"The destination must be a named rclone file ending in {suffix}. {hint}")
         remote = cls(executable, target)
         configured = remote.call("listremotes")
         if configured is None or f"{name}:" not in configured.splitlines():
@@ -136,6 +140,17 @@ def _check_tracker(path: Path) -> None:
         raise SyncError("The remote CSV has no tracker columns. Use jobs.csv as the sync target.")
 
 
+def _check_destination(target: str | None, incoming: Path) -> Remote:
+    remote = Remote.connect(target, incoming.suffix)
+    remote.fetch(incoming)
+    _check_tracker(incoming)
+    try:
+        remote.check_write(incoming.parent)
+    except (OSError, SyncError) as exc:
+        raise SyncError(f"Could not verify write access to the tracker folder. {exc}") from exc
+    return remote
+
+
 def sync_settings_path(database_path: Path) -> Path:
     return database_path.parent / ".tracker-sync" / "settings.json"
 
@@ -196,7 +211,8 @@ def _save_conflict(output_dir: Path, **copies: Path) -> None:
 
 
 def _sync(config: SearchConfig, path: Path, settings: SyncSettings, preference: str | None) -> None:
-    if not settings.enabled:
+    sync_config = config.sync or settings
+    if not sync_config.enabled:
         print("Tracker sync disabled. Running local export.")
         run()
         return
@@ -207,17 +223,15 @@ def _sync(config: SearchConfig, path: Path, settings: SyncSettings, preference: 
         workspace = Path(temp)
         incoming = workspace / f"drive{primary.suffix}"
         try:
-            remote = Remote.connect(settings.target, primary.suffix)
-            remote.fetch(incoming)
-            _check_tracker(incoming)
+            remote = _check_destination(sync_config.target, incoming)
         except (OSError, SyncError) as exc:
-            print(f"Tracker sync skipped. {exc}")
+            print(f"Tracker sync skipped. {exc} Running local export.", file=sys.stderr, flush=True)
             run()
             return
 
         local = _local_tracker(config)
         local_hash, drive_hash = _digest(local), _digest(incoming)
-        checkpoint = settings.last_synced_hash
+        checkpoint = settings.checkpoint_for(remote.target)
         diverged = (drive_hash is None and checkpoint is not None) or (
             local_hash is not None
             and drive_hash is not None
@@ -260,6 +274,7 @@ def _sync(config: SearchConfig, path: Path, settings: SyncSettings, preference: 
             return
 
         settings.last_synced_hash = _digest(upload)
+        settings.last_synced_target = remote.target
         _save_settings(path, settings)
         print("Tracker published successfully.")
 
@@ -269,25 +284,28 @@ def main(argv: list[str] | None = None) -> None:
         prog="job-scrapper sync", description="Run the scraper and sync your private tracker."
     )
     action = parser.add_mutually_exclusive_group()
-    action.add_argument("--status", action="store_true", help="Show the private sync setting and rclone availability.")
+    action.add_argument("--status", action="store_true", help="Show sync status and test remote access.")
     action.add_argument(
-        "--enable", nargs="?", const="", metavar="REMOTE:TRACKER", help="Check and enable a destination."
+        "--enable", nargs="?", const="", metavar="REMOTE:TRACKER", help="Check and enable a destination outside YAML."
     )
-    action.add_argument("--disable", action="store_true", help="Disable tracker sync.")
+    action.add_argument("--disable", action="store_true", help="Disable tracker sync outside YAML.")
     parser.add_argument("--prefer", choices=("local", "drive"), help="Choose the seed if both trackers have changed.")
     args = parser.parse_args(argv)
     if args.prefer and (args.status or args.enable is not None or args.disable):
         parser.error("--prefer applies to a sync run.")
 
-    config = SearchConfig()
-    suffix = f".{config.export.formats[0]}"
-    path = sync_settings_path(config.database_path)
     try:
+        config = SearchConfig()
+        suffix = f".{config.export.formats[0]}"
+        path = sync_settings_path(config.database_path)
+        if config.sync is not None and (args.enable is not None or args.disable):
+            raise SyncError("Edit sync.enabled and sync.target in your YAML to change tracker sync.")
         if args.status:
-            settings = load_sync_settings(path)
-            if settings.enabled:
-                Remote.connect(settings.target, suffix)
-                print("Tracker sync enabled. The rclone remote is configured.")
+            sync_config = config.sync or load_sync_settings(path)
+            if sync_config.enabled:
+                with TemporaryDirectory() as temp:
+                    _check_destination(sync_config.target, Path(temp) / f"drive{suffix}")
+                print("Tracker sync enabled. Remote read and folder write checks passed.")
             else:
                 print("Tracker sync disabled.")
             return
@@ -295,15 +313,18 @@ def main(argv: list[str] | None = None) -> None:
         with _sync_lock(path.parent / "lock"):
             settings = load_sync_settings(path)
             if args.enable is not None:
-                remote = Remote.connect(args.enable or settings.target, suffix)
                 with TemporaryDirectory() as temp:
-                    workspace = Path(temp)
-                    incoming = workspace / f"drive{suffix}"
-                    remote.fetch(incoming)
-                    _check_tracker(incoming)
-                    remote.check_write(workspace)
-                checkpoint = settings.last_synced_hash if settings.target == remote.target else None
-                _save_settings(path, SyncSettings(target=remote.target, enabled=True, last_synced_hash=checkpoint))
+                    remote = _check_destination(args.enable or settings.target, Path(temp) / f"drive{suffix}")
+                checkpoint = settings.checkpoint_for(remote.target)
+                _save_settings(
+                    path,
+                    SyncSettings(
+                        target=remote.target,
+                        enabled=True,
+                        last_synced_hash=checkpoint,
+                        last_synced_target=remote.target,
+                    ),
+                )
                 print("Tracker sync enabled. Remote read and folder write checks passed.")
             elif args.disable:
                 settings.enabled = False

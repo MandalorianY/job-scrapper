@@ -236,16 +236,18 @@ def test_status_previews_search_configuration_without_running(monkeypatch: pytes
 
 
 @pytest.mark.parametrize(
-    ("settings_json", "indicator"),
+    ("settings_json", "yaml_enabled", "indicator"),
     [
-        (None, "✕ Disabled"),
-        ('{"enabled": false}', "✕ Disabled"),
-        ('{"enabled": true, "target": "private-remote:jobs.xlsx"}', "✓ Enabled"),
-        ("invalid json", "⚠ Unavailable"),
+        (None, None, "✕ Disabled"),
+        ('{"enabled": false}', None, "✕ Disabled"),
+        ('{"enabled": true, "target": "private-remote:jobs.xlsx"}', None, "✓ Enabled"),
+        ("invalid json", None, "⚠ Unavailable"),
+        ('{"enabled": false}', True, "✓ Enabled"),
+        ('{"enabled": true, "target": "private-remote:jobs.xlsx"}', False, "✕ Disabled"),
     ],
 )
 def test_status_shows_tracker_sync_for_selected_database(
-    tmp_path: Path, settings_json: str | None, indicator: str
+    tmp_path: Path, settings_json: str | None, yaml_enabled: bool | None, indicator: str
 ) -> None:
     database = tmp_path / "jobs.duckdb"
     settings_path = tmp_path / ".tracker-sync" / "settings.json"
@@ -253,7 +255,14 @@ def test_status_shows_tracker_sync_for_selected_database(
         settings_path.parent.mkdir()
         settings_path.write_text(settings_json, encoding="utf-8")
 
-    result = CliRunner().invoke(cli.app, ["--status", "--export-only", "--db", str(database)])
+    args = ["--status", "--export-only", "--db", str(database)]
+    if yaml_enabled is not None:
+        profile = tmp_path / "profile.yaml"
+        profile.write_text(
+            f'sync:\n  enabled: {str(yaml_enabled).lower()}\n  target: "private-remote:jobs.xlsx"\n', encoding="utf-8"
+        )
+        args.extend(["--profile", str(profile)])
+    result = CliRunner().invoke(cli.app, args)
 
     assert result.exit_code == 0, result.output
     assert f"Tracker sync  {indicator}" in result.stdout
