@@ -39,7 +39,7 @@ def row_to_offer(row: Mapping[str, object], site: str, query: str, search_locati
 def offer_is_usable(offer: JobOffer, row: Mapping[str, object], config: SearchConfig) -> bool:
     extra_contract_labels = (row.get("listing_type"), row.get("job_level"))
     return offer_matches_search(offer, config) and not any(
-        has_excluded_contract_signal(None, label, None, config.exclude_terms) for label in extra_contract_labels
+        has_excluded_contract_signal(None, label, None) for label in extra_contract_labels
     )
 
 

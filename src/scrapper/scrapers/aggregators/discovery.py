@@ -129,9 +129,9 @@ async def _direct_site_search_results(
                 continue
             title = first_text(anchor, (".poste-listing-monopage",)) if source == "isarta" else None
             title = title or clean_text(anchor.get_text(" "))
-            if not title or not config.title_is_allowed(title):
+            if not title or not config.filters.title.allows(title):
                 continue
-            if has_excluded_contract_signal(title, None, None, config.exclude_terms):
+            if has_excluded_contract_signal(title, None, None):
                 continue
             urls.append(url)
             if source == "isarta":
@@ -151,7 +151,9 @@ def _emploi_collectivites_sitemap_results(
     config: SearchConfig,
 ) -> list[str]:
     urls: list[str] = []
-    include_terms = tuple(term.lower().replace(" ", "-") for term in config.include_terms)
+    include_terms = tuple(
+        term.lower().replace(" ", "-") for term in config.filters.title.include if isinstance(term, str)
+    )
     query_terms = tuple(part.lower() for part in query.split() if len(part) > 3)
     regional_terms = tuple(term.lower().replace(" ", "-") for term in config.aggregators.location_terms)
     for url in sitemap_urls:
@@ -191,9 +193,7 @@ async def _detail_links(
         if config and spec.source in {"france_travail", "emploi_territorial", "meteojob", "makesense"}:
             title = first_text(anchor, ("h3.job__title",)) if is_makesense else None
             title = title or clean_text(anchor.get_text(" "))
-            if not config.title_is_allowed(title) or has_excluded_contract_signal(
-                title, None, None, config.exclude_terms
-            ):
+            if not config.filters.title.allows(title) or has_excluded_contract_signal(title, None, None):
                 continue
         url = urljoin(spec.base_url, href.split("#", 1)[0])
         if listing_dates is not None and spec.source == "france_travail":

@@ -1,12 +1,20 @@
 from __future__ import annotations
 
 import os
-import re
 from collections.abc import Iterator, Mapping
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, TypedDict
+from typing import Literal, TypedDict
 
-from pydantic import BaseModel, Field, SecretStr, ValidationInfo, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    Field,
+    PrivateAttr,
+    SecretStr,
+    ValidationError,
+    ValidationInfo,
+    field_validator,
+    model_validator,
+)
 from pydantic_settings import (
     BaseSettings,
     InitSettingsSource,
@@ -15,13 +23,14 @@ from pydantic_settings import (
     YamlConfigSettingsSource,
 )
 
+from scrapper.catalog_updates import resolve_company_catalog
 from scrapper.config.aggregator_specs import (
     DirectAggregatorConfig,
     SiteSearchConfig,
     default_direct_specs,
     default_site_search_sources,
 )
-from scrapper.text import matches_job_title, normalize_text
+from scrapper.filters import ListingFilters
 
 PACKAGE_CONFIG_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = PACKAGE_CONFIG_DIR.parents[2] if PACKAGE_CONFIG_DIR.parents[1].name == "src" else None
@@ -255,10 +264,6 @@ class DedupeFieldsConfig(BaseModel):
 
 
 class Settings(BaseSettings):
-    if TYPE_CHECKING:
-        # Pydantic also loads required fields from YAML and the environment.
-        def __init__(self, **values: object) -> None: ...
-
     app_env: str = "dev"
     queries: tuple[str, ...]
     location_label: str = ""
@@ -266,11 +271,9 @@ class Settings(BaseSettings):
     country: str
     distance_km: int
     location_scope: LocationScopeConfig = Field(default_factory=LocationScopeConfig)
-    exclude_terms: tuple[str, ...]
-    include_terms: tuple[str, ...]
-    excluded_title_patterns: tuple[str, ...] = ()
+    filters: ListingFilters = Field(default_factory=ListingFilters)
+    company_catalog_path: Path | None = None
     enabled_sources: dict[str, bool] = Field(default_factory=dict)
-    excluded_companies_by_source: dict[str, tuple[str, ...]] = Field(default_factory=dict)
     dedupe_fields: DedupeFieldsConfig = Field(default_factory=DedupeFieldsConfig)
     dedupe_source_priority: dict[str, int] = Field(default_factory=dict)
     dedupe_default_source_priority: int = 100
@@ -294,6 +297,7 @@ class Settings(BaseSettings):
     jobspy: JobspyConfig
     welcome_to_the_jungle: WelcomeToTheJungleConfig = Field(default_factory=WelcomeToTheJungleConfig)
     aggregators: AggregatorConfig
+    _company_catalog_revision: str | None = PrivateAttr(None)
 
     model_config = SettingsConfigDict(
         env_nested_delimiter="__",
@@ -304,6 +308,33 @@ class Settings(BaseSettings):
         extra="ignore",
         case_sensitive=False,
     )
+
+    def __init__(self, *, _refresh_company_catalog: bool = False, **values: object) -> None:
+        super().__init__(**values)  # pyright: ignore[reportArgumentType]
+        if not (types := self.filters.excluded_company_types()):
+            return
+        try:
+            catalog = resolve_company_catalog(
+                self.database_path, self.company_catalog_path, refresh=_refresh_company_catalog
+            )
+            self.filters = self.filters.with_company_catalog(catalog)
+        except ValueError as exc:
+            raise ValidationError.from_exception_data(
+                type(self).__name__,
+                [
+                    {
+                        "type": "value_error",
+                        "loc": ("filters", "company", "exclude", "types"),
+                        "input": sorted(types),
+                        "ctx": {"error": exc},
+                    }
+                ],
+            ) from exc
+        self._company_catalog_revision = catalog.revision
+
+    @property
+    def company_catalog_revision(self) -> str | None:
+        return self._company_catalog_revision
 
     @classmethod
     def settings_customise_sources(
@@ -377,6 +408,8 @@ class Settings(BaseSettings):
     def set_search_defaults(self) -> Settings:
         if not self.location_label:
             self.location_label = " / ".join(self.locations)
+        if self.company_catalog_path is not None:
+            self.company_catalog_path = (PROJECT_ROOT or Path.cwd()) / self.company_catalog_path.expanduser()
         if "radius_km" not in self.location_scope.model_fields_set:
             self.location_scope = self.location_scope.model_copy(update={"radius_km": self.distance_km})
         return self
@@ -384,23 +417,18 @@ class Settings(BaseSettings):
     def is_source_enabled(self, source: str) -> bool:
         return self.enabled_sources.get(source, True)
 
-    @field_validator("excluded_title_patterns")
+    @model_validator(mode="before")
     @classmethod
-    def _valid_title_patterns(cls, patterns: tuple[str, ...]) -> tuple[str, ...]:
-        for pattern in patterns:
-            try:
-                re.compile(pattern)
-            except re.error as exc:
-                raise ValueError(f"Invalid excluded title pattern: {pattern}") from exc
-        return patterns
-
-    def title_is_allowed(self, title: object | None) -> bool:
-        return matches_job_title(title, self.include_terms, self.excluded_title_patterns)
-
-    def is_company_excluded(self, source: str, company: object | None) -> bool:
-        normalized_company = normalize_text(company)
-        if not normalized_company:
-            return False
-        excluded = self.excluded_companies_by_source.get(source, ())
-        excluded += self.excluded_companies_by_source.get("*", ())
-        return normalized_company in {normalize_text(value) for value in excluded}
+    def _reject_old_filter_keys(cls, values: object) -> object:
+        legacy = {
+            "include_terms",
+            "exclude_terms",
+            "excluded_title_terms",
+            "excluded_title_patterns",
+            "excluded_description_terms",
+            "excluded_description_patterns",
+            "excluded_companies_by_source",
+        }
+        if isinstance(values, Mapping) and (obsolete := legacy.intersection(values)):
+            raise ValueError(f"Move {', '.join(sorted(obsolete))} under filters. See docs/configuration.md.")
+        return values

@@ -52,7 +52,7 @@ def test_generic_date_inference_keeps_only_the_date_phrase() -> None:
 
 
 def test_meteojob_placeholder_page_is_rejected() -> None:
-    config = SearchConfig(include_terms=("communication",), location_scope={"enabled": False})
+    config = SearchConfig(filters={"title": {"include": ("communication",)}}, location_scope={"enabled": False})
     offer = JobOffer(
         source="meteojob",
         source_url="https://www.meteojob.com/jobs/55275233",
@@ -71,7 +71,7 @@ def test_meteojob_placeholder_page_is_rejected() -> None:
 
 
 def test_specific_undated_meteojob_offer_is_not_rejected_as_placeholder() -> None:
-    config = SearchConfig(include_terms=("communication",), location_scope={"enabled": False})
+    config = SearchConfig(filters={"title": {"include": ("communication",)}}, location_scope={"enabled": False})
     offer = JobOffer(
         source="meteojob",
         source_url="https://www.meteojob.com/jobs/example",
@@ -122,8 +122,7 @@ async def test_emploi_territorial_detail_parser_uses_source_specific_title(
 ) -> None:
     url, html = emploi_territorial_page
     config = SearchConfig(
-        include_terms=("communication",),
-        exclude_terms=("stage", "alternance", "apprentissage"),
+        filters={"title": {"include": ("communication",)}},
         location_scope={"enabled": False},
     )
     async with mock_html_client(html) as client:
@@ -191,7 +190,7 @@ def test_jobijoba_detail_parser_resolves_redirect_target(
                 detail_url,
                 "jobijoba",
                 "communication",
-                SearchConfig(include_terms=("communication",), location_scope={"enabled": False}),
+                SearchConfig(filters={"title": {"include": ("communication",)}}, location_scope={"enabled": False}),
                 cutoff=datetime(2001, 1, 1, tzinfo=UTC),
             )
 
@@ -226,8 +225,7 @@ async def test_jobijoba_skips_redirect_for_filtered_offer(
     search_url = "https://www.jobijoba.com/fr/emploi/communication"
     config = SearchConfig(
         queries=("communication",),
-        include_terms=("communication",),
-        exclude_terms=("stage",),
+        filters={"title": {"include": ("communication",)}},
         location_scope={"enabled": False},
     )
     spec = next(spec for spec in config.aggregators.direct_specs if spec.source == "jobijoba").model_copy(

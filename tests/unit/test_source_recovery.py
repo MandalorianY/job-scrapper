@@ -102,7 +102,7 @@ def test_isarta_uses_canonical_detail_and_preserves_original_link(toulouse_scope
             ),
         )
 
-    config = SearchConfig(location_scope=toulouse_scope, include_terms=("communication",))
+    config = SearchConfig(location_scope=toulouse_scope, filters={"title": {"include": ("communication",)}})
 
     async def run() -> JobOffer | None:
         async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
@@ -282,7 +282,7 @@ def test_direct_budget_allows_later_titles_and_regions(monkeypatch: pytest.Monke
 def test_makesense_prioritizes_matching_local_cards_before_consuming_detail_budget(
     toulouse_scope: LocationScopeConfig,
 ) -> None:
-    config = SearchConfig(location_scope=toulouse_scope, include_terms=("communication",))
+    config = SearchConfig(location_scope=toulouse_scope, filters={"title": {"include": ("communication",)}})
     spec = next(s for s in config.aggregators.direct_specs if s.source == "makesense").model_copy(
         update={"max_links": 1}
     )
@@ -332,7 +332,9 @@ def test_optioncarriere_verification_page_is_a_failure_not_empty_search() -> Non
 
 def test_isarta_honors_configured_regional_discovery_page(toulouse_scope: LocationScopeConfig) -> None:
     config = SearchConfig(
-        location_scope=toulouse_scope, include_terms=("communication",), aggregators={"max_detail_pages": 1}
+        location_scope=toulouse_scope,
+        filters={"title": {"include": ("communication",)}},
+        aggregators={"max_detail_pages": 1},
     )
     spec = next(s for s in config.aggregators.site_search_sources if s.source == "isarta").model_copy(
         update={

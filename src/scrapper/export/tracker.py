@@ -12,9 +12,10 @@ from urllib.parse import urlparse
 import pandas as pd
 
 from scrapper.dates import parse_posted_date
-from scrapper.export.salary import _review_note, _salary_bounds, _salary_label
+from scrapper.filters import ListingFilters
+from scrapper.salary import _review_note, _salary_label, salary_bounds
 from scrapper.source_rules import get_source_rules
-from scrapper.text import clean_text, has_excluded_contract_signal, listing_url_key, matches_job_title
+from scrapper.text import clean_text, has_excluded_contract_signal, listing_url_key
 
 HYPERLINK_RE = re.compile(r'^=HYPERLINK\("(?P<url>[^"]+)"(?:,"[^"]*")?\)$', re.IGNORECASE)
 LINK_COLUMNS = ("Lien", "Postuler", "Offre source")
@@ -100,9 +101,7 @@ def _merge_existing_tracker_rows(
     *,
     location_allowed: Callable[[object | None], bool] | None = None,
     location_review: Callable[[object | None], bool] | None = None,
-    include_terms: tuple[str, ...] = (),
-    exclude_terms: tuple[str, ...] = (),
-    excluded_title_patterns: tuple[str, ...] = (),
+    filters: ListingFilters,
     excluded_urls: set[str] | None = None,
     current_link_aliases: dict[str, set[str]] | None = None,
 ) -> pd.DataFrame:
@@ -115,10 +114,8 @@ def _merge_existing_tracker_rows(
         previous.apply(
             _tracker_row_allowed,
             axis=1,
-            include_terms=include_terms,
-            exclude_terms=exclude_terms,
+            filters=filters,
             location_allowed=location_allowed,
-            excluded_title_patterns=excluded_title_patterns,
             excluded_urls=excluded_urls,
             known_current_keys=known_current_keys,
         )
@@ -175,6 +172,9 @@ def _canonical_link_aliases(frame: pd.DataFrame, direct_links: dict[str, bool]) 
             aliases[f"url:{key}"] = {f"url:{key}"} | {
                 f"url:{alias}" for link in "\n".join(links).splitlines() if (alias := listing_url_key(link))
             }
+            filtered_keys = row.get("status_alias_keys")
+            if isinstance(filtered_keys, tuple):
+                aliases[f"url:{key}"].update(f"url:{alias}" for alias in filtered_keys)
     return aliases
 
 
@@ -197,48 +197,40 @@ def _sort_tracker_for_export(frame: pd.DataFrame) -> pd.DataFrame:
 
 def _tracker_row_allowed(
     row: pd.Series,
-    include_terms: tuple[str, ...],
-    exclude_terms: tuple[str, ...],
+    *,
+    filters: ListingFilters,
     location_allowed: Callable[[object | None], bool] | None = None,
-    excluded_title_patterns: tuple[str, ...] = (),
     excluded_urls: set[str] | None = None,
-    known_current_keys: set[str] | None = None,
+    known_current_keys: set[str],
 ) -> bool:
-    title = row.get("Intitulé")
     if excluded_urls and any(
         listing_url_key(_extract_hyperlink_url(row.get(column))) in excluded_urls for column in LINK_COLUMNS
     ):
         return False
-    if exclude_terms and has_excluded_contract_signal(title, row.get("Contrat"), row.get("Description"), exclude_terms):
+    if has_excluded_contract_signal(row.get("Intitulé"), row.get("Contrat"), row.get("Description")):
         return False
-    if include_terms and not matches_job_title(title, include_terms, excluded_title_patterns):
-        return False
-    return (
-        location_allowed is None
-        or (known_current_keys is not None and _tracker_row_key(row) in known_current_keys)
-        or location_allowed(row.get("Lieu"))
-    )
+    if _tracker_row_key(row) in known_current_keys:
+        return True
+    values = {
+        "title": row.get("Intitulé"),
+        "description": row.get("Description"),
+        "employment_type": row.get("Contrat"),
+        "company": row.get("Entreprise"),
+        "source": row.get("Source principale") or row.get("Sources"),
+        "is_remote": row.get("Télétravail"),
+        "date_posted": row.get("Publié le"),
+        "min_amount": row.get("Salaire min (€ annuel)"),
+        "max_amount": row.get("Salaire max (€ annuel)"),
+        "interval": "year",
+        "currency": "EUR",
+        "salary": row.get("Salaire"),
+    }
+    return filters.allows(values.get) and (location_allowed is None or location_allowed(row.get("Lieu")))
 
 
 def _offer_location(row: pd.Series) -> str | None:
     source = row.get("best_source") or row.get("source")
     return get_source_rules(source).normalize_location(row.get("location"))
-
-
-def _offer_row_allowed(
-    row: pd.Series,
-    include_terms: tuple[str, ...],
-    exclude_terms: tuple[str, ...],
-    excluded_title_patterns: tuple[str, ...],
-    location_allowed: Callable[[object | None], bool] | None,
-) -> bool:
-    if exclude_terms and has_excluded_contract_signal(
-        row.get("title"), row.get("employment_type"), row.get("description"), exclude_terms
-    ):
-        return False
-    if include_terms and not matches_job_title(row.get("title"), include_terms, excluded_title_patterns):
-        return False
-    return location_allowed is None or location_allowed(row.get("location"))
 
 
 def _normalize_previous_tracker_row(
@@ -356,7 +348,7 @@ def _localized_job_tracker(
     repair_fields_by_source = repair_fields_by_source or {}
     direct_links_enabled_by_source = direct_links_enabled_by_source or {}
     for _, row in frame.iterrows():
-        salary_min, salary_max = _salary_bounds(row)
+        salary_min, salary_max = salary_bounds(row.get)
         best_source = str(row.get("best_source") or "").strip()
         should_repair = repair_fields_by_source.get(best_source, repair_fields_enabled_by_default)
         source_rules = get_source_rules(best_source)

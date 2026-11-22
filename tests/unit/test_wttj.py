@@ -238,7 +238,7 @@ def test_wttj_keeps_recent_hits_after_old_relevance_results(
 
     config = SearchConfig(
         queries=("communication",),
-        include_terms=("communication",),
+        filters={"title": {"include": ("communication",)}},
         locations=("Toulouse, France",),
         custom_max_pages=3,
         location_scope={"enabled": False},
@@ -284,7 +284,7 @@ def test_wttj_refreshes_duplicate_listing_once_per_run(
 
     config = SearchConfig(
         queries=("communication", "chargé de communication"),
-        include_terms=("communication",),
+        filters={"title": {"include": ("communication",)}},
         custom_max_pages=2,
         http_request_delay_secs=0,
         refresh_known_details=False,

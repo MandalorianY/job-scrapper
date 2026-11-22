@@ -6,7 +6,7 @@ import ast
 import json
 import math
 import re
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -26,27 +26,27 @@ TEXT_SALARY_RE = re.compile(
 PAY_LABEL_RE = re.compile(r"\b(?:salaires?|rémunération|fixe|salary)\b", re.IGNORECASE)
 
 
-def _salary_bounds(row: pd.Series) -> tuple[int | None, int | None]:
-    minimum = _number(row.get("min_amount"))
-    maximum = _number(row.get("max_amount"))
+def salary_bounds(get: Callable[[str], object]) -> tuple[int | None, int | None]:
+    minimum = _number(get("min_amount"))
+    maximum = _number(get("max_amount"))
     if minimum or maximum:
-        minimum, maximum = _annual_salary(minimum, maximum, row.get("interval"), row.get("currency"))
+        minimum, maximum = _annual_salary(minimum, maximum, get("interval"), get("currency"))
         return _round_salary(minimum), _round_salary(maximum)
 
-    salary_payload = _parse_salary_payload(row.get("salary"))
+    salary_payload = _parse_salary_payload(get("salary"))
     if salary_payload:
         minimum, maximum = _bounds_from_monetary_amount(salary_payload)
         if minimum or maximum:
             return _round_salary(minimum), _round_salary(maximum)
 
-    raw_payload = _load_json(row.get("raw_json"))
+    raw_payload = _load_json(get("raw_json"))
     for payload in _salary_payloads_from_raw(raw_payload):
         minimum, maximum = _bounds_from_monetary_amount(payload)
         if minimum or maximum:
             return _round_salary(minimum), _round_salary(maximum)
     amounts = set()
     for field in ("salary", "description"):
-        text = row.get(field)
+        text = get(field)
         if not isinstance(text, str):
             continue
         for match in TEXT_SALARY_RE.finditer(text):
@@ -78,8 +78,10 @@ def _bounds_from_monetary_amount(payload: dict[str, object]) -> tuple[float | No
 def _annual_salary(
     minimum: float | None, maximum: float | None, unit: object, currency: object
 ) -> tuple[float | None, float | None]:
-    unit = str(unit or "").strip().lower()
-    currency = str(currency or "").strip().upper()
+    unit = str(unit).strip().lower()
+    currency = str(currency).strip().upper()
+    if currency in {"NONE", "NAN", "<NA>"}:
+        currency = ""
     factors = {"month": 12, "monthly": 12, "year": 1, "yearly": 1, "annual": 1, "annually": 1}
     if unit not in factors or currency not in {"", "EUR", "€"}:
         return None, None
@@ -141,7 +143,7 @@ def _salary_payloads_from_raw(payload: object) -> Iterator[dict[str, object]]:
 def _parse_salary_payload(value: object) -> dict[str, object] | None:
     if isinstance(value, dict):
         return value
-    text = str(value or "").strip()
+    text = str(value).strip() if value is not None else ""
     if not text or text.lower() in {"nan", "none"}:
         return None
     if "MonetaryAmount" in text:
@@ -156,7 +158,7 @@ def _parse_salary_payload(value: object) -> dict[str, object] | None:
 def _load_json(value: object) -> dict[str, object] | list[object] | None:
     if isinstance(value, (dict, list)):
         return value
-    text = str(value or "").strip()
+    text = str(value).strip() if value is not None else ""
     if not text:
         return None
     try:

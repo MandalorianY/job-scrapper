@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import yaml
 from rich.console import Console
 from rich.table import Table
 from rich.text import Text
@@ -44,11 +45,8 @@ def print_search_status(config: SearchConfig, setting_sources: dict[str, str], p
     direct_regions = ", ".join(config.aggregators.direct_locations)
     if not direct_regions and config.country.casefold() == "france" and config.search_locations:
         direct_regions = "Derived from search locations"
-    company_exclusions = "\n".join(
-        f"{source}: {', '.join(companies)}"
-        for source, companies in config.excluded_companies_by_source.items()
-        if companies
-    )
+    rules = config.filters.model_dump(mode="json", exclude_defaults=True)
+    filter_text = yaml.safe_dump(rules, allow_unicode=True, sort_keys=False).strip() if rules else ""
     search_limits = (
         f"{config.results_wanted_per_query} results per query, {config.custom_max_pages} custom list pages, "
         f"{config.aggregators.max_detail_pages} aggregator detail pages"
@@ -81,12 +79,7 @@ def print_search_status(config: SearchConfig, setting_sources: dict[str, str], p
         ),
         (
             "Filters",
-            (
-                ("Include terms", ", ".join(config.include_terms)),
-                ("Exclude terms", ", ".join(config.exclude_terms)),
-                ("Excluded companies", company_exclusions),
-                ("Excluded titles", "\n".join(config.excluded_title_patterns)),
-            ),
+            (("Listing filters", filter_text),),
         ),
     )
     width = min(console.width, 96)

@@ -82,9 +82,7 @@ class TolerantLinkedIn(JobSpyLinkedIn):
                 "stage": JobType.INTERNSHIP,
             }
             label = (string_or_none(value) or "").casefold()
-            if has_excluded_contract_signal(
-                None, label, None, ("stage", "alternance", "apprentissage", "intern", "internship", "apprenticeship")
-            ):
+            if has_excluded_contract_signal(None, label, None):
                 job_type = JobType.INTERNSHIP
             else:
                 job_type = localized.get(label) or get_enum_from_job_type(label.replace("-", "").replace(" ", ""))

@@ -20,7 +20,10 @@ def smoke(command: list[str], workspace: Path) -> None:
     example = "Example coordinator"
     profile = workspace / "profil été.yaml"
     profile.write_text(
-        "queries: [example]\ninclude_terms: [example]\nlocation_scope: {enabled: false}\n"
+        "queries: [example]\n"
+        "filters:\n  title: {include: [example]}\n"
+        "  company: {exclude: {types: [esn, recruitment_agency, temporary_staffing]}}\n"
+        "location_scope: {enabled: false}\n"
         'export: {excel_columns: ["Intitulé", "À vérifier"]}\n'
         "paths:\n  database_path: custom data/jobs.duckdb\n  log_file: custom data/run.jsonl\n"
         "  export_dir: custom exports\n",
@@ -40,6 +43,15 @@ def smoke(command: list[str], workspace: Path) -> None:
                 employment_type="CDI",
                 description="Manage a full-time example program for a local team.",
                 raw={"json_ld": {"validThrough": "2000-01-01T00:00:00+01:00"}},
+            )
+        )
+        store.upsert_offer(
+            JobOffer(
+                source="example",
+                source_url="https://example.test/jobs/2",
+                title=example,
+                company="Capgemini",
+                employment_type="CDI",
             )
         )
     finally:
@@ -77,7 +89,7 @@ def smoke(command: list[str], workspace: Path) -> None:
     exports = workspace / "custom exports"
     workbook = load_workbook(exports / "jobs.xlsx")
     try:
-        assert "Données brutes" in workbook.sheetnames
+        assert workbook["Données brutes"].max_row == 3
         sheet = workbook["Offres"]
         assert sheet.max_row == 2 and "TableOffres" in sheet.tables
         assert "Date limite dépassée" in sheet["B2"].value

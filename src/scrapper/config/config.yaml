@@ -19,44 +19,12 @@ location_scope:
   include_unrecognized: true
 
 # =============================================================================
-# 2. Role Filtering
+# 2. Listing Filters
 # =============================================================================
 
-include_terms:
-  - example
-  - sample
-  - demo
-  - placeholder
-  - role
-  - specialist
-  - coordinator
-  - manager
-  - lead
-  - analyst
-  - operator
-
-exclude_terms:
-  - stage
-  - stagiaire
-  - intern
-  - internship
-  - apprenticeship
-  - apprentice
-  - alternance
-  - alternant
-  - alternante
-  - apprentissage
-  - apprentisage
-  - apprenti
-  - apprentie
-  - professionnalisation
-  - professionalisation
-  - professionnalization
-  - contrat pro
-  - contrat professionnel
-  - contrat de professionnalisation
-  - bénévole
-  - volunteer
+filters:
+  title:
+    include: [example, sample, demo, placeholder, role, specialist, coordinator, manager, lead, analyst, operator]
 
 # =============================================================================
 # 3. Scrape Limits And Incremental Window

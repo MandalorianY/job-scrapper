@@ -1,13 +1,17 @@
 [project]
 name = "scrapper"
 version = "0.1.1"
-description = "A Python job scraper for job seekers that deduplicates listings across boards and exports a local Excel application tracker."
+description = "Open-source Python scraper for French job boards including France Travail, HelloWork, and Welcome to the Jungle. Exports listings to Excel and CSV."
 readme = "README.md"
 requires-python = ">=3.13"
 license = "MIT"
 keywords = [
     "job-scraper",
     "job-search",
+    "french-job-boards",
+    "france-travail",
+    "hellowork",
+    "offres-emploi",
     "application-tracker",
     "excel",
     "duckdb",

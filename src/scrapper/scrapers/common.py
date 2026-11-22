@@ -35,9 +35,12 @@ def offer_matches_search(
 ) -> bool:
     if not offer.source_url or (require_details and not (offer.description or offer.employment_type)):
         return False
-    if not config.title_is_allowed(offer.title) or config.is_company_excluded(offer.source, offer.company):
+    if has_excluded_contract_signal(offer.title, offer.employment_type, offer.description):
         return False
-    if has_excluded_contract_signal(offer.title, offer.employment_type, offer.description, config.exclude_terms):
+    if require_details:
+        if not config.filters.allows(lambda field: offer.raw if field == "raw_json" else getattr(offer, field, None)):
+            return False
+    elif not config.filters.title.allows(offer.title):
         return False
     if not offer.location and allow_description_location:
         return mentions_location_in_scope(offer.description, config.location_scope)

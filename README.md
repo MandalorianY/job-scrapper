@@ -1,6 +1,30 @@
-# Job Scrapper
+# Job Scraper for France | Automated Job Search & Excel Application Tracker
 
-A job scraper for France that deduplicates listings, filters out student contracts, and preserves application statuses across Excel exports.
+Open-source Python tool to automate job searches in France and track applications in Excel.
+
+Search job listings across France Travail, Indeed, LinkedIn, HelloWork, Welcome to the Jungle, Glassdoor, and other supported French job boards from one configurable workflow.
+
+Find relevant jobs by job title, city, and search radius. Choose your sources, filter unwanted keywords and contract types (including internships and apprenticeships, full-time and temporary contracts), and deduplicate listings across job boards.
+Optionally exclude IT consulting firms (ESNs), recruitment agencies, or specific companies to prioritize direct-client opportunities. Contribute to the community-maintained employer catalog.
+
+
+Export results to Excel (.xlsx), CSV, or LibreOffice (.ods). Manage your applications in an editable spreadsheet and preserve your application statuses between searches, even when new job listings are added.
+
+Additional capabilities include scheduled job searches, multiple YAML search profiles and optional private cloud synchronization with rclone.
+
+**🇫🇷 En français**
+
+Outil Python open source pour automatiser vos recherches d'emploi en France et suivre vos candidatures dans Excel.
+
+Recherchez des offres d'emploi sur France Travail, Indeed, LinkedIn, HelloWork, Welcome to the Jungle, Glassdoor et d'autres sites d'emploi français à partir d'un seul outil configurable.
+
+Trouvez des offres pertinentes par métier, ville et rayon géographique. Choisissez vos sources, filtrez les mots-clés et les types de contrat qui ne vous intéressent pas (CDI, CDD, stage, alternance) et éliminez les offres en doublon entre les différentes plateformes.
+Excluez, si vous le souhaitez, les entreprises de services du numérique (ESN), les cabinets de recrutement ou certaines entreprises afin de privilégier les opportunités en direct avec les clients finaux. **Contribuez à l’annuaire d’employeurs maintenu par la communauté.**
+
+
+Exportez les résultats vers Excel (.xlsx), CSV ou LibreOffice (.ods). Gérez vos candidatures dans un tableau modifiable et conservez vos statuts de candidature entre chaque recherche, même lorsque de nouvelles offres sont ajoutées.
+
+Parmi les fonctionnalités supplémentaires, l'exécution planifiée des recherches d'emploi, la gestion de plusieurs profils de recherche au format YAML et la synchronisation facultative et privée avec un service cloud via rclone.
 
 ## Quick start
 
@@ -54,7 +78,7 @@ tracker sync. Set a source to `false` under `enabled_sources` in
 | Cadremploi | `cadremploi` | ✅ |
 | Optioncarriere | `optioncarriere` | ⛔ A verification challenge blocked discovery. |
 
-## Configuration
+## Configuration and Quick start
 
 Save your search settings in `config.local.yaml`.
 
@@ -62,11 +86,30 @@ Save your search settings in `config.local.yaml`.
 - **Homebrew and standalone builds** use `config.local.yaml` in the directory where you run the scraper.
 
 ```yaml
-queries: [data analyst]
-include_terms: [data analyst, analyste de données]
+# Send these searches to the job boards.
+queries: [data analyst, analyste de données, analyste BI]
+
+filters:
+  title:
+    include: [data analyst, analyste de données, analyste BI, BI analyst]
+    exclude: [chef-de-projet, {regex: '\b(?:senior|lead)\b'}]
+  description:
+    exclude: [déplacements fréquents, porte-à-porte]
+  contract:
+    exclude: [intérim]
+
 locations: ["Toulouse, France"]
 distance_km: 10
+
+# Default contract filters skip stage, alternance, and apprentissage.
 ```
+
+To exclude employers by type, list one or more of `esn`, `recruitment_agency`,
+and `temporary_staffing` under `filters.company.exclude.types`. Online scrapes
+with the filter enabled check for catalog updates at most once every 24 hours,
+so you can pick up new classifications between scraper releases. See the
+[employer-type filter guide](docs/configuration.md#excluding-employer-types)
+for the YAML example, offline behavior, and pinning a local catalog.
 
 Use `--profile` to select a separate YAML file. Preview the bundled Toulouse Graphiste profile with this command.
 
@@ -74,7 +117,7 @@ Use `--profile` to select a separate YAML file. Preview the bundled Toulouse Gra
 uv run --locked job-scrapper --profile src/scrapper/config/toulouse-graphiste.yaml --status
 ```
 
-See the [configuration reference](docs/configuration.md) for geography, aggregator overrides, and file paths.
+See the [configuration reference](docs/configuration.md) for filters, geography, aggregator overrides, and file paths.
 
 ## Results
 

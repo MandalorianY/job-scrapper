@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from scrapper.config import SearchConfig
+from scrapper.filters import ListingFilters
 from scrapper.models import JobOffer
 from scrapper.storage import JobStore
 
@@ -43,7 +44,7 @@ def test_replay_preserves_contract_exclusions_from_original_database(tmp_path: P
                     employment_type=contract,
                 )
             )
-        assert archive.purge_excluded_offers(SEARCH_CONFIG.exclude_terms) == 2
+        assert archive.purge_excluded_offers() == 2
         original_exclusions = archive.excluded_url_keys()
         assert len(original_exclusions) == 2
         assert archive.replay_observations(archive.path) == 0
@@ -83,7 +84,7 @@ def test_contract_evidence_excludes_sparse_copies_of_same_offer(tmp_path: Path) 
                 employment_type="CDI",
             )
         )
-        assert store.purge_excluded_offers(("stage",)) == 2
+        assert store.purge_excluded_offers() == 2
         assert store.raw_dataframe()["company"].tolist() == ["Other employer"]
         assert len(store.excluded_url_keys()) == 2
     finally:
@@ -113,7 +114,7 @@ def test_search_attempts_distinguish_empty_failed_and_unfinished(tmp_path: Path)
         store.close()
 
 
-def test_purge_filters_remove_student_contracts_and_non_matching_titles(tmp_path: Path) -> None:
+def test_contract_purge_and_title_filter_preserve_nonmatching_raw_listings(tmp_path: Path) -> None:
     store = JobStore(tmp_path / "jobs.duckdb")
     try:
         store.upsert_offer(
@@ -144,15 +145,15 @@ def test_purge_filters_remove_student_contracts_and_non_matching_titles(tmp_path
             )
         )
 
-        assert store.purge_excluded_offers(SEARCH_CONFIG.exclude_terms) == 1
-        assert store.purge_nonmatching_offers(SEARCH_CONFIG.include_terms) == 1
-        canonical = store.canonical_dataframe()
+        assert store.purge_excluded_offers() == 1
+        assert len(store.raw_dataframe()) == 2
+        canonical = store.canonical_dataframe(allows=lambda row: SEARCH_CONFIG.filters.allows(row.get))
         assert canonical["title"].to_list() == ["Example coordinator"]
     finally:
         store.close()
 
 
-def test_purge_excluded_companies_removes_source_specific_company(tmp_path: Path) -> None:
+def test_source_specific_company_filter_keeps_matching_duplicate(tmp_path: Path) -> None:
     store = JobStore(tmp_path / "jobs.duckdb")
     try:
         store.upsert_offer(
@@ -176,9 +177,12 @@ def test_purge_excluded_companies_removes_source_specific_company(tmp_path: Path
             )
         )
 
-        assert store.purge_excluded_companies({"linkedin": ("France Travail",)}) == 1
-
-        remaining = store.conn.execute("SELECT source FROM raw_offers").fetchall()
-        assert remaining == [("indeed",)]
+        filters = ListingFilters.model_validate(
+            {"by_source": {"linkedin": {"company": {"exclude": ["France Travail"]}}}}
+        )
+        canonical = store.canonical_dataframe(allows=lambda row: filters.allows(row.get))
+        assert canonical["best_source"].to_list() == ["indeed"]
+        assert canonical["sources"].to_list() == ["indeed"]
+        assert len(store.raw_dataframe()) == 2
     finally:
         store.close()

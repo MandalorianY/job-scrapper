@@ -3,7 +3,7 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
-from scrapper.export.salary import _review_note, _salary_bounds
+from scrapper.salary import _review_note, salary_bounds
 
 
 def test_salary_bounds_leave_untrusted_non_annual_units_empty() -> None:
@@ -25,7 +25,7 @@ def test_salary_bounds_leave_untrusted_non_annual_units_empty() -> None:
         }
     )
 
-    assert _salary_bounds(row) == (None, None)
+    assert salary_bounds(row.get) == (None, None)
 
 
 @pytest.mark.parametrize(
@@ -48,7 +48,7 @@ def test_audit_salary_units_and_unreliable_ranges(
     minimum: int | None, maximum: int | None, unit: str | None, currency: str, expected: tuple[int | None, int | None]
 ) -> None:
     assert (
-        _salary_bounds(
+        salary_bounds(
             pd.Series(
                 {
                     "min_amount": minimum,
@@ -56,7 +56,7 @@ def test_audit_salary_units_and_unreliable_ranges(
                     "interval": unit,
                     "currency": currency,
                 }
-            )
+            ).get
         )
         == expected
     )
@@ -70,13 +70,13 @@ def test_review_notes_distinguish_teaching_recruitment_from_mentoring() -> None:
 
 
 def test_export_flags_expiry_and_uses_only_unambiguous_text_salary() -> None:
-    assert _salary_bounds(pd.Series({"description": "Rémunération : entre 39 000€ et 41600€ par an"})) == (
+    assert salary_bounds(pd.Series({"description": "Rémunération : entre 39 000€ et 41600€ par an"}).get) == (
         39000,
         41600,
     )
-    assert _salary_bounds(pd.Series({"description": "Salaire : 2\u00a0000€ brut par mois"})) == (24000, 24000)
-    assert _salary_bounds(pd.Series({"description": "Budget publicitaire : 42 000€ par an"})) == (None, None)
-    assert _salary_bounds(pd.Series({"description": "Salaire : 50 000 USD par an"})) == (None, None)
+    assert salary_bounds(pd.Series({"description": "Salaire : 2\u00a0000€ brut par mois"}).get) == (24000, 24000)
+    assert salary_bounds(pd.Series({"description": "Budget publicitaire : 42 000€ par an"}).get) == (None, None)
+    assert salary_bounds(pd.Series({"description": "Salaire : 50 000 USD par an"}).get) == (None, None)
     assert "Date limite dépassée" in _review_note(
         pd.Series({"description": "Example description", "raw_json": {"json_ld": {"validThrough": "2020-04-04"}}})
     )

@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 from datetime import UTC, date, datetime
 
+import pytest
 from bs4 import BeautifulSoup
 
 from scrapper.config import SearchConfig
@@ -152,6 +153,32 @@ def test_aggregator_offer_usability_requires_title_contract_and_region(toulouse_
     assert aggregator_company_from_domain("https://www.emploi-collectivites.fr/offres/1") == "Emploi Collectivites"
 
 
+def test_offer_matches_search_excludes_company_types_and_name_rules() -> None:
+    config = SearchConfig(
+        filters={
+            "company": {
+                "exclude": {"types": ["esn", "recruitment_agency"], "names": [{"regex": r"^example contractor$"}]}
+            }
+        },
+        location_scope={"enabled": False},
+    )
+    offer = JobOffer(
+        source="example",
+        source_url="https://example.com/jobs/1",
+        title="Example coordinator",
+        company="CAPGEMINI S.A.S.U.",
+        employment_type="CDI",
+        description="Coordinate with Capgemini and other vendors.",
+    )
+
+    assert not offer_matches_search(offer, config)
+    assert not offer_matches_search(replace(offer, company="Michael Page"), config)
+    assert offer_matches_search(replace(offer, company="Adecco"), config)
+    assert not offer_matches_search(replace(offer, company="Example Contractor"), config)
+    assert offer_matches_search(replace(offer, company="Example employer"), config)
+    assert offer_matches_search(replace(offer, company=None), config)
+
+
 def test_shared_offer_validation_rejects_title_only_and_independent_business_ads(
     toulouse_scope: LocationScopeConfig,
 ) -> None:
@@ -172,3 +199,78 @@ def test_shared_offer_validation_rejects_title_only_and_independent_business_ads
         config,
         allow_description_location=True,
     )
+
+
+def test_shared_offer_validation_applies_title_and_description_filters(toulouse_scope: LocationScopeConfig) -> None:
+    config = SearchConfig(
+        location_scope=toulouse_scope,
+        filters={
+            "title": {"include": ["example"], "exclude": ["chef-de-projet", {"regex": r"\bsenior\b"}]},
+            "description": {
+                "include": ["déplacements", {"regex": r"\btravail\b"}],
+                "exclude": ["déplacements fréquents", {"regex": r"\bfin de semaine\b"}],
+            },
+            "contract": {"include": ["CDI"], "exclude": ["CDD"]},
+        },
+    )
+    listing = JobOffer(
+        source="example",
+        source_url="https://example.com/jobs/1",
+        title="Example coordinator",
+        location="Toulouse",
+        employment_type="CDI",
+        description="Déplacements occasionnels.",
+    )
+    assert offer_matches_search(listing, config)
+    assert not offer_matches_search(replace(listing, title="Example coordinator — Chef - de - projet"), config)
+    assert not offer_matches_search(replace(listing, title="Example coordinator sénior"), config)
+    assert not offer_matches_search(replace(listing, description="<p>DÉPLACEMENTS‑fréquents.</p>"), config)
+    assert not offer_matches_search(replace(listing, description="Travail en fin-de-semaine."), config)
+    assert not offer_matches_search(replace(listing, employment_type="CDD"), config)
+    partial = replace(listing, description=None, employment_type=None)
+    assert offer_matches_search(partial, config, require_details=False)
+    assert not offer_matches_search(partial, config)
+    assert not offer_matches_search(replace(listing, description=None), config)
+
+
+@pytest.mark.parametrize("remote", [True, False])
+def test_shared_offer_validation_filters_remote_salary_and_posted_date(
+    toulouse_scope: LocationScopeConfig, remote: bool
+) -> None:
+    config = SearchConfig(
+        location_scope=toulouse_scope,
+        filters={
+            "source": {"include": ["indeed"]},
+            "remote": remote,
+            "salary": {"min_annual_eur": 40000, "max_annual_eur": 60000},
+            "posted_after": "2026-01-01",
+            "posted_before": "2026-12-31",
+        },
+    )
+    listing = JobOffer(
+        source="indeed",
+        source_url="https://example.com/jobs/1",
+        title="Example coordinator",
+        location="Toulouse",
+        employment_type="CDI",
+        is_remote=remote,
+        date_posted="2026-01-01",
+        min_amount=3500,
+        max_amount=5000,
+        interval="monthly",
+        currency="EUR",
+    )
+    assert offer_matches_search(listing, config)
+    assert not offer_matches_search(replace(listing, source="linkedin"), config)
+    assert offer_matches_search(replace(listing, is_remote=None), config)
+    assert not offer_matches_search(replace(listing, is_remote=not remote), config)
+    assert offer_matches_search(replace(listing, min_amount=None), config)
+    assert offer_matches_search(replace(listing, max_amount=None), config)
+    assert offer_matches_search(replace(listing, min_amount=None, max_amount=None), config)
+    assert not offer_matches_search(replace(listing, min_amount=3000, max_amount=None), config)
+    assert not offer_matches_search(replace(listing, min_amount=None, max_amount=5500), config)
+    assert offer_matches_search(replace(listing, interval="hourly"), config)
+    assert not offer_matches_search(replace(listing, date_posted="2025-12-31"), config)
+    assert not offer_matches_search(replace(listing, date_posted="2027-01-01"), config)
+    assert offer_matches_search(replace(listing, date_posted=None), config)
+    assert offer_matches_search(replace(listing, date_posted="Date unavailable"), config)

@@ -14,20 +14,21 @@ queries:
   - motion designer
   - maquettiste PAO
 
-include_terms:
-  - graphiste
-  - infographiste
-  - designer graphique
-  - graphic designer
-  - motion designer
-  - motion design
-  - maquettiste PAO
-  - opérateur PAO
-  - opératrice PAO
-
-excluded_title_patterns:
-  - '\b(?:formateur\w*|enseignant\w*|professeur\w*)\b'
-  - '^(?:preparation|formation|titre professionnel)\b'
+filters:
+  title:
+    include:
+      - graphiste
+      - infographiste
+      - designer graphique
+      - graphic designer
+      - motion designer
+      - motion design
+      - maquettiste PAO
+      - opérateur PAO
+      - opératrice PAO
+    exclude:
+      - regex: '\b(?:formateur\w*|enseignant\w*|professeur\w*)\b'
+      - regex: '^(?:preparation|formation|titre professionnel)\b'
 
 paths:
   database_path: data/toulouse-graphiste/job_search.duckdb

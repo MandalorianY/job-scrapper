@@ -77,7 +77,7 @@ def test_isarta_discovers_absolute_job_query_links() -> None:
                 client,
                 "isarta",
                 "communication",
-                SearchConfig(include_terms=("communication",)),
+                SearchConfig(filters={"title": {"include": ("communication",)}}),
                 ("https://isarta.fr/cgi-bin/emplois/jobs?cat=occitanie&query={query}",),
             )
 
@@ -90,7 +90,7 @@ async def test_isarta_reuses_detail_with_each_search_watermark(tmp_path: Path) -
     config = SearchConfig(
         queries=("communication", "marketing"),
         locations=("Toulouse, France",),
-        include_terms=("communication",),
+        filters={"title": {"include": ("communication",)}},
         location_scope={"enabled": False},
         overlap_hours=24,
         default_hours_old=336,
@@ -168,7 +168,7 @@ def test_cadremploi_continues_to_working_location_after_http_error(monkeypatch: 
                 client,
                 "cadremploi",
                 "communication",
-                SearchConfig(include_terms=("communication",)),
+                SearchConfig(filters={"title": {"include": ("communication",)}}),
                 (
                     "https://www.cadremploi.fr/emploi/liste_offres?motscles={query}&ville=toulouse-31",
                     "https://www.cadremploi.fr/emploi/liste_offres?motscles={query}&ville=nantes-44",
@@ -292,7 +292,7 @@ async def test_rate_limited_details_keep_previous_search_watermark(
 ) -> None:
     source = "makesense"
     query = "communication"
-    config = SearchConfig(queries=(query,), include_terms=(query,))
+    config = SearchConfig(queries=(query,), filters={"title": {"include": (query,)}})
     spec = next(spec for spec in config.aggregators.direct_specs if spec.source == source)
     requested_details = 0
 
@@ -325,7 +325,7 @@ async def test_custom_source_stops_queued_details_and_keeps_completed_offers(tmp
     config = SearchConfig(
         queries=("communication", "marketing"),
         locations=("Toulouse, France", "Nantes, France"),
-        include_terms=("communication",),
+        filters={"title": {"include": ("communication",)}},
         location_scope={"enabled": False},
         aggregators={
             "site_search_sources": {

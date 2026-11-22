@@ -107,6 +107,7 @@ def run(
         skip_custom = True
         skip_jobspy = True
     config_sources = {} if show_config or status else None
+    live_search = replay_from is None and not (skip_jobspy and skip_custom)
     try:
         config = _config_from_cli(
             query,
@@ -118,6 +119,7 @@ def run(
             custom_pages,
             config_sources,
             profile,
+            refresh_company_catalog=live_search and config_sources is None,
         )
     except ValidationError as exc:
         errors = exc.errors(include_url=False, include_context=False, include_input=False)
@@ -129,7 +131,6 @@ def run(
         raise typer.BadParameter(f"Invalid YAML configuration{detail}.") from exc
     except OSError as exc:
         raise typer.BadParameter(f"Could not read configuration: {exc}") from exc
-    live_search = replay_from is None and not (skip_jobspy and skip_custom)
     if live_search and not config.search_locations and config_sources is None:
         raise typer.BadParameter("Set locations in your search config or pass --location.", param_hint="--location")
     if config_sources is not None:
@@ -181,6 +182,7 @@ def run(
         skip_custom=skip_custom,
         skip_jobspy=skip_jobspy,
         refresh_known_details=config.refresh_known_details,
+        company_catalog_revision=config.company_catalog_revision,
         log_file=str(configured_log_file) if configured_log_file else None,
     )
     store = None
@@ -243,15 +245,9 @@ def run(
             counts.update(custom_counts)
             _report_source_errors(custom_errors)
 
-        purged = store.purge_excluded_offers(config.exclude_terms)
+        purged = store.purge_excluded_offers()
         if purged:
             counts["excluded_removed"] = purged
-        purged_nonmatching = store.purge_nonmatching_offers(config.include_terms, config.excluded_title_patterns)
-        if purged_nonmatching:
-            counts["nonmatching_removed"] = purged_nonmatching
-        purged_companies = store.purge_excluded_companies(config.excluded_companies_by_source)
-        if purged_companies:
-            counts["excluded_companies_removed"] = purged_companies
         outputs, total = export_job_formats(
             store,
             config.export_dir,
@@ -259,9 +255,7 @@ def run(
             repair_fields_enabled_by_default=config.export.repair_fields_enabled_by_default,
             repair_fields_by_source=config.export.repair_fields_by_source,
             direct_links_enabled_by_source=config.export.direct_links_enabled_by_source,
-            include_terms=config.include_terms,
-            exclude_terms=config.exclude_terms,
-            excluded_title_patterns=config.excluded_title_patterns,
+            filters=config.filters,
             location_allowed=location_allowed,
             location_review=(lambda location: location_needs_review(location, config.location_scope))
             if location_allowed and config.location_scope.include_unrecognized
@@ -300,6 +294,8 @@ def _validate_artifact_paths(config: SearchConfig, replay_from: Path | None) -> 
         "Log": config.log_file,
         **{path.name: path for path in export_paths(config.export_dir, config.export.formats)},
     }
+    if config.company_catalog_path is not None:
+        paths["Employer catalog"] = config.company_catalog_path
     if replay_from is not None and replay_from.resolve() != config.database_path.resolve():
         paths["Replay archive"] = replay_from
     used: dict[Path, str] = {}
@@ -460,6 +456,8 @@ def _config_from_cli(
     custom_pages: int | None,
     config_sources: dict[str, str] | None = None,
     profile: Path | None = None,
+    *,
+    refresh_company_catalog: bool = False,
 ) -> SearchConfig:
     overrides: dict[str, object] = {"_config_sources": config_sources, "_profile": profile}
     if query is not None:
@@ -478,7 +476,7 @@ def _config_from_cli(
         overrides["results_wanted_per_query"] = results_wanted
     if custom_pages is not None:
         overrides["custom_max_pages"] = custom_pages
-    return SearchConfig(**overrides)
+    return SearchConfig(_refresh_company_catalog=refresh_company_catalog, **overrides)
 
 
 def main() -> None:

@@ -11,6 +11,7 @@ from openpyxl import load_workbook
 
 from scrapper.export import export_job_formats, tracker, xlsx
 from scrapper.export.tracker import _date_fr, _date_value
+from scrapper.filters import ListingFilters, RegexRule, TextFilter
 from scrapper.models import JobOffer
 from scrapper.storage import JobStore
 
@@ -467,8 +468,9 @@ def test_export_filters_current_titles_and_flags_uncertain_low_pay_without_losin
             export_dir,
             formats=("xlsx", "csv"),
             excel_columns=columns,
-            include_terms=("communication",),
-            excluded_title_patterns=(r"^developpeur\b",),
+            filters=ListingFilters(
+                title=TextFilter(include=("communication",), exclude=(RegexRule(regex=r"^developpeur\b"),))
+            ),
         )
         assert total == 1
         row = pd.read_csv(csv_path).iloc[0]
@@ -494,8 +496,6 @@ def test_export_checks_contract_evidence_from_noncanonical_copy(tmp_path: Path) 
                 )
             )
         assert store.canonical_dataframe().iloc[0]["best_source"] == "indeed"
-        assert (
-            export_job_formats(store, tmp_path / "exports", formats=("xlsx", "csv"), exclude_terms=("stage",))[1] == 0
-        )
+        assert export_job_formats(store, tmp_path / "exports", formats=("xlsx", "csv"))[1] == 0
     finally:
         store.close()

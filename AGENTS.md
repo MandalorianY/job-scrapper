@@ -143,7 +143,8 @@ PY
 - `src/scrapper/models.py`: `JobOffer`, the single normalized offer shape used by every source.
 - `src/scrapper/storage/`: DuckDB access in `store.py`, schema setup in `schema.py`, and canonical grouping in `dedupe.py`.
 - `src/scrapper/text.py`: text cleanup, URL keys, stable hashes, dedupe key, include/exclude matching, completeness scoring.
-- `src/scrapper/export/`: export orchestration, shared tracker state and salary normalization, and separate XLSX and ODS workbook writers.
+- `src/scrapper/filters.py` and `salary.py`: listing rules and annual salary normalization shared by ingestion and export.
+- `src/scrapper/export/`: export orchestration, shared tracker state, and separate XLSX and ODS workbook writers.
 - `src/scrapper/cli.py`: command-line options and run orchestration. `cli_output.py` renders the status screens and export summary.
 - `src/scrapper/search_regions.py`: caches French municipality and region data alongside DuckDB so runs fetch only missing locations. Resolves provider routes and saves the radius filter for offline export and replay.
 - `src/scrapper/scrapers/`: modules and packages grouped by scraper family. `aggregators/` separates discovery, detail parsing, and orchestration. `jobspy_sources/` separates search orchestration, offer normalization, and LinkedIn adaptation.
@@ -176,19 +177,20 @@ The scraper targets example-role jobs, not internships, stages, alternance, appr
 
 Use the existing helpers instead of ad hoc substring checks:
 
-- `has_excluded_contract_signal(title, employment_type, description, config.exclude_terms)`
-- `contains_any_terms((title,), config.include_terms)`
+- `has_excluded_contract_signal(title, employment_type, description)` for student contract detection.
+- `config.filters.title.allows(title)` to check a title during discovery.
 
-Use `config.title_is_allowed(title)` in scrapers to apply both include terms and
-`excluded_title_patterns`. These patterns match normalized titles (lowercase,
-without accents or punctuation); real-search exclusions belong in `config.local.yaml`.
-Use `offer_matches_search` on normalized offers before upsert for title, contract,
-company, and location validation. Offers need a description or a contract type.
+Use `offer_matches_search` on normalized offers before upsert for configured
+listing filters, the built-in contract policy, and geographic scope. Offers
+need a description or a contract type. Put real-search filters in `config.local.yaml`.
+Use `filters.company.exclude.types` with employer types from the community
+catalog at `datasets/employers/v1/company_types.csv`. Keep that path and CSV
+schema compatible so older installations can fetch catalog updates.
 Contract cleanup applies to the whole canonical duplicate group, so a sparse copy
 cannot hide internship evidence from another source. Purged URL keys are retained
 in `excluded_offer_urls` to prevent historical tracker copies from restoring them.
 Geographic scope controls discovery and export. Keep existing raw listings when
-their stored location falls outside the current profile.
+they fall outside the current region or fail a custom listing filter.
 
 Never hardcode a town name, town alias, or coordinates in scraper or filtering
 logic. Use the same rules for every municipality with official geography data,

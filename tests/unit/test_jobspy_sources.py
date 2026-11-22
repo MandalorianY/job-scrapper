@@ -225,9 +225,14 @@ def test_hellowork_jobspy_retains_search_state_and_updates_existing_offer(
         store.close()
 
 
-def test_jobspy_records_failed_batch_and_successful_retry(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+@pytest.mark.parametrize("missing_site", [False, True])
+def test_jobspy_records_failed_batch_and_successful_retry(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, missing_site: bool
+) -> None:
     def fake_scrape_jobs(**kwargs: object) -> pd.DataFrame:
         if kwargs["site_name"] == ["indeed", "linkedin"]:
+            if missing_site:
+                return pd.DataFrame([{"job_url": "https://example.com/jobs/1"}])
             raise RuntimeError("Batch unavailable")
         return pd.DataFrame()
 
@@ -238,12 +243,38 @@ def test_jobspy_records_failed_batch_and_successful_retry(monkeypatch: pytest.Mo
     store = JobStore(tmp_path / "jobs.duckdb")
     try:
         assert scrape_jobspy_sources(config, store) == {"indeed": 0, "linkedin": 0}
+        error = "JobSpy response is missing required columns (site)" if missing_site else "Batch unavailable"
         assert store.conn.execute(
             "SELECT error, count(*) FROM search_attempts GROUP BY error ORDER BY error NULLS LAST"
-        ).fetchall() == [("Batch unavailable", 2), (None, 2)]
+        ).fetchall() == [(error, 2), (None, 2)]
         assert store.conn.execute("SELECT DISTINCT status, seen_count FROM source_health").fetchall() == [
             ("succeeded", 0)
         ]
+    finally:
+        store.close()
+
+
+def test_jobspy_missing_url_fails_only_the_affected_source(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    def fake_scrape_jobs(**kwargs: object) -> pd.DataFrame:
+        listing = {"title": "Example coordinator", "description": "Full-time example role."}
+        if kwargs["site_name"] == "linkedin":
+            listing["job_url"] = "https://linkedin.example/jobs/1"
+        return pd.DataFrame([listing])
+
+    monkeypatch.setattr(scrape, "scrape_jobs", fake_scrape_jobs)
+    config = SearchConfig(
+        queries=("example",),
+        locations=("Toulouse, France",),
+        enabled_sources=_jobspy_only("indeed", "linkedin"),
+        jobspy_batch_sites=False,
+        location_scope={"enabled": False},
+    )
+    store = JobStore(tmp_path / "jobs.duckdb")
+    try:
+        assert scrape_jobspy_sources(config, store) == {"indeed": 0, "linkedin": 1}
+        assert store.conn.execute(
+            "SELECT last_success_at, last_error FROM search_state WHERE source = 'indeed'"
+        ).fetchone() == (None, "JobSpy response is missing required columns (job_url)")
     finally:
         store.close()
 
@@ -437,7 +468,7 @@ def test_indeed_reuses_successful_expiry_checks_across_searches(
     config = SearchConfig(
         queries=("communication", "marketing"),
         locations=("Toulouse, France",),
-        include_terms=("communication",),
+        filters={"title": {"include": ("communication",)}},
         location_scope={"enabled": False},
         enabled_sources=_jobspy_only("indeed"),
     )

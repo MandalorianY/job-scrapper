@@ -67,6 +67,8 @@ input paths are looked up from the calling directory first, then from the
 checkout. Use relative YAML output paths under `data/` or `exports/` to keep
 them in the checkout. For output elsewhere on the host, pass an absolute path
 with `--db`, `--export-dir`, or `--log-file`.
+To pin an employer catalog, put its CSV under the mounted `data/` directory
+and set `company_catalog_path` to that relative path in your profile.
 
 To run `job-scrapper` from any directory, link the launcher into `~/.local/bin`
 if it’s on your `PATH`.

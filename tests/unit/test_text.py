@@ -5,14 +5,13 @@ from hypothesis import given
 from hypothesis import strategies as st
 
 from scrapper.config import SearchConfig
+from scrapper.filters import RegexRule, TextFilter
 from scrapper.text import (
     clean_text,
-    contains_any_terms,
     dedupe_key,
     description_dedupe_key,
     has_excluded_contract_signal,
     listing_url_key,
-    matches_job_title,
     normalize_text,
     url_key,
 )
@@ -36,7 +35,7 @@ def test_clean_text_strips_html_entities_and_whitespace() -> None:
     ],
 )
 def test_excluded_contract_signals_are_rejected(title: str, employment_type: str, description: str) -> None:
-    assert has_excluded_contract_signal(title, employment_type, description, SEARCH_CONFIG.exclude_terms)
+    assert has_excluded_contract_signal(title, employment_type, description)
 
 
 @pytest.mark.parametrize(
@@ -48,13 +47,13 @@ def test_excluded_contract_signals_are_rejected(title: str, employment_type: str
     ],
 )
 def test_filter_keeps_non_student_contract_contexts(title: str, employment_type: str, description: str) -> None:
-    assert not has_excluded_contract_signal(title, employment_type, description, SEARCH_CONFIG.exclude_terms)
+    assert not has_excluded_contract_signal(title, employment_type, description)
 
 
 def test_include_terms_are_title_focused_for_example_roles() -> None:
-    assert contains_any_terms(("Example coordinator",), SEARCH_CONFIG.include_terms)
-    assert contains_any_terms(("Sample manager",), SEARCH_CONFIG.include_terms)
-    assert not contains_any_terms(("Responsable administratif",), SEARCH_CONFIG.include_terms)
+    assert SEARCH_CONFIG.filters.title.allows("Example coordinator")
+    assert SEARCH_CONFIG.filters.title.allows("Sample manager")
+    assert not SEARCH_CONFIG.filters.title.allows("Responsable administratif")
 
 
 def test_url_key_ignores_tracking_params_but_preserves_known_job_ids() -> None:
@@ -120,7 +119,7 @@ def test_description_dedupe_key_requires_substantial_text_and_normalizes_case() 
     ],
 )
 def test_audit_rejects_abbreviated_student_and_volunteer_titles(title: str) -> None:
-    assert has_excluded_contract_signal(title, "FULL_TIME", None, SEARCH_CONFIG.exclude_terms)
+    assert has_excluded_contract_signal(title, "FULL_TIME", None)
 
 
 @pytest.mark.parametrize(
@@ -143,7 +142,7 @@ def test_audit_rejects_abbreviated_student_and_volunteer_titles(title: str) -> N
     ],
 )
 def test_audit_rejects_student_contracts_hidden_in_descriptions(description: str) -> None:
-    assert has_excluded_contract_signal("Chargé de communication", "CDI, CDD", description, SEARCH_CONFIG.exclude_terms)
+    assert has_excluded_contract_signal("Chargé de communication", "CDI, CDD", description)
 
 
 @pytest.mark.parametrize(
@@ -161,7 +160,7 @@ def test_audit_rejects_student_contracts_hidden_in_descriptions(description: str
     ],
 )
 def test_audit_preserves_supervision_experience_and_non_student_stage_contexts(description: str) -> None:
-    assert not has_excluded_contract_signal("Communication interne", "CDI", description, SEARCH_CONFIG.exclude_terms)
+    assert not has_excluded_contract_signal("Communication interne", "CDI", description)
 
 
 @pytest.mark.parametrize(
@@ -179,4 +178,8 @@ def test_audit_preserves_supervision_experience_and_non_student_stage_contexts(d
 )
 def test_configured_title_exclusions_preserve_relevant_roles(title: str, allowed: bool) -> None:
     patterns = (r"\bcommunications semantiques\b", r"\bdossiers patients\b", r"^formateur\b", r"^developpeur\b")
-    assert matches_job_title(title, ("communication", "communications", "marketing"), patterns) is allowed
+    filters = TextFilter(
+        include=("communication", "communications", "marketing"),
+        exclude=tuple(RegexRule(regex=pattern) for pattern in patterns),
+    )
+    assert filters.allows(title) is allowed

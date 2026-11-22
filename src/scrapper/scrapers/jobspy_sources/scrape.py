@@ -235,6 +235,12 @@ def _run_jobspy_plan(
             fetch_description=len(plan.sites) == 1 and plan.sites[0] in DETAIL_FETCH_SITES,
         )
 
+    if not jobs.index.empty:
+        required_columns = {"job_url", "site"} if len(plan.sites) > 1 else {"job_url"}
+        missing_columns = required_columns.difference(jobs.columns)
+        if missing_columns:
+            raise ValueError(f"JobSpy response is missing required columns ({', '.join(sorted(missing_columns))})")
+
     seen_by_site = dict.fromkeys(plan.sites, 0)
     stored_by_site = dict.fromkeys(plan.sites, 0)
     for row in jobs.to_dict(orient="records"):

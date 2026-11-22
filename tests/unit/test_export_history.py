@@ -9,6 +9,7 @@ from openpyxl import load_workbook
 
 from scrapper.config.settings import LocationScopeConfig
 from scrapper.export import export_job_formats
+from scrapper.filters import ListingFilters, TextFilter
 from scrapper.location_scope import location_is_in_scope
 from scrapper.models import JobOffer
 from scrapper.storage import JobStore
@@ -203,20 +204,12 @@ def test_export_preserves_existing_checkbox_for_matching_tracker_rows(tmp_path: 
 
 def test_export_does_not_retain_existing_rows_rejected_by_current_filters(tmp_path: Path) -> None:
     export_dir = tmp_path / "exports"
-    old_store = JobStore(tmp_path / "old.duckdb")
-    try:
-        old_store.upsert_offer(
-            JobOffer(
-                source="indeed",
-                source_url="https://indeed.example/jobs/alternance",
-                title="Offre d’alternance / Community Manager (H/F)",
-                company="Example",
-                employment_type="Temps plein",
-            )
-        )
-        export_job_formats(old_store, export_dir, formats=("xlsx", "csv"))
-    finally:
-        old_store.close()
+    export_dir.mkdir()
+    (export_dir / "jobs.csv").write_text(
+        "Lien,Intitulé,Contrat\n"
+        "https://indeed.example/jobs/alternance,Offre d’alternance / Community Manager (H/F),Temps plein\n",
+        encoding="utf-8",
+    )
 
     empty_store = JobStore(tmp_path / "empty.duckdb")
     try:
@@ -224,8 +217,7 @@ def test_export_does_not_retain_existing_rows_rejected_by_current_filters(tmp_pa
             empty_store,
             export_dir,
             formats=("xlsx", "csv"),
-            include_terms=("community",),
-            exclude_terms=("alternance",),
+            filters=ListingFilters(title=TextFilter(include=("community",))),
         )
 
         assert total == 0
@@ -317,27 +309,33 @@ def test_purged_description_only_contract_cannot_return_from_old_tracker(tmp_pat
     export_dir = tmp_path / "exports"
     try:
         store.upsert_offer(offer)
-        export_job_formats(store, export_dir, formats=("xlsx", "csv"), excel_columns=("Statut", "Lien", "Intitulé"))
-        assert store.purge_excluded_offers(("alternance", "apprentissage")) == 1
+        export_dir.mkdir()
+        (export_dir / "jobs.csv").write_text(
+            "Statut,Lien,Intitulé\nPostulé,https://example.com/apply/student,Assistant communication\n",
+            encoding="utf-8",
+        )
+        assert store.purge_excluded_offers() == 1
     finally:
         store.close()
     # Reopening models the next scheduled run loading a stale remote workbook.
     store = JobStore(tmp_path / "jobs.duckdb")
     try:
         assert len(store.excluded_url_keys()) == 2
-        (_, csv_path, _), total = export_job_formats(
-            store, export_dir, formats=("xlsx", "csv"), include_terms=("communication",)
-        )
+        filters = ListingFilters(title=TextFilter(include=("communication",)))
+        (_, csv_path, _), total = export_job_formats(store, export_dir, formats=("xlsx", "csv"), filters=filters)
         assert total == 0
         assert pd.read_csv(csv_path).empty
         store.upsert_offer(replace(offer, description="Paid permanent role", employment_type="CDI"))
         assert not store.excluded_url_keys()
-        assert export_job_formats(store, export_dir, formats=("xlsx", "csv"), include_terms=("communication",))[1] == 1
+        assert export_job_formats(store, export_dir, formats=("xlsx", "csv"), filters=filters)[1] == 1
     finally:
         store.close()
 
 
-def test_export_preserves_status_when_canonical_source_changes_without_restoring_duplicate(tmp_path: Path) -> None:
+@pytest.mark.parametrize("filter_old_source", [False, True])
+def test_export_preserves_status_when_canonical_source_changes_without_restoring_duplicate(
+    tmp_path: Path, filter_old_source: bool
+) -> None:
     store = JobStore(tmp_path / "jobs.duckdb")
     try:
         offer = JobOffer(
@@ -363,8 +361,9 @@ def test_export_preserves_status_when_canonical_source_changes_without_restoring
                 description="A richer description with the role's responsibilities.",
             )
         )
+        filters = ListingFilters(source=TextFilter(exclude=("indeed",))) if filter_old_source else None
         (path, csv_path, _), total = export_job_formats(
-            store, tmp_path / "exports", formats=("xlsx", "csv"), excel_columns=columns
+            store, tmp_path / "exports", formats=("xlsx", "csv"), excel_columns=columns, filters=filters
         )
         assert total == 1
         row = pd.read_csv(csv_path).iloc[0]
@@ -396,14 +395,20 @@ def test_duplicate_status_conflicts_stay_visible_after_repeated_exports(
     current = old.iloc[:1].copy()
     aliases = {"url:example.com/a": {"url:example.com/a", "url:example.com/b"}}
     merged = _merge_existing_tracker_rows(
-        current, _read_existing_tracker((tmp_path / "missing.xlsx", path)), current_link_aliases=aliases
+        current,
+        _read_existing_tracker((tmp_path / "missing.xlsx", path)),
+        filters=ListingFilters(),
+        current_link_aliases=aliases,
     )
     assert len(merged) == 1
     assert merged.iloc[0]["Statut"] == expected
     assert merged.iloc[0]["À vérifier"] == f"Statuts divergents entre doublons : {primary} / {secondary}"
     merged.to_csv(path, index=False)
     repeated = _merge_existing_tracker_rows(
-        current, _read_existing_tracker((tmp_path / "missing.xlsx", path)), current_link_aliases=aliases
+        current,
+        _read_existing_tracker((tmp_path / "missing.xlsx", path)),
+        filters=ListingFilters(),
+        current_link_aliases=aliases,
     )
     assert repeated.iloc[0]["Statut"] == expected
     assert repeated.iloc[0]["À vérifier"] == merged.iloc[0]["À vérifier"]

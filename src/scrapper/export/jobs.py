@@ -19,12 +19,12 @@ from scrapper.export.tracker import (
     _localized_job_tracker,
     _merge_existing_tracker_rows,
     _offer_location,
-    _offer_row_allowed,
     _select_tracker_columns,
     _sort_tracker_for_export,
 )
 from scrapper.export.xlsx import read_xlsx_tracker, write_xlsx
-from scrapper.text import listing_url_key, offer_link_keys
+from scrapper.filters import ListingFilters
+from scrapper.text import has_excluded_contract_signal, offer_link_keys
 
 if TYPE_CHECKING:
     from scrapper.config.settings import ExportFormat
@@ -58,54 +58,32 @@ def export_job_formats(
     repair_fields_enabled_by_default: bool = True,
     repair_fields_by_source: dict[str, bool] | None = None,
     direct_links_enabled_by_source: dict[str, bool] | None = None,
-    include_terms: tuple[str, ...] = (),
-    exclude_terms: tuple[str, ...] = (),
+    filters: ListingFilters | None = None,
     location_allowed: Callable[[object | None], bool] | None = None,
     location_review: Callable[[object | None], bool] | None = None,
-    excluded_title_patterns: tuple[str, ...] = (),
 ) -> tuple[tuple[Path, ...], int]:
     if not formats or len(set(formats)) != len(formats):
         raise ValueError("Choose one or more distinct export formats.")
     outputs = export_paths(export_dir, formats)
     export_dir.mkdir(parents=True, exist_ok=True)
 
-    canonical = _excel_safe(store.canonical_dataframe())
-    raw = _excel_safe(store.raw_dataframe().drop(columns=["company_description", "raw_json", "currency"]))
+    filters = filters or ListingFilters()
+    canonical = _excel_safe(
+        store.canonical_dataframe(allows=lambda row: filters.allows(row.get), exclude_contracts=True)
+    )
+    raw = store.raw_dataframe()
     excluded_urls = store.excluded_url_keys()
     out_of_scope_urls = set()
     for _, row in raw.iterrows():
-        if not _offer_row_allowed(row, include_terms, exclude_terms, excluded_title_patterns, None):
+        if has_excluded_contract_signal(row.get("title"), row.get("employment_type"), row.get("description")):
             excluded_urls.update(offer_link_keys(row.get("source_url"), row.get("direct_url")))
-        if location_allowed and not location_allowed(_offer_location(row)):
+        if not filters.allows(row.get) or (location_allowed and not location_allowed(_offer_location(row))):
             out_of_scope_urls.update(offer_link_keys(row.get("source_url"), row.get("direct_url")))
+    raw = _excel_safe(raw.drop(columns=["company_description", "raw_json", "currency"]))
     if not canonical.empty:
         canonical["location"] = canonical.apply(_offer_location, axis=1)
-        allowed = cast(
-            "pd.Series",
-            canonical.apply(
-                _offer_row_allowed,
-                axis=1,
-                include_terms=include_terms,
-                exclude_terms=exclude_terms,
-                excluded_title_patterns=excluded_title_patterns,
-                location_allowed=location_allowed,
-            ),
-        )
-        canonical = canonical.loc[allowed]
-        urls_allowed = cast(
-            "pd.Series",
-            canonical.apply(
-                lambda row: (
-                    not any(
-                        listing_url_key(link) in excluded_urls
-                        for field in ("all_source_links", "all_direct_links")
-                        for link in str(row.get(field) or "").splitlines()
-                    )
-                ),
-                axis=1,
-            ).astype(bool),
-        )
-        canonical = canonical.loc[urls_allowed]
+        if location_allowed is not None:
+            canonical = canonical.loc[cast("pd.Series", canonical["location"].map(location_allowed))]
     localized = _select_tracker_columns(
         _localized_job_tracker(
             canonical,
@@ -123,9 +101,7 @@ def export_job_formats(
         _read_existing_tracker(tracker_paths(export_dir, formats)),
         location_allowed=location_allowed,
         location_review=location_review,
-        include_terms=include_terms,
-        exclude_terms=exclude_terms,
-        excluded_title_patterns=excluded_title_patterns,
+        filters=filters,
         excluded_urls=excluded_urls | (out_of_scope_urls - current_link_keys),
         current_link_aliases=aliases,
     )

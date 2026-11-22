@@ -20,6 +20,55 @@ def test_search_configuration_rejects_handwritten_coordinates() -> None:
         SearchConfig(location_scope={"city_coordinates": {"Paris": [48.8589, 2.347]}})
 
 
+@pytest.mark.parametrize("field", ["title", "description", "contract"])
+def test_search_configuration_rejects_invalid_patterns(field: str) -> None:
+    with pytest.raises(ValidationError, match=rf"filters\.{field}\.exclude"):
+        SearchConfig(filters={field: {"exclude": [{"regex": "["}]}})
+
+
+def test_company_filter_accepts_legacy_names_and_rejects_unknown_types() -> None:
+    config = SearchConfig(filters={"company": {"exclude": ["Example Agency"]}})
+    assert not config.filters.company.allows("Example Agency SAS")
+    with pytest.raises(ValidationError, match="Unknown company types in the community catalog: esnn"):
+        SearchConfig(filters={"company": {"exclude": {"types": ["esnn"]}}})
+
+
+def test_company_filter_reads_new_types_and_quoted_names_from_csv(tmp_path: Path) -> None:
+    catalog = tmp_path / "company_types.csv"
+    catalog.write_text(
+        'company,type,sources\n"École, Exemple",training_provider,https://example.test\n',
+        encoding="utf-8-sig",
+    )
+    config = SearchConfig(
+        company_catalog_path=catalog,
+        filters={"company": {"exclude": {"types": ["training_provider"]}}},
+    )
+    assert not config.filters.company.allows("École, Exemple SAS")
+    assert config.filters.company.allows("École, Exemple Direct")
+
+
+@pytest.mark.parametrize(
+    ("header", "records", "check"),
+    [
+        ("company,type,sources", "", "has_entries"),
+        ("company,type,sources", "...,esn,https://example.test\n", "usable_company_name"),
+        ("company,type,sources", "Example,Wrong Type,https://example.test\n", "Column 'type'"),
+        ("company,type,sources", "Example,esn,example.test\n", "Column 'sources'"),
+        ("company,type,sources,extra", "Example,esn,https://example.test,extra\n", "column 'extra'"),
+        (
+            "company,type,sources",
+            "Example,esn,https://example.test\nExample SAS,esn,https://example.test\n",
+            "unique_company_type",
+        ),
+    ],
+)
+def test_company_filter_reports_catalog_schema_errors(tmp_path: Path, header: str, records: str, check: str) -> None:
+    catalog = tmp_path / "company_types.csv"
+    catalog.write_text(f"{header}\n{records}", encoding="utf-8")
+    with pytest.raises(ValidationError, match=rf"(?s)company_types\.csv: .*{check}"):
+        SearchConfig(company_catalog_path=catalog, filters={"company": {"exclude": {"types": ["esn"]}}})
+
+
 def test_version_and_explicit_profile_work_with_invalid_local_config(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -169,8 +218,10 @@ def test_status_previews_search_configuration_without_running(monkeypatch: pytes
     monkeypatch.chdir(tmp_path)
     local_config = tmp_path / "config.local.yaml"
     local_config.write_text(
-        "include_terms: [data analyst]\nexclude_terms: [volunteer]\n"
-        "excluded_title_patterns: [senior]\nexcluded_companies_by_source:\n  linkedin: [Example Company]\n"
+        "filters:\n"
+        "  title: {include: [data analyst], exclude: [{regex: senior}]}\n"
+        "  contract: {exclude: [temporary]}\n"
+        "  by_source: {linkedin: {company: {exclude: [Example Company]}}}\n"
         "aggregators:\n  max_detail_pages: 42\n  direct_locations: [32R]\n",
         encoding="utf-8",
     )
@@ -198,10 +249,10 @@ def test_status_previews_search_configuration_without_running(monkeypatch: pytes
     ):
         result = runner.invoke(cli.app, ["--status", "--query", "analytics", "--location", "Lille, France", *flags])
         assert result.exit_code == 0, result.output
-        for value in ("Lille, France", "10 km", "analytics", "data analyst", "volunteer", "senior", "Example Company"):
+        for value in ("Lille, France", "10 km", "analytics", "data analyst", "temporary", "senior", "Example Company"):
             assert value in result.stdout
         assert "Search profile config.local.yaml (overrides applied)" in " ".join(result.stdout.split())
-        assert "config.local.yaml: aggregators, exclude_terms" in result.stdout
+        assert "config.local.yaml: aggregators, filters" in result.stdout
         assert "environment: distance_km, enabled_sources" in result.stdout
         assert "command line: location_label, locations, queries" in result.stdout
         assert "42 aggregator detail pages" in " ".join(result.stdout.split())
@@ -393,7 +444,7 @@ def test_location_override_routes_each_provider_and_admits_nearby_municipalities
 
     profile = tmp_path / "designer.yaml"
     profile.write_text(
-        'locations: ["Paris, France"]\nqueries: [graphiste]\ninclude_terms: [graphiste]\ndistance_km: 15\n',
+        'locations: ["Paris, France"]\nqueries: [graphiste]\nfilters: {title: {include: [graphiste]}}\ndistance_km: 15\n',
         encoding="utf-8",
     )
     local = tmp_path / "config.local.yaml"

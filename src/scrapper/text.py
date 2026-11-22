@@ -54,6 +54,39 @@ CONTRACT_MARKERS_RE = re.compile(
     r"\b(h/?f|f/?h|m/?f|f/?m|cdi|cdd|stage|alternance|apprentissage)\b",
     re.IGNORECASE,
 )
+EXCLUDED_CONTRACT_TERMS = (
+    "stage",
+    "stagiaire",
+    "intern",
+    "internship",
+    "apprenticeship",
+    "apprentice",
+    "alternance",
+    "alternant",
+    "alternante",
+    "apprentissage",
+    "apprentisage",
+    "apprenti",
+    "apprentie",
+    "professionnalisation",
+    "professionalisation",
+    "professionnalization",
+    "professionalization",
+    "contrat pro",
+    "contrat professionnel",
+    "contrat de professionnalisation",
+    "bénévole",
+    "volunteer",
+    "benevolat",
+    "benevoles",
+    "volunteering",
+    "stages",
+    "stagiaires",
+    "alternants",
+    "alternantes",
+    "apprentis",
+    "apprenties",
+)
 EXCLUDED_CONTRACT_DESCRIPTION_PATTERNS = tuple(
     re.compile(pattern, re.IGNORECASE)
     for pattern in (
@@ -243,39 +276,17 @@ def unwrap_redirect(url: str | None) -> str | None:
     return url
 
 
-def contains_excluded_terms(values: Iterable[object | None], exclude_terms: Iterable[str]) -> bool:
-    haystack = " ".join(normalize_match_text(value) for value in values if value)
-    for term in exclude_terms:
-        normalized = normalize_match_text(term)
-        if normalized and re.search(rf"(^|\s){re.escape(normalized)}($|\s)", haystack):
-            return True
-    return False
-
-
 def has_excluded_contract_signal(
     title: object | None,
     employment_type: object | None,
     description: object | None,
-    exclude_terms: Iterable[str],
 ) -> bool:
-    terms = tuple(exclude_terms)
-    # Match inflections explicitly; substring matching would also reject "internal".
-    aliases = {
-        "benevole": ("benevolat", "benevoles"),
-        "volunteer": ("volunteering",),
-        "stage": ("stages", "stagiaires"),
-        "alternance": ("alternants", "alternantes"),
-        "apprenti": ("apprentis", "apprenties"),
-    }
-    expanded = terms + tuple(alias for term in terms for alias in aliases.get(normalize_match_text(term), ()))
-    if contains_excluded_terms((title, employment_type), expanded):
+    if contains_any_terms((title, employment_type), EXCLUDED_CONTRACT_TERMS):
         return True
     if normalize_match_text(employment_type) in {"franchise", "franchise emploi non salarie"}:
         return True
     normalized_title = normalize_match_text(title)
-    if "alternance" in {normalize_match_text(term) for term in terms} and re.search(
-        r"(?:^alt\b|\ben alt\b|\b(?:bts|bachelor|master|mba)\b.*\balt\b)", normalized_title
-    ):
+    if re.search(r"(?:^alt\b|\ben alt\b|\b(?:bts|bachelor|master|mba)\b.*\balt\b)", normalized_title):
         return True
     if re.search(r"\b(?:job|emploi|contrat)\s+etudiant\b", normalized_title):
         return True
@@ -295,21 +306,14 @@ def _description_has_excluded_contract(description: str | None) -> bool:
 
 
 def contains_any_terms(values: Iterable[object | None], include_terms: Iterable[str]) -> bool:
-    haystack = " ".join(normalize_match_text(value) for value in values if value)
-    for term in include_terms:
-        normalized = normalize_match_text(term)
-        if normalized and re.search(rf"(^|\s){re.escape(normalized)}($|\s)", haystack):
-            return True
-    return False
+    haystack = " ".join(normalize_match_text(value) for value in values if value is not None)
+    return any(literal_term_pattern(term).search(haystack) is not None for term in include_terms)
 
 
-def matches_job_title(
-    title: object | None, include_terms: Iterable[str], excluded_patterns: Iterable[str] = ()
-) -> bool:
-    """Require an included title term and reject configured, normalized title patterns."""
-    return contains_any_terms((title,), include_terms) and not any(
-        re.search(pattern, normalize_match_text(title)) for pattern in excluded_patterns
-    )
+@lru_cache(maxsize=512)
+def literal_term_pattern(value: str) -> re.Pattern[str]:
+    term = normalize_match_text(value)
+    return re.compile(rf"(?<!\S){re.escape(term)}(?!\S)" if term else r"(?!)")
 
 
 def normalize_match_text(value: object | None) -> str:

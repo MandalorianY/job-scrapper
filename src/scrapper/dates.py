@@ -85,9 +85,11 @@ def parse_posted_date(value: object, now: datetime | None = None) -> ParsedPoste
         return _parse_iso_date(iso.group(0))
     numeric = FRENCH_NUMERIC_DATE_RE.search(text)
     if numeric:
-        return ParsedPostedDate(
-            day=date(int(numeric.group("year")), int(numeric.group("month")), int(numeric.group("day")))
-        )
+        try:
+            day = date(int(numeric.group("year")), int(numeric.group("month")), int(numeric.group("day")))
+        except ValueError:
+            return None
+        return ParsedPostedDate(day=day)
     french = FRENCH_TEXT_DATE_RE.search(text)
     if french:
         return _parse_french_text_date(french, now)

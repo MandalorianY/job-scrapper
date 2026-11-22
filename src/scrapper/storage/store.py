@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from hashlib import sha256
 from pathlib import Path
@@ -23,8 +23,6 @@ from scrapper.text import (
     external_url_key,
     has_excluded_contract_signal,
     is_application_destination,
-    matches_job_title,
-    normalize_text,
     offer_link_keys,
     stable_hash,
     url_key,
@@ -52,6 +50,7 @@ CANONICAL_COLUMNS = [
     "sources",
     "all_source_links",
     "all_direct_links",
+    "status_alias_keys",
     "duplicate_count",
     "description",
     "company_url",
@@ -376,7 +375,9 @@ class JobStore:
             self.conn.execute("DELETE FROM replay_excluded_offer_urls WHERE url_key = ?", [key])
         return True
 
-    def canonical_dataframe(self) -> pd.DataFrame:
+    def canonical_dataframe(
+        self, *, allows: Callable[[pd.Series], bool] | None = None, exclude_contracts: bool = False
+    ) -> pd.DataFrame:
         frame = self.conn.execute(
             """
             SELECT
@@ -426,6 +427,18 @@ class JobStore:
         )
         frame["direct_url"] = frame["direct_url"].where(frame["direct_url"].map(is_application_destination), None)
         frame["group_key"] = self._build_group_keys(frame)
+        if exclude_contracts:
+            rejected_groups = frame.loc[frame.apply(_has_excluded_contract, axis=1), "group_key"]
+            frame = frame.loc[~frame["group_key"].isin(rejected_groups)].copy()
+        status_alias_keys: dict[str, set[str]] = {}
+        if allows is not None and not frame.empty:
+            accepted = frame.apply(allows, axis=1)
+            # Keep tracker identities when a filter switches the winning source.
+            for _, row in frame.loc[~accepted].iterrows():
+                status_alias_keys.setdefault(row["group_key"], set()).update(
+                    offer_link_keys(row["source_url"], row["direct_url"])
+                )
+            frame = frame.loc[accepted].copy()
         frame["source_priority"] = (
             frame.loc[:, "source"].map(self.source_priority).fillna(self.default_source_priority).astype(int)
         )
@@ -444,6 +457,9 @@ class JobStore:
 
         links = frame.groupby("group_key", sort=False).apply(aggregate_group_links, include_groups=False).reset_index()
         result = best_rows.merge(links, on="group_key", how="inner")
+        result["status_alias_keys"] = result["group_key"].map(
+            lambda key: tuple(sorted(status_alias_keys.get(key) or ()))
+        )
         result["description"] = result.pop("group_description")
         result["date_posted"] = result["date_posted"].where(
             result["date_posted"].notna() & (result["date_posted"].astype(str).str.strip() != ""),
@@ -481,7 +497,7 @@ class JobStore:
             """
         ).df()
 
-    def purge_excluded_offers(self, exclude_terms: tuple[str, ...]) -> int:
+    def purge_excluded_offers(self) -> int:
         frame = self.conn.execute(
             """
             SELECT offer_id, dedupe_key, description_key, source, source_id, source_url, direct_url,
@@ -491,12 +507,7 @@ class JobStore:
         ).df()
         if frame.empty:
             return 0
-        rejected = frame.apply(
-            lambda row: has_excluded_contract_signal(
-                row["title"], row["employment_type"], row["description"], exclude_terms
-            ),
-            axis=1,
-        )
+        rejected = frame.apply(_has_excluded_contract, axis=1)
         # A sparse copy must not hide the contract disclosed by another board for
         # the same offer. Use the same identity groups as the canonical export.
         groups = self._build_group_keys(frame)
@@ -504,51 +515,16 @@ class JobStore:
         offer_ids = frame.loc[groups.isin(rejected_groups), "offer_id"].tolist()
         if not offer_ids:
             return 0
-        self._delete_offer_ids(offer_ids, preserve_on_replay=True)
-        return len(offer_ids)
-
-    def purge_nonmatching_offers(
-        self, include_terms: tuple[str, ...], excluded_title_patterns: tuple[str, ...] = ()
-    ) -> int:
-        rows = self.conn.execute("SELECT offer_id, title FROM raw_offers").fetchall()
-        offer_ids = [
-            offer_id for offer_id, title in rows if not matches_job_title(title, include_terms, excluded_title_patterns)
-        ]
-        if not offer_ids:
-            return 0
         self._delete_offer_ids(offer_ids)
         return len(offer_ids)
 
-    def purge_excluded_companies(self, excluded_companies_by_source: Mapping[str, tuple[str, ...]]) -> int:
-        excluded = {
-            str(source): {normalize_text(company) for company in companies if normalize_text(company)}
-            for source, companies in excluded_companies_by_source.items()
-        }
-        if not excluded:
-            return 0
-        global_excluded = excluded.get("*", set())
-        rows = self.conn.execute("SELECT offer_id, source, company FROM raw_offers").fetchall()
-        offer_ids = []
-        for offer_id, source, company in rows:
-            normalized_company = normalize_text(company)
-            if not normalized_company:
-                continue
-            source_excluded = excluded.get(str(source), set())
-            if normalized_company in source_excluded or normalized_company in global_excluded:
-                offer_ids.append(offer_id)
-        if not offer_ids:
-            return 0
-        self._delete_offer_ids(offer_ids)
-        return len(offer_ids)
-
-    def _delete_offer_ids(self, offer_ids: list[str], *, preserve_on_replay: bool = False) -> None:
+    def _delete_offer_ids(self, offer_ids: list[str]) -> None:
         rows = self.conn.execute(
             "SELECT source_url, direct_url FROM raw_offers WHERE offer_id IN (SELECT unnest(?))", [offer_ids]
         ).fetchall()
         keys = list({(key,) for source_url, direct_url in rows for key in offer_link_keys(source_url, direct_url)})
         if keys:
-            table = "replay_excluded_offer_urls" if preserve_on_replay else "excluded_offer_urls"
-            self.conn.executemany(f"INSERT OR IGNORE INTO {table} (url_key) VALUES (?)", keys)
+            self.conn.executemany("INSERT OR IGNORE INTO replay_excluded_offer_urls (url_key) VALUES (?)", keys)
         params = [(offer_id,) for offer_id in offer_ids]
         try:
             self.conn.executemany("DELETE FROM raw_offers WHERE offer_id = ?", params)
@@ -573,3 +549,7 @@ class JobStore:
     @staticmethod
     def search_key(source: str, query: str, location: str) -> str:
         return stable_hash(source, query, location)
+
+
+def _has_excluded_contract(row: pd.Series) -> bool:
+    return has_excluded_contract_signal(row.get("title"), row.get("employment_type"), row.get("description"))
