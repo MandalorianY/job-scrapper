@@ -31,7 +31,7 @@ from scrapper.cli_paths import existing_file
 from scrapper.config import SearchConfig
 from scrapper.config.settings import _leaf_values
 from scrapper.export import export_job_formats, export_paths
-from scrapper.location_scope import location_is_in_scope
+from scrapper.location_scope import location_is_allowed, location_needs_review
 from scrapper.logging import DEFAULT_LOG_LEVEL, LogLevel, configure_logging
 from scrapper.scrapers import (
     scrape_aggregators,
@@ -194,9 +194,16 @@ def run(
         )
         if live_search:
             save_location_scope(unrouted_config, config.location_scope)
+        elif (
+            config.location_scope.enabled
+            and config.country.casefold() == "france"
+            and config.search_locations
+            and not config.location_scope.centers
+        ):
+            console.print(Text("Radius filter unavailable. Cache these towns with a live search.", style="yellow"))
         store = _job_store(config, run_id)
         location_allowed = (
-            (lambda location: location_is_in_scope(location, config.location_scope))
+            (lambda location: location_is_allowed(location, config.location_scope))
             if config.location_scope.centers
             else None
         )
@@ -256,6 +263,9 @@ def run(
             exclude_terms=config.exclude_terms,
             excluded_title_patterns=config.excluded_title_patterns,
             location_allowed=location_allowed,
+            location_review=(lambda location: location_needs_review(location, config.location_scope))
+            if location_allowed and config.location_scope.include_unrecognized
+            else None,
             formats=config.export.formats,
         )
         print_export_summary(counts, total, outputs)

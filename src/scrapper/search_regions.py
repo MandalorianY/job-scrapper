@@ -14,7 +14,7 @@ from pydantic import BaseModel
 
 from scrapper.config import SearchConfig
 from scrapper.config.settings import LocationCenterConfig, LocationScopeConfig, SiteLocationConfig
-from scrapper.location_scope import coordinates_are_in_scope
+from scrapper.location_scope import coordinates_are_in_scope, normalize_location_text
 from scrapper.text import normalize_text
 
 GEO_API = "https://geo.api.gouv.fr"
@@ -87,10 +87,10 @@ def route_location_overrides(
     }
 
     if scope.city_aliases:
-        points = {normalize_text(city): point for city, point in coordinates.items()}
-        points.update({normalize_text(center.name): (center.latitude, center.longitude) for center in centers})
+        points = {normalize_location_text(city): point for city, point in coordinates.items()}
+        points.update({normalize_location_text(center.name): (center.latitude, center.longitude) for center in centers})
         for city, aliases in scope.city_aliases.items():
-            if (point := points.get(normalize_text(city))) is not None:
+            if (point := points.get(normalize_location_text(city))) is not None:
                 coordinates.update(dict.fromkeys(aliases, point))
     nearby_names = {city.casefold() for city in coordinates}
     nearby_names.update(center.name.casefold() for center in centers)
@@ -99,6 +99,9 @@ def route_location_overrides(
         update={
             "city_coordinates": coordinates,
             "region_names": tuple(region.name for region in regions.values()),
+            "known_city_names": _known_city_names(cache_dir, regions, scope.city_aliases)
+            if scope.include_unrecognized
+            else frozenset(),
         }
     )
     return config.model_copy(
@@ -128,11 +131,31 @@ def route_location_overrides(
     )
 
 
+def _known_city_names(
+    cache_dir: Path, regions: dict[str, _Region], aliases: dict[str, tuple[str, ...]]
+) -> frozenset[str]:
+    known_regions = list(regions.values())
+    for path in cache_dir.glob("region-*.json"):
+        if path.stem.removeprefix("region-") not in regions and (region := _load_geography(path, _Region, warn=False)):
+            known_regions.append(region)
+    names = {normalize_location_text(town.name) for region in known_regions for town in region.municipalities}
+    for city, spellings in aliases.items():
+        if normalize_location_text(city) in names:
+            names.update(normalize_location_text(spelling) for spelling in spellings)
+    return frozenset(names)
+
+
 def load_location_scope(config: SearchConfig, database: Path, *, warn: bool = True) -> LocationScopeConfig:
     scope = config.location_scope
     if not scope.enabled:
         return scope
-    resolved = _load_geography(_location_scope_path(config, database), LocationScopeConfig, warn=warn) or scope
+    resolved = _load_geography(_location_scope_path(config, database), LocationScopeConfig, warn=warn)
+    if resolved is None or scope.include_unrecognized:
+        cache_config = config.model_copy(update={"paths": config.paths.model_copy(update={"database_path": database})})
+        cached_scope = route_location_overrides(cache_config, write_cache=False, cache_only=True).location_scope
+        if resolved is None or cached_scope.centers:
+            return cached_scope
+    resolved = resolved.model_copy(update={"include_unrecognized": scope.include_unrecognized})
     if not resolved.centers or resolved.region_names:
         return resolved
     cache_dir = database.parent / ".geography"
@@ -231,7 +254,7 @@ def _location_scope_path(config: SearchConfig, database: Path) -> Path:
     inputs = (
         config.country,
         config.search_locations,
-        config.location_scope.model_dump(mode="json", exclude={"region_names"}),
+        config.location_scope.model_dump(mode="json", exclude={"region_names", "include_unrecognized"}),
     )
     digest = sha256(json.dumps(inputs, sort_keys=True).encode()).hexdigest()[:16]
     return database.with_name(f"{database.name}.location-scope-{digest}.json")

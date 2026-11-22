@@ -142,6 +142,11 @@ def test_aggregator_offer_usability_requires_title_contract_and_region(toulouse_
 
     assert _offer_is_usable(usable, config)
     assert not _offer_is_usable(bad_contract, config)
+    typo = replace(usable, location="Toulouze")
+    assert not _offer_is_usable(typo, config)
+    config.location_scope.include_unrecognized = True
+    assert _offer_is_usable(typo, config)
+    assert not _offer_is_usable(replace(usable, location="Montauban"), config)
     assert _infer_contract("CDI ou CDD possible") == "CDI, CDD"
     assert mentions_location_in_scope("Hybrid role with presence in Blagnac", config.location_scope)
     assert aggregator_company_from_domain("https://www.emploi-collectivites.fr/offres/1") == "Emploi Collectivites"

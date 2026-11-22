@@ -25,11 +25,19 @@ EXPLICIT_WORKPLACE_RE = re.compile(
 )
 
 
-def public_offer_location(workplace: object, description: object) -> str | None:
+def normalize_offer_location(workplace: object | None) -> str | None:
     if isinstance(workplace, dict):
-        workplace = workplace.get("libelleCommuneLieuTravail") or workplace.get("libelleLieuTravail")
+        workplace = (
+            workplace.get("libelleCommuneLieuTravail")
+            or workplace.get("libelleLieuTravail")
+            or workplace.get("syntheseLieuTravail")
+        )
+    return extract_mappy_location(workplace) or clean_text(workplace)
+
+
+def public_offer_location(workplace: object, description: object) -> str | None:
     explicit_location = EXPLICIT_WORKPLACE_RE.search(str(description or ""))
-    return clean_text(explicit_location.group(1) if explicit_location else workplace)
+    return clean_text(explicit_location.group(1)) if explicit_location else normalize_offer_location(workplace)
 
 
 def repair_tracker_fields(

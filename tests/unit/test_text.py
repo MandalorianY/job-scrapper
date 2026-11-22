@@ -11,6 +11,7 @@ from scrapper.text import (
     dedupe_key,
     description_dedupe_key,
     has_excluded_contract_signal,
+    listing_url_key,
     matches_job_title,
     normalize_text,
     url_key,
@@ -66,6 +67,14 @@ def test_url_key_ignores_tracking_params_but_preserves_known_job_ids() -> None:
     )
     assert url_key("https://www.glassdoor.fr/job-listing/j?jl=1010154208293") == (
         "www.glassdoor.fr/job-listing/j?jl=1010154208293"
+    )
+
+
+def test_shared_recruitment_detail_path_requires_a_job_id() -> None:
+    assert listing_url_key("https://recruitment.example/front-jobs-detail.html?id_origin=1") is None
+    assert (
+        listing_url_key("https://careers.example/front-jobs-detail.html?id_job=10&id_origin=1")
+        == "careers.example/front-jobs-detail.html?id_job=10"
     )
 
 

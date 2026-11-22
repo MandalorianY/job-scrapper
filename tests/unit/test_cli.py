@@ -4,9 +4,10 @@ from pathlib import Path
 from typing import Never
 
 import pytest
+from openpyxl import load_workbook
 from typer.testing import CliRunner
 
-from scrapper import cli
+from scrapper import cli, search_regions
 from scrapper.config import SearchConfig
 from scrapper.config.settings import LocationScopeConfig
 from scrapper.models import JobOffer
@@ -58,6 +59,8 @@ def test_database_startup_failure_is_recorded(monkeypatch: pytest.MonkeyPatch, t
 def test_offline_export_reuses_geographic_scope_from_live_run(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, toulouse_scope: LocationScopeConfig
 ) -> None:
+    monkeypatch.setenv("SCRAPPER_LOCATION_SCOPE__INCLUDE_UNRECOGNIZED", "false")
+
     def resolve(config: SearchConfig, *, write_cache: bool) -> SearchConfig:
         assert not config.location_scope.centers
         assert write_cache
@@ -213,6 +216,123 @@ def test_export_only_regenerates_local_files_from_duckdb(monkeypatch: pytest.Mon
     assert (export_dir / "jobs.xlsx").is_file()
     for name in ("jobs.csv", "jobs_raw.csv"):
         assert "Example coordinator" in (export_dir / name).read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("include_unrecognized", [False, True])
+def test_export_only_recalculates_a_changed_radius_from_cached_towns(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    toulouse_scope: LocationScopeConfig,
+    include_unrecognized: bool,
+) -> None:
+    database = tmp_path / "jobs.duckdb"
+    prior = SearchConfig(locations=("Toulouse, France",), distance_km=25, paths={"database_path": database})
+    search_regions.save_location_scope(prior, toulouse_scope)
+    geography = tmp_path / ".geography"
+    geography.mkdir()
+    center = toulouse_scope.centers[0].model_dump(mode="json")
+    (geography / "town-toulouse.json").write_text(
+        json.dumps({"center": center, "department": "31", "region_code": "76"}), encoding="utf-8"
+    )
+    (geography / "region-76.json").write_text(
+        json.dumps(
+            {
+                "name": "Occitanie",
+                "municipalities": [
+                    {"name": city, "latitude": point[0], "longitude": point[1]}
+                    for city, point in toulouse_scope.city_coordinates.items()
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (geography / "region-11.json").write_text(
+        json.dumps(
+            {
+                "name": "Île-de-France",
+                "municipalities": [{"name": "Paris", "latitude": 48.8566, "longitude": 2.3522}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    profile = tmp_path / "profile.yaml"
+    profile.write_text(
+        json.dumps(
+            {
+                "locations": ["Toulouse, France"],
+                "distance_km": 5,
+                "location_scope": {"include_unrecognized": include_unrecognized},
+                "export": {"excel_columns": ["Intitulé", "Lieu", "À vérifier", "Lien"]},
+            }
+        ),
+        encoding="utf-8",
+    )
+    misspelling = "Toulouze, Occitanie, France"
+    store = JobStore(database)
+    try:
+        for number, (town, title) in enumerate(
+            (
+                ("Toulouse", "Example coordinator"),
+                ("Blagnac", "Example specialist"),
+                (misspelling, "Example analyst"),
+                ("Paris", "Example manager"),
+                ("Toulouze, Île-de-France, France", "Example operator"),
+                ("Occitanie", "Example lead"),
+            ),
+            1,
+        ):
+            store.upsert_offer(
+                JobOffer(
+                    source="example",
+                    source_url=f"https://example.com/jobs/{number}",
+                    title=title,
+                    company="Example",
+                    location=town,
+                    employment_type="CDI",
+                )
+            )
+    finally:
+        store.close()
+
+    def forbidden(*args: object, **kwargs: object) -> Never:
+        raise AssertionError("Export-only must use the municipality cache without fetching")
+
+    monkeypatch.setattr(search_regions.httpx, "Client", forbidden)
+    export_dir = tmp_path / "exports"
+    args = [
+        "--export-only",
+        "--profile",
+        str(profile),
+        "--db",
+        str(database),
+        "--export-dir",
+        str(export_dir),
+        "--log-file",
+        str(tmp_path / "run.jsonl"),
+    ]
+    result = CliRunner().invoke(cli.app, args)
+    assert result.exit_code == 0, result.output
+    workbook = load_workbook(export_dir / "jobs.xlsx", read_only=True)
+    try:
+        rows = list(workbook["Offres"].values)
+        location, review = rows[0].index("Lieu"), rows[0].index("À vérifier")
+        notes = {row[location]: row[review] for row in rows[1:]}
+        expected = {"Toulouse", misspelling} if include_unrecognized else {"Toulouse"}
+        assert set(notes) == expected
+        if include_unrecognized:
+            assert notes[misspelling] == "Localisation à vérifier"
+        assert workbook["Données brutes"].max_row == 7
+    finally:
+        workbook.close()
+    assert (misspelling in (export_dir / "jobs.csv").read_text(encoding="utf-8")) is include_unrecognized
+    if include_unrecognized:
+        settings = json.loads(profile.read_text(encoding="utf-8"))
+        settings["location_scope"]["include_unrecognized"] = False
+        profile.write_text(json.dumps(settings), encoding="utf-8")
+        result = CliRunner().invoke(cli.app, args)
+        assert result.exit_code == 0, result.output
+        assert misspelling not in (export_dir / "jobs.csv").read_text(encoding="utf-8")
+        assert misspelling in (export_dir / "jobs_raw.csv").read_text(encoding="utf-8")
 
 
 def test_offline_replay_restores_purged_offers_and_is_idempotent(

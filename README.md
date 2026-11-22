@@ -64,7 +64,7 @@ Save your search settings in `config.local.yaml`.
 ```yaml
 queries: [data analyst]
 include_terms: [data analyst, analyste de données]
-locations: ["Nantes, France"]
+locations: ["Toulouse, France"]
 distance_km: 10
 ```
 

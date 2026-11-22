@@ -188,6 +188,13 @@ in `excluded_offer_urls` to prevent historical tracker copies from restoring the
 Geographic scope controls discovery and export. Keep existing raw listings when
 their stored location falls outside the current profile.
 
+Never hardcode a town name, town alias, or coordinates in scraper or filtering
+logic. Use the same rules for every municipality with official geography data,
+cached coordinates, and generic provider-format parsing. Put verified alternate
+names in `location_scope.city_aliases` in the relevant profile. Use Toulouse
+for public search examples and keep real-search towns and aliases in local
+configuration. Test geographic changes across multiple towns.
+
 Be careful with false positives. Do not remove an offer just because a description mentions managing an intern/alternant, internal example role, or international work. The stricter contract-stage logic lives in `text.py`; extend the phrase patterns there with focused examples when needed.
 
 For broad sources, keep the include filter title-focused unless there is an explicit product decision to broaden it. This prevents generic "responsable" or non-configured example roles from leaking into the workbook.

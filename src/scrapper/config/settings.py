@@ -122,11 +122,13 @@ class LocationCenterConfig(BaseModel):
 
 class LocationScopeConfig(BaseModel):
     enabled: bool = True
+    include_unrecognized: bool = True
     radius_km: float = 25
     centers: tuple[LocationCenterConfig, ...] = ()
     city_coordinates: dict[str, tuple[float, float]] = Field(default_factory=dict)
     city_aliases: dict[str, tuple[str, ...]] = Field(default_factory=dict)
     region_names: tuple[str, ...] = ()
+    known_city_names: frozenset[str] = Field(default_factory=frozenset, exclude=True)
 
 
 class SiteLocationConfig(BaseModel):
@@ -350,7 +352,12 @@ class Settings(BaseSettings):
     @field_validator("location_scope", mode="before")
     @classmethod
     def _location_coordinates_are_derived(cls, value: object) -> object:
-        if isinstance(value, Mapping) and {"centers", "city_coordinates", "region_names"}.intersection(value):
+        if isinstance(value, Mapping) and {
+            "centers",
+            "city_coordinates",
+            "region_names",
+            "known_city_names",
+        }.intersection(value):
             raise ValueError("Set locations by municipality name. The scraper resolves coordinates automatically.")
         return value
 

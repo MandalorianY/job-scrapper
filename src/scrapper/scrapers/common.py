@@ -11,7 +11,7 @@ from bs4 import BeautifulSoup, Tag
 
 from scrapper.config import SearchConfig
 from scrapper.dates import parse_posted_date
-from scrapper.location_scope import location_is_in_scope, mentions_location_in_scope
+from scrapper.location_scope import location_is_allowed, mentions_location_in_scope
 from scrapper.models import JobOffer
 from scrapper.text import clean_text, has_excluded_contract_signal, is_application_destination
 
@@ -41,7 +41,7 @@ def offer_matches_search(
         return False
     if not offer.location and allow_description_location:
         return mentions_location_in_scope(offer.description, config.location_scope)
-    return location_is_in_scope(offer.location, config.location_scope)
+    return location_is_allowed(offer.location, config.location_scope)
 
 
 def absolutize(base_url: str, href: str | None) -> str | None:

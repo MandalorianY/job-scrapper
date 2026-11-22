@@ -5,7 +5,7 @@ import re
 import unicodedata
 from collections.abc import Iterable
 from functools import lru_cache
-from typing import Protocol
+from typing import Literal, Protocol
 
 FRENCH_REGIONS = frozenset(
     {
@@ -30,6 +30,10 @@ FRENCH_REGIONS = frozenset(
     }
 )
 REGION_ALIASES = {"ara": "auvergne rhone alpes", "rhone alpes": "auvergne rhone alpes"}
+STREET_ADDRESS_RE = re.compile(
+    r"^\s*\d{1,4}(?:\s*(?:bis|ter))?\s+(?:rue|avenue|boulevard|all[eé]e|chemin|impasse|passage|place|quai|route)\b",
+    re.IGNORECASE,
+)
 
 
 class LocationCenter(Protocol):
@@ -40,50 +44,78 @@ class LocationCenter(Protocol):
 
 class LocationScope(Protocol):
     enabled: bool
+    include_unrecognized: bool
     radius_km: float
     city_coordinates: dict[str, tuple[float, float]]
     region_names: tuple[str, ...]
+    known_city_names: frozenset[str]
 
     @property
     def centers(self) -> tuple[LocationCenter, ...]: ...
 
 
 def location_is_in_scope(location: object | None, scope: LocationScope) -> bool:
+    return _location_match(location, scope) == "inside"
+
+
+def location_is_allowed(location: object | None, scope: LocationScope) -> bool:
+    match = _location_match(location, scope)
+    return match == "inside" or (scope.include_unrecognized and match == "unrecognized")
+
+
+def location_needs_review(location: object | None, scope: LocationScope) -> bool:
+    return scope.include_unrecognized and _location_match(location, scope) == "unrecognized"
+
+
+def _location_match(location: object | None, scope: LocationScope) -> Literal["inside", "outside", "unrecognized"]:
     if not scope.enabled:
-        return True
+        return "inside"
     if not location:
-        return False
+        return "outside"
     address = re.sub(r"^.*\)\s+(?=\d{2,5}\s*[-–])", "", str(location))
-    pattern = _pattern_for_scope(scope)
+    pattern, known_coordinates = _patterns_for_scope(scope)
     if pattern is None:
-        return False
-    expected = {_normalize(region) for region in scope.region_names}
+        return "outside"
+    expected = {normalize_location_text(region) for region in scope.region_names}
+    unrecognized = False
     for place in address.split("/"):
         locality, *qualifiers = re.split(r"[,()]", place)
-        regions = {REGION_ALIASES.get(name, name) for part in qualifiers if (name := _normalize(part))}
+        if qualifiers and STREET_ADDRESS_RE.match(locality):
+            locality, *qualifiers = qualifiers
+        regions = {REGION_ALIASES.get(name, name) for part in qualifiers if (name := normalize_location_text(part))}
         if expected and (regions & FRENCH_REGIONS) - expected:
             continue
         locality = re.split(r"\b\d{2,5}\s*[-–]\s*", locality)[-1]
-        name = _normalize(locality)
+        name = normalize_location_text(locality)
         name = re.sub(
-            r"^(?:greater |\d{2,5} )| (?:area|et peripherie|\d{2,5}|\d{1,2}(?:er|e|eme)?(?: arrondissement)?)$",
+            r"^(?:greater |\d{2,5} )"
+            r"| (?:area|et peripherie|\d{2,5}|\d{1,2}(?:er|e|eme)?(?: arrondissement)?)$",
             "",
             name,
         )
         if pattern.fullmatch(name):
-            return True
-    return False
+            return "inside"
+        if (
+            name
+            and not name.isdecimal()
+            and name not in {"fr", "france", "remote", "teletravail"}
+            and REGION_ALIASES.get(name, name) not in FRENCH_REGIONS
+            and name not in known_coordinates
+            and name not in scope.known_city_names
+        ):
+            unrecognized = True
+    return "unrecognized" if unrecognized else "outside"
 
 
 def mentions_location_in_scope(text: object | None, scope: LocationScope) -> bool:
     if not scope.enabled:
         return True
-    pattern = _pattern_for_scope(scope)
-    return pattern is not None and pattern.search(_normalize(text)) is not None
+    pattern, _ = _patterns_for_scope(scope)
+    return pattern is not None and pattern.search(normalize_location_text(text)) is not None
 
 
-def _pattern_for_scope(scope: LocationScope) -> re.Pattern[str] | None:
-    return _scope_pattern(
+def _patterns_for_scope(scope: LocationScope) -> tuple[re.Pattern[str] | None, frozenset[str]]:
+    return _scope_patterns(
         scope.radius_km,
         tuple((center.name, center.latitude, center.longitude) for center in scope.centers),
         tuple(scope.city_coordinates.items()),
@@ -99,20 +131,17 @@ def _within_radius(location: tuple[float, float], radius_km: float, centers: Ite
 
 
 @lru_cache(maxsize=32)
-def _scope_pattern(
+def _scope_patterns(
     radius_km: float,
     centers: tuple[tuple[str, float, float], ...],
     cities: tuple[tuple[str, tuple[float, float]], ...],
-) -> re.Pattern[str] | None:
-    coordinates = {normalized: point for city, point in cities if (normalized := _normalize(city))}
-    coordinates.update({_normalize(city): (latitude, longitude) for city, latitude, longitude in centers})
+) -> tuple[re.Pattern[str] | None, frozenset[str]]:
+    coordinates = {normalized: point for city, point in cities if (normalized := normalize_location_text(city))}
+    coordinates.update({normalize_location_text(city): (latitude, longitude) for city, latitude, longitude in centers})
     center_points = tuple((latitude, longitude) for _, latitude, longitude in centers)
-    names = {
-        city
-        for city, point in coordinates.items()
-        if city and _within_radius(point, radius_km, center_points)
-    }
-    return re.compile(r"\b(?:" + "|".join(map(re.escape, sorted(names))) + r")\b") if names else None
+    nearby = {city for city, point in coordinates.items() if city and _within_radius(point, radius_km, center_points)}
+    pattern = re.compile(r"\b(?:" + "|".join(map(re.escape, sorted(nearby))) + r")\b") if nearby else None
+    return pattern, frozenset(coordinates)
 
 
 def _distance_km(left: tuple[float, float], right: tuple[float, float]) -> float:
@@ -125,7 +154,7 @@ def _distance_km(left: tuple[float, float], right: tuple[float, float]) -> float
     return 2 * radius_km * math.asin(math.sqrt(haversine))
 
 
-def _normalize(value: object | None) -> str:
+def normalize_location_text(value: object | None) -> str:
     if value is None:
         return ""
     text = unicodedata.normalize("NFKD", str(value))

@@ -44,10 +44,15 @@ def extract_company_url(soup: BeautifulSoup, url: str) -> str | None:
     return urljoin(url, href) if isinstance(href, str) and href else None
 
 
+def normalize_offer_location(value: object | None) -> str | None:
+    location = clean_text(value)
+    return re.sub(r"^B\.?\s*P\.?\s*\d+\s*,\s*", "", location, flags=re.IGNORECASE) if location else None
+
+
 def extract_location(soup: BeautifulSoup, url: str) -> str | None:
     if not _is_emploi_territorial_url(url):
         return None
-    return _label_value(soup, "Lieu de travail")
+    return normalize_offer_location(_label_value(soup, "Lieu de travail"))
 
 
 def extract_description(soup: BeautifulSoup, url: str) -> str | None:

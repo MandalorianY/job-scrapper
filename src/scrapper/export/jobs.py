@@ -13,10 +13,12 @@ import structlog
 
 from scrapper.export.tracker import (
     DEFAULT_LOCALIZED_TRACKER_COLUMNS,
+    _append_review_note,
     _canonical_link_aliases,
     _excel_safe,
     _localized_job_tracker,
     _merge_existing_tracker_rows,
+    _offer_location,
     _offer_row_allowed,
     _select_tracker_columns,
     _sort_tracker_for_export,
@@ -59,6 +61,7 @@ def export_job_formats(
     include_terms: tuple[str, ...] = (),
     exclude_terms: tuple[str, ...] = (),
     location_allowed: Callable[[object | None], bool] | None = None,
+    location_review: Callable[[object | None], bool] | None = None,
     excluded_title_patterns: tuple[str, ...] = (),
 ) -> tuple[tuple[Path, ...], int]:
     if not formats or len(set(formats)) != len(formats):
@@ -73,13 +76,10 @@ def export_job_formats(
     for _, row in raw.iterrows():
         if not _offer_row_allowed(row, include_terms, exclude_terms, excluded_title_patterns, None):
             excluded_urls.update(offer_link_keys(row.get("source_url"), row.get("direct_url")))
-        if (
-            location_allowed
-            and not location_allowed(row.get("location"))
-            and (key := listing_url_key(row.get("source_url")))
-        ):
-            out_of_scope_urls.add(key)
+        if location_allowed and not location_allowed(_offer_location(row)):
+            out_of_scope_urls.update(offer_link_keys(row.get("source_url"), row.get("direct_url")))
     if not canonical.empty:
+        canonical["location"] = canonical.apply(_offer_location, axis=1)
         allowed = cast(
             "pd.Series",
             canonical.apply(
@@ -112,6 +112,7 @@ def export_job_formats(
             repair_fields_enabled_by_default=repair_fields_enabled_by_default,
             repair_fields_by_source=repair_fields_by_source,
             direct_links_enabled_by_source=direct_links_enabled_by_source,
+            location_review=location_review,
         ),
         excel_columns or DEFAULT_LOCALIZED_TRACKER_COLUMNS,
     )
@@ -121,12 +122,17 @@ def export_job_formats(
         localized,
         _read_existing_tracker(tracker_paths(export_dir, formats)),
         location_allowed=location_allowed,
+        location_review=location_review,
         include_terms=include_terms,
         exclude_terms=exclude_terms,
         excluded_title_patterns=excluded_title_patterns,
         excluded_urls=excluded_urls | (out_of_scope_urls - current_link_keys),
         current_link_aliases=aliases,
     )
+    if location_review is not None and {"À vérifier", "Lieu"} <= set(localized.columns):
+        for index, location in localized["Lieu"].items():
+            if location_review(location):
+                _append_review_note(localized, index, "Localisation à vérifier")
     localized = _sort_tracker_for_export(localized)
     if "Postulé" in localized.columns and "Statut" in localized.columns:
         localized["Postulé"] = localized["Statut"].eq("Postulé")

@@ -19,13 +19,22 @@ titles pass the filter. Set `locations` to one or more French municipality names
 Pass `--location` once per town to override the configured locations for a run.
 The location filter uses `distance_km` by default. Set
 `location_scope.radius_km` to give the filter its own radius and use
-`location_scope.city_aliases` to add alternate municipality names.
+`location_scope.city_aliases` to add alternate municipality names. The filter
+ignores differences in case, accents, and punctuation. Add an alias for a
+recurring spelling variation you can verify.
+
+By default, the tracker keeps listings with a town label the geography cache
+cannot resolve. These appear in `Offres` and the selected CSV export with the
+provider's town spelling. Include the optional `À vérifier` column to flag them.
+Set `location_scope.include_unrecognized: false` to exclude these listings.
+Blank locations, region-only labels, and towns the cache identifies as outside
+the radius stay outside the tracker.
 
 Live runs resolve each municipality's coordinates, department, and region to
 build provider routes. Municipality and region data are cached beside DuckDB.
 Live runs fetch missing cache entries and recalculate changes to the radius or
-aliases from cached geography. The scraper saves the resolved scope for offline
-export and replay with matching location settings.
+aliases from cached geography. Offline exports and replay can recalculate the
+radius for cached towns. A live search caches towns that are new to a profile.
 
 Use `--show-config` to inspect effective settings, their origins, and available
 cached geography offline. `--status` uses saved geographic scope when

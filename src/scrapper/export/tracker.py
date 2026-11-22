@@ -99,6 +99,7 @@ def _merge_existing_tracker_rows(
     previous: pd.DataFrame,
     *,
     location_allowed: Callable[[object | None], bool] | None = None,
+    location_review: Callable[[object | None], bool] | None = None,
     include_terms: tuple[str, ...] = (),
     exclude_terms: tuple[str, ...] = (),
     excluded_title_patterns: tuple[str, ...] = (),
@@ -122,7 +123,9 @@ def _merge_existing_tracker_rows(
             known_current_keys=known_current_keys,
         )
     ]
-    previous = cast(pd.DataFrame, previous.apply(_normalize_previous_tracker_row, axis=1))
+    previous = cast(
+        pd.DataFrame, previous.apply(_normalize_previous_tracker_row, axis=1, location_review=location_review)
+    )
     previous_by_key: dict[str, pd.Series] = {}
     for _, row in previous.iterrows():
         key = _tracker_row_key(row)
@@ -217,6 +220,11 @@ def _tracker_row_allowed(
     )
 
 
+def _offer_location(row: pd.Series) -> str | None:
+    source = row.get("best_source") or row.get("source")
+    return get_source_rules(source).normalize_location(row.get("location"))
+
+
 def _offer_row_allowed(
     row: pd.Series,
     include_terms: tuple[str, ...],
@@ -233,7 +241,9 @@ def _offer_row_allowed(
     return location_allowed is None or location_allowed(row.get("location"))
 
 
-def _normalize_previous_tracker_row(row: pd.Series) -> pd.Series:
+def _normalize_previous_tracker_row(
+    row: pd.Series, location_review: Callable[[object | None], bool] | None = None
+) -> pd.Series:
     status = row.get("Statut")
     if _is_blank(status) and _coerce_checkbox_value(row.get("Postulé")):
         status = "Postulé"
@@ -243,7 +253,7 @@ def _normalize_previous_tracker_row(row: pd.Series) -> pd.Series:
     if "Rejeté" in normalized.index:
         normalized["Rejeté"] = _coerce_checkbox_value(normalized.get("Rejeté"))
     if "Lieu" in normalized.index:
-        normalized["Lieu"] = _town_fr(normalized.get("Lieu"))
+        normalized["Lieu"] = _tracker_town(normalized.get("Lieu"), location_review)
     if "Publié le" in normalized.index:
         normalized["Publié le"] = _date_value(normalized.get("Publié le"))
     for column in ("Lien", "Postuler", "Offre source", "URL entreprise"):
@@ -269,7 +279,8 @@ def _preserve_tracker_state(current: pd.DataFrame, index: Hashable, previous: pd
 
 
 def _append_review_note(frame: pd.DataFrame, index: Hashable, note: str) -> None:
-    current = str(frame.at[index, "À vérifier"] or "")
+    value = frame.at[index, "À vérifier"]
+    current = "" if _is_blank(value) else str(value)
     if note not in current:
         frame.at[index, "À vérifier"] = " ; ".join(part for part in (current, note) if part)
 
@@ -339,6 +350,7 @@ def _localized_job_tracker(
     repair_fields_enabled_by_default: bool = True,
     repair_fields_by_source: dict[str, bool] | None = None,
     direct_links_enabled_by_source: dict[str, bool] | None = None,
+    location_review: Callable[[object | None], bool] | None = None,
 ) -> pd.DataFrame:
     records: list[dict[str, object]] = []
     repair_fields_by_source = repair_fields_by_source or {}
@@ -371,7 +383,7 @@ def _localized_job_tracker(
                 "Autres liens": _compact_links(row.get("all_source_links"), row.get("all_direct_links")),
                 "Intitulé": title,
                 "Entreprise": company,
-                "Lieu": _town_fr(location),
+                "Lieu": _tracker_town(location, location_review),
                 "Contrat": _contract_fr(row.get("employment_type")),
                 "Télétravail": _remote_fr(row.get("is_remote")),
                 "Salaire min (€ annuel)": salary_min,
@@ -464,6 +476,12 @@ def _remote_fr(value: object) -> str:
     if value is False or str(value).lower() == "false":
         return "Non"
     return ""
+
+
+def _tracker_town(value: object | None, location_review: Callable[[object | None], bool] | None) -> str:
+    if location_review is not None and location_review(value):
+        return clean_text(value) or ""
+    return _town_fr(value)
 
 
 def _town_fr(value: object) -> str:

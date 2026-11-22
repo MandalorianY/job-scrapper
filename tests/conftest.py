@@ -24,6 +24,7 @@ def toulouse_scope() -> LocationScopeConfig:
     from scrapper.config.settings import LocationCenterConfig, LocationScopeConfig
 
     return LocationScopeConfig(
+        include_unrecognized=False,
         radius_km=25,
         centers=(LocationCenterConfig(name="Toulouse", latitude=43.6007, longitude=1.4328),),
         city_coordinates={

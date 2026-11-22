@@ -35,6 +35,7 @@ def _no_source_override(_soup: BeautifulSoup, _url: str) -> str | None:
 @dataclass(frozen=True)
 class SourceRuleSet:
     normalize_title: Callable[[object | None], str | None] = _default_title_normalizer
+    normalize_location: Callable[[object | None], str | None] = clean_text
     repair_tracker_fields: TrackerRepair = _default_tracker_repair
     extract_title: SoupExtractor = _no_source_override
     extract_company: SoupExtractor = _no_source_override
@@ -49,6 +50,7 @@ class SourceRuleSet:
 SOURCE_RULES: dict[str, SourceRuleSet] = {
     "france_travail": SourceRuleSet(
         normalize_title=france_travail.normalize_title,
+        normalize_location=france_travail.normalize_offer_location,
         repair_tracker_fields=france_travail.repair_tracker_fields,
         extract_company=france_travail.extract_company,
         extract_company_url=france_travail.extract_company_url,
@@ -73,6 +75,7 @@ SOURCE_RULES: dict[str, SourceRuleSet] = {
         extract_description=emploi_collectivites.extract_description,
     ),
     "emploi_territorial": SourceRuleSet(
+        normalize_location=emploi_territorial.normalize_offer_location,
         extract_title=emploi_territorial.extract_title,
         extract_company=emploi_territorial.extract_company,
         extract_company_url=emploi_territorial.extract_company_url,
