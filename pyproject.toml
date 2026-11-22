@@ -1,6 +1,6 @@
 [project]
 name = "scrapper"
-version = "0.1.0"
+version = "0.1.1"
 description = "A Python job scraper for job seekers that deduplicates listings across boards and exports a local Excel application tracker."
 readme = "README.md"
 requires-python = ">=3.13"
