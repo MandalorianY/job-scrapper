@@ -2,8 +2,8 @@ class Jobsfr < Formula
   include Language::Python::Virtualenv
 
   desc "Job scraper and Excel application tracker for France"
-  homepage "https://github.com/MandalorianY/job-scrapper"
-  url "https://github.com/MandalorianY/job-scrapper/releases/download/v@VERSION@/scrapper-@VERSION@.tar.gz"
+  homepage "https://github.com/MandalorianY/french-job-scraper"
+  url "https://github.com/MandalorianY/french-job-scraper/releases/download/v@VERSION@/scrapper-@VERSION@.tar.gz"
   sha256 "@SHA256@"
   license "MIT"
 
