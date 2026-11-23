@@ -11,16 +11,16 @@ from xlsxwriter.format import Format
 from xlsxwriter.utility import xl_rowcol_to_cell
 from xlsxwriter.worksheet import Worksheet
 
-from scrapper.export.tracker import STATUS_COLORS, STATUS_OPTIONS, TRACKER_WIDTHS, _coerce_checkbox_value, _safe_cell
+from scrapper.export.tracker import TRACKER_WIDTHS, _coerce_checkbox_value, _safe_cell, _tracker_status_colors
 
 MAX_EXCEL_ROW_INDEX = 1_048_575
 
 
-def write_xlsx(path: Path, tracker: pd.DataFrame, raw: pd.DataFrame) -> None:
+def write_xlsx(path: Path, tracker: pd.DataFrame, raw: pd.DataFrame, *, keep_reposts: bool = False) -> None:
     with pd.ExcelWriter(path, engine="xlsxwriter", date_format="dd/mm/yyyy", datetime_format="dd/mm/yyyy") as writer:
         tracker.to_excel(writer, index=False, sheet_name="Offres")
         raw.to_excel(writer, index=False, sheet_name="Données brutes")
-        _format_jobs_sheet(writer, "Offres", tracker)
+        _format_jobs_sheet(writer, "Offres", tracker, keep_reposts)
         _format_raw_sheet(writer, "Données brutes", raw)
 
 
@@ -48,7 +48,7 @@ def read_xlsx_tracker(path: Path) -> pd.DataFrame:
         workbook.close()
 
 
-def _format_jobs_sheet(writer: pd.ExcelWriter, sheet_name: str, frame: pd.DataFrame) -> None:
+def _format_jobs_sheet(writer: pd.ExcelWriter, sheet_name: str, frame: pd.DataFrame, keep_reposts: bool) -> None:
     worksheet = writer.sheets[sheet_name]
     workbook = writer.book
     worksheet.freeze_panes(1, 0)
@@ -91,6 +91,7 @@ def _format_jobs_sheet(writer: pd.ExcelWriter, sheet_name: str, frame: pd.DataFr
             value = _coerce_checkbox_value(frame.iloc[row - 1, rejected_checkbox_col - 1])
             worksheet.insert_checkbox(row, rejected_checkbox_col - 1, value, checkbox_format)
     if status_col:
+        statuses = _tracker_status_colors(keep_reposts=keep_reposts)
         worksheet.data_validation(
             1,
             status_col - 1,
@@ -98,15 +99,15 @@ def _format_jobs_sheet(writer: pd.ExcelWriter, sheet_name: str, frame: pd.DataFr
             status_col - 1,
             {
                 "validate": "list",
-                "source": list(STATUS_OPTIONS),
+                "source": list(statuses),
                 "input_title": "Statut",
                 "input_message": "Choisir un statut.",
                 "error_title": "Statut invalide",
-                "error_message": "Choisissez En Attente, Postulé ou Refusé.",
+                "error_message": "Choisissez un statut dans la liste.",
             },
         )
         if len(frame):
-            for status, (background, foreground) in STATUS_COLORS.items():
+            for status, (background, foreground) in statuses.items():
                 worksheet.conditional_format(
                     1,
                     status_col - 1,

@@ -9,6 +9,7 @@ import httpx
 from bs4 import BeautifulSoup
 
 from scrapper.config import SearchConfig
+from scrapper.contracts import infer_offer_contract
 from scrapper.dates import FRENCH_DATE_PHRASE_RE
 from scrapper.models import JobOffer
 from scrapper.scrapers import cadremploi, france_travail
@@ -92,7 +93,7 @@ async def _extract_detail_offer(
     description = source_description or structured_description or _description_from_page(soup)
     employment_type = source_rules.extract_employment_type(soup, url) or _employment_type(job.get("employmentType"))
     if not employment_type and source != "jobijoba":
-        employment_type = _infer_contract(description)
+        employment_type = infer_offer_contract(title, description)
     offer = JobOffer(
         source=source,
         source_url=url,
@@ -102,7 +103,8 @@ async def _extract_detail_offer(
         description=description,
         date_posted=source_rules.extract_date(soup, url) or clean_text(job.get("datePosted")) or _infer_date(text),
         employment_type=employment_type,
-        salary=clean_text(job.get("baseSalary")) or source_rules.extract_salary(soup, url) or _infer_salary(text),
+        salary=source_rules.extract_salary(soup, url) or _infer_salary(text) or clean_text(job.get("baseSalary")),
+        is_remote=True if job.get("jobLocationType") == "TELECOMMUTE" else None,
         company_url=source_rules.extract_company_url(soup, url) or _site_root(url),
         search_query=query,
         search_location=config.location_label,
@@ -266,15 +268,6 @@ def _employment_type(value: object) -> str | None:
     if isinstance(value, list):
         return ", ".join(filter(None, [clean_text(item) for item in value])) or None
     return clean_text(value)
-
-
-def _infer_contract(text: str | None) -> str | None:
-    normalized = (clean_text(text) or "").lower()
-    found = []
-    for label in ("CDI", "CDD"):
-        if label.lower() in normalized:
-            found.append(label)
-    return ", ".join(found) or None
 
 
 def _infer_location(text: str | None, config: SearchConfig | None = None) -> str | None:

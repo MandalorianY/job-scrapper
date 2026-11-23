@@ -12,6 +12,7 @@ import httpx
 import pytest
 
 from scrapper.config import SearchConfig
+from scrapper.salary import salary_bounds
 from scrapper.scrapers import wttj
 from scrapper.scrapers.async_http import HostThrottle, SourceBlockedError
 from scrapper.storage import JobStore
@@ -224,7 +225,10 @@ def test_wttj_keeps_recent_hits_after_old_relevance_results(
                 200,
                 headers={"content-type": "text/html"},
                 text=(
-                    '<script type="application/ld+json">{"@type":"JobPosting","description":"Missions complètes."}</script>'
+                    "<title>Chargé de communication - Example - CDI à Toulouse</title>"
+                    '<script type="application/ld+json">{"@type":"JobPosting","description":"Missions complètes.",'
+                    '"jobLocationType":"TELECOMMUTE","baseSalary":{"@type":"MonetaryAmount","currency":"EUR",'
+                    '"value":{"value":2700,"unitText":"MONTH"}}}</script>'
                 ),
             )
         params = parse_qs(json.loads(request.content)["requests"][0]["params"])
@@ -254,6 +258,10 @@ def test_wttj_keeps_recent_hits_after_old_relevance_results(
             f"{config.welcome_to_the_jungle.site_url}/fr/companies/example/jobs/recent-job",
         ]
         assert store.raw_dataframe()["description"].tolist() == ["Missions complètes."]
+        record = store.raw_dataframe().iloc[0]
+        assert record["employment_type"] == "CDI"
+        assert bool(record["is_remote"])
+        assert salary_bounds(record.get) == (32400, 32400)
     finally:
         store.close()
 

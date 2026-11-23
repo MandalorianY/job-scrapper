@@ -55,6 +55,7 @@ def export_job_formats(
     excel_columns: Sequence[str] | None = None,
     *,
     formats: tuple[ExportFormat, ...],
+    keep_reposts: bool = False,
     repair_fields_enabled_by_default: bool = True,
     repair_fields_by_source: dict[str, bool] | None = None,
     direct_links_enabled_by_source: dict[str, bool] | None = None,
@@ -69,7 +70,9 @@ def export_job_formats(
 
     filters = filters or ListingFilters()
     canonical = _excel_safe(
-        store.canonical_dataframe(allows=lambda row: filters.allows(row.get), exclude_contracts=True)
+        store.canonical_dataframe(
+            allows=lambda row: filters.allows(row.get), exclude_contracts=True, keep_reposts=keep_reposts
+        )
     )
     raw = store.raw_dataframe()
     excluded_urls = store.excluded_url_keys()
@@ -84,6 +87,9 @@ def export_job_formats(
         canonical["location"] = canonical.apply(_offer_location, axis=1)
         if location_allowed is not None:
             canonical = canonical.loc[cast("pd.Series", canonical["location"].map(location_allowed))]
+    columns = tuple(excel_columns or DEFAULT_LOCALIZED_TRACKER_COLUMNS)
+    if keep_reposts and cast("pd.Series", canonical["is_repost"]).any():
+        columns = (*(column for column in ("Statut", "Lien") if column not in columns), *columns)
     localized = _select_tracker_columns(
         _localized_job_tracker(
             canonical,
@@ -92,7 +98,7 @@ def export_job_formats(
             direct_links_enabled_by_source=direct_links_enabled_by_source,
             location_review=location_review,
         ),
-        excel_columns or DEFAULT_LOCALIZED_TRACKER_COLUMNS,
+        columns,
     )
     aliases = _canonical_link_aliases(canonical, direct_links_enabled_by_source or {})
     current_link_keys = {alias.removeprefix("url:") for links in aliases.values() for alias in links}
@@ -104,6 +110,7 @@ def export_job_formats(
         filters=filters,
         excluded_urls=excluded_urls | (out_of_scope_urls - current_link_keys),
         current_link_aliases=aliases,
+        keep_reposts=keep_reposts,
     )
     if location_review is not None and {"À vérifier", "Lieu"} <= set(localized.columns):
         for index, location in localized["Lieu"].items():
@@ -121,19 +128,19 @@ def export_job_formats(
                 frame = raw if output.name == "jobs_raw.csv" else localized
                 frame.to_csv(path, index=False)
             else:
-                _write_workbook(path, localized, raw)
+                _write_workbook(path, localized, raw, keep_reposts=keep_reposts)
         _publish_exports(staged, outputs)
 
     return outputs, len(localized)
 
 
-def _write_workbook(path: Path, tracker: pd.DataFrame, raw: pd.DataFrame) -> None:
+def _write_workbook(path: Path, tracker: pd.DataFrame, raw: pd.DataFrame, *, keep_reposts: bool) -> None:
     if path.suffix == ".ods":
         from scrapper.export.ods import write_ods
 
-        write_ods(path, tracker, raw)
+        write_ods(path, tracker, raw, keep_reposts=keep_reposts)
     else:
-        write_xlsx(path, tracker, raw)
+        write_xlsx(path, tracker, raw, keep_reposts=keep_reposts)
 
 
 def _publish_exports(staged: Path, outputs: tuple[Path, ...]) -> None:

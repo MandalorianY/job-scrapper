@@ -53,6 +53,8 @@ export:
   # Pick any combination of xlsx, ods, and csv. The first format is the editable tracker.
   # ODS needs uv run --extra ods. CSV generates both jobs.csv and jobs_raw.csv.
   # formats: [xlsx, csv]
+  # Keep later publications of the same vacancy as separate rows marked Republié.
+  keep_reposts: true
   # Available fields for the final Offres workbook and CSV export:
   # Postulé, Rejeté, Lien, Statut, Postuler, Offre source, Autres liens, Intitulé,
   # Entreprise, Lieu, Contrat, Télétravail, Salaire min (€ annuel),

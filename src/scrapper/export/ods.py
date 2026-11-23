@@ -18,10 +18,10 @@ from xlsxwriter.utility import xl_col_to_name
 
 from scrapper.export.tracker import (
     LINK_COLUMNS,
-    STATUS_COLORS,
     TRACKER_WIDTHS,
     _coerce_checkbox_value,
     _extract_hyperlink_url,
+    _tracker_status_colors,
 )
 
 if TYPE_CHECKING:
@@ -53,7 +53,7 @@ def read_ods_tracker(path: Path) -> pd.DataFrame:
     return pd.read_excel(book, sheet_name="Offres", engine="odf", dtype=object, keep_default_na=False)
 
 
-def write_ods(path: Path, tracker: pd.DataFrame, raw: pd.DataFrame) -> None:
+def write_ods(path: Path, tracker: pd.DataFrame, raw: pd.DataFrame, *, keep_reposts: bool = False) -> None:
     book = OpenDocumentSpreadsheet()
     spreadsheet = cast("_HasSpreadsheet", book).spreadsheet
     spreadsheet.get_nsprefix(OFNS)
@@ -64,9 +64,10 @@ def write_ods(path: Path, tracker: pd.DataFrame, raw: pd.DataFrame) -> None:
     book.styles.addElement(header)
 
     columns = list(tracker.columns)
+    statuses = _tracker_status_colors(keep_reposts=keep_reposts)
     status_column = xl_col_to_name(columns.index("Statut")) if "Statut" in columns else ""
     if status_column and not tracker.empty:
-        _add_status_validation(spreadsheet, status_column)
+        _add_status_validation(spreadsheet, status_column, tuple(statuses))
     ranges = table.DatabaseRanges()
     for name, range_name, frame in (
         ("Offres", "TableOffres", tracker),
@@ -78,7 +79,7 @@ def write_ods(path: Path, tracker: pd.DataFrame, raw: pd.DataFrame) -> None:
             _add_columns(book, sheet, tracker.columns, TRACKER_WIDTHS, header)
             _add_tracker_rows(sheet, tracker, controls, status_column)
             if status_column and not tracker.empty:
-                _add_status_colors(book, sheet, status_column, len(frame) + 1)
+                _add_status_colors(book, sheet, status_column, len(frame) + 1, statuses)
         else:
             _add_columns(book, sheet, raw.columns, {}, header)
             for values in raw.itertuples(index=False, name=None):
@@ -214,8 +215,8 @@ def _add_checkbox(controls: Element, cell: Element, address: str, checked: bool)
     )
 
 
-def _add_status_validation(spreadsheet: Element, column: str) -> None:
-    choices = ";".join(f'"{status}"' for status in STATUS_COLORS)
+def _add_status_validation(spreadsheet: Element, column: str, statuses: Sequence[str]) -> None:
+    choices = ";".join(f'"{status}"' for status in statuses)
     validations = table.ContentValidations(parent=spreadsheet)
     validation = table.ContentValidation(
         name="Statut",
@@ -226,7 +227,7 @@ def _add_status_validation(spreadsheet: Element, column: str) -> None:
         parent=validations,
     )
     error = table.ErrorMessage(messagetype="stop", title="Statut invalide", display="true", parent=validation)
-    error.addElement(text.P(text="Choisissez En Attente, Postulé ou Refusé."))
+    error.addElement(text.P(text="Choisissez un statut dans la liste."))
 
 
 def _add_status_colors(
@@ -234,6 +235,7 @@ def _add_status_colors(
     sheet: Element,
     column: str,
     last_row: int,
+    statuses: Mapping[str, tuple[str, str]],
 ) -> None:
     first_cell = f"Offres.{column}2"
     formats = Element(qname=(CALC_EXT, "conditional-formats"))
@@ -243,7 +245,7 @@ def _add_status_colors(
     )
     formats.addElement(condition_range, check_grammar=False)
     sheet.addElement(formats, check_grammar=False)
-    for index, (status, (background, foreground)) in enumerate(STATUS_COLORS.items()):
+    for index, (status, (background, foreground)) in enumerate(statuses.items()):
         status_style = style.Style(name=f"Status{index}", family="table-cell")
         status_style.addElement(style.TableCellProperties(backgroundcolor=background))
         status_style.addElement(style.TextProperties(color=foreground))

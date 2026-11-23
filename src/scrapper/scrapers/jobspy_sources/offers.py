@@ -11,6 +11,7 @@ from scrapper.text import has_excluded_contract_signal, is_application_destinati
 
 def row_to_offer(row: Mapping[str, object], site: str, query: str, search_location: str) -> JobOffer:
     direct_url = string_or_none(row.get("job_url_direct"))
+    employment_type = string_or_none(row.get("listing_type")) if site == "hellowork" else None
     return JobOffer(
         source=site,
         source_id=string_or_none(row.get("id")),
@@ -21,7 +22,7 @@ def row_to_offer(row: Mapping[str, object], site: str, query: str, search_locati
         location=string_or_none(row.get("location")),
         description=string_or_none(row.get("description")),
         date_posted=string_or_none(row.get("date_posted")),
-        employment_type=string_or_none(row.get("job_type")),
+        employment_type=employment_type or string_or_none(row.get("job_type")),
         min_amount=_float_or_none(row.get("min_amount")),
         max_amount=_float_or_none(row.get("max_amount")),
         currency=string_or_none(row.get("currency")),

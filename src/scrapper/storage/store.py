@@ -14,6 +14,7 @@ from scrapper.dates import absolute_posted_date
 from scrapper.models import JobOffer
 from scrapper.source_rules.cadremploi import offer_id as cadremploi_offer_id
 from scrapper.storage.dedupe import aggregate_group_links, build_group_keys
+from scrapper.storage.reposts import split_reposts
 from scrapper.storage.schema import ensure_schema
 from scrapper.text import (
     clean_text,
@@ -37,12 +38,15 @@ CANONICAL_COLUMNS = [
     "company",
     "location",
     "date_posted",
+    "is_repost",
     "employment_type",
+    "contract_type",
     "salary",
     "min_amount",
     "max_amount",
     "currency",
     "interval",
+    "annual_salary_bounds",
     "is_remote",
     "best_source",
     "best_source_url",
@@ -376,7 +380,11 @@ class JobStore:
         return True
 
     def canonical_dataframe(
-        self, *, allows: Callable[[pd.Series], bool] | None = None, exclude_contracts: bool = False
+        self,
+        *,
+        allows: Callable[[pd.Series], bool] | None = None,
+        exclude_contracts: bool = False,
+        keep_reposts: bool = False,
     ) -> pd.DataFrame:
         frame = self.conn.execute(
             """
@@ -430,6 +438,9 @@ class JobStore:
         if exclude_contracts:
             rejected_groups = frame.loc[frame.apply(_has_excluded_contract, axis=1), "group_key"]
             frame = frame.loc[~frame["group_key"].isin(rejected_groups)].copy()
+        frame["reposted_on"] = None
+        if keep_reposts and not frame.empty:
+            frame["group_key"], frame["reposted_on"] = split_reposts(frame)
         status_alias_keys: dict[str, set[str]] = {}
         if allows is not None and not frame.empty:
             accepted = frame.apply(allows, axis=1)
@@ -461,10 +472,13 @@ class JobStore:
             lambda key: tuple(sorted(status_alias_keys.get(key) or ()))
         )
         result["description"] = result.pop("group_description")
+        result["is_remote"] = result.pop("group_is_remote")
         result["date_posted"] = result["date_posted"].where(
             result["date_posted"].notna() & (result["date_posted"].astype(str).str.strip() != ""),
             result["group_date_posted"],
         )
+        result["date_posted"] = result["reposted_on"].fillna(result["date_posted"])
+        result["is_repost"] = result["reposted_on"].notna()
         posted_dates = pd.to_datetime(result["date_posted"], errors="coerce", utc=True).dt.as_unit("us")
         last_seen_dates = pd.to_datetime(result["last_seen_at"], errors="coerce", utc=True).dt.as_unit("us")
         result["sort_date"] = posted_dates.fillna(last_seen_dates)
@@ -501,7 +515,7 @@ class JobStore:
         frame = self.conn.execute(
             """
             SELECT offer_id, dedupe_key, description_key, source, source_id, source_url, direct_url,
-                   location, title, company, employment_type, description
+                   location, title, company, employment_type, description, date_posted
             FROM raw_offers ORDER BY offer_id
             """
         ).df()

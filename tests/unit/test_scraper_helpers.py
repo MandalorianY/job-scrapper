@@ -8,11 +8,12 @@ from bs4 import BeautifulSoup
 
 from scrapper.config import SearchConfig
 from scrapper.config.settings import LocationScopeConfig
+from scrapper.contracts import infer_offer_contract
 from scrapper.dates import absolute_posted_date
 from scrapper.location_scope import mentions_location_in_scope
 from scrapper.models import JobOffer
 from scrapper.scrapers.aggregators.detail import _company_from_domain as aggregator_company_from_domain
-from scrapper.scrapers.aggregators.detail import _infer_contract, _offer_is_usable
+from scrapper.scrapers.aggregators.detail import _offer_is_usable
 from scrapper.scrapers.common import (
     apply_url,
     custom_search_cutoff,
@@ -148,7 +149,7 @@ def test_aggregator_offer_usability_requires_title_contract_and_region(toulouse_
     config.location_scope.include_unrecognized = True
     assert _offer_is_usable(typo, config)
     assert not _offer_is_usable(replace(usable, location="Montauban"), config)
-    assert _infer_contract("CDI ou CDD possible") == "CDI, CDD"
+    assert infer_offer_contract(None, "Type de contrat : CDI ou CDD") == "CDI, CDD"
     assert mentions_location_in_scope("Hybrid role with presence in Blagnac", config.location_scope)
     assert aggregator_company_from_domain("https://www.emploi-collectivites.fr/offres/1") == "Emploi Collectivites"
 

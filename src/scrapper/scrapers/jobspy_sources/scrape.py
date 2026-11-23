@@ -16,6 +16,7 @@ from jobspy import scrape_jobs
 
 from scrapper.config import SearchConfig
 from scrapper.models import JobOffer
+from scrapper.scrapers.jobspy_sources.hellowork import patch_hellowork_scraper
 from scrapper.scrapers.jobspy_sources.linkedin import patch_linkedin_scraper
 from scrapper.scrapers.jobspy_sources.offers import offer_is_usable, row_to_offer, string_or_none
 from scrapper.storage import JobStore
@@ -200,6 +201,8 @@ def _run_jobspy_plan(
 ) -> dict[str, int]:
     if "linkedin" in plan.sites:
         patch_linkedin_scraper()
+    if "hellowork" in plan.sites:
+        patch_hellowork_scraper()
     log.info(
         "jobspy_plan_started",
         sites=list(plan.sites),

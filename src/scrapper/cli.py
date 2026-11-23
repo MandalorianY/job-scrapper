@@ -252,6 +252,7 @@ def run(
             store,
             config.export_dir,
             config.export.excel_columns,
+            keep_reposts=config.export.keep_reposts,
             repair_fields_enabled_by_default=config.export.repair_fields_enabled_by_default,
             repair_fields_by_source=config.export.repair_fields_by_source,
             direct_links_enabled_by_source=config.export.direct_links_enabled_by_source,

@@ -214,6 +214,7 @@ ExportFormat = Literal["xlsx", "ods", "csv"]
 
 class ExportConfig(BaseModel):
     formats: tuple[ExportFormat, ...] = Field(default=("xlsx", "csv"), min_length=1)
+    keep_reposts: bool = True
     excel_columns: tuple[str, ...] = DEFAULT_EXCEL_COLUMNS
     repair_fields_enabled_by_default: bool = True
     repair_fields_by_source: dict[str, bool] = Field(default_factory=dict)

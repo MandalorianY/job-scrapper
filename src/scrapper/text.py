@@ -50,6 +50,9 @@ QUERY_LISTING_ROUTES = {
     ("inrecruitingfr.intervieweb.it", "/annunci.php"): "l",
     ("isarta.fr", "/cgi-bin/emplois/externe_candidature.cgi"): "login",
 }
+_NUMERIC_ANNOUNCEMENT_PATH = re.compile(r"(/fr/annonce/\d+)(?:-[^/]+)?/?$")
+_ALMA_POSTING_PATH = re.compile(r"(/poste/[a-z0-9]{10})(?:-[^/]+)?/?$")
+_TALENTSOFT_POSTING_PATH = re.compile(r"/offre-de-emploi/[^/]+_(\d+)\.aspx$", re.IGNORECASE)
 CONTRACT_MARKERS_RE = re.compile(
     r"\b(h/?f|f/?h|m/?f|f/?m|cdi|cdd|stage|alternance|apprentissage)\b",
     re.IGNORECASE,
@@ -125,6 +128,30 @@ def clean_text(value: object | None) -> str | None:
         text = BeautifulSoup(text, "lxml").get_text(" ")
     text = SPACE_RE.sub(" ", text).strip()
     return text or None
+
+
+def town_name(value: object) -> str:
+    text = clean_text(value)
+    if not text:
+        return ""
+    text = re.sub(r"\s*\(\d{2,3}\s*-\s*[^()]+\)$", "", text)
+    department_match = re.search(r"(?:^|\b)\d{2,3}\s*-\s*([^,]+)", text)
+    if department_match:
+        return _clean_town_name(department_match.group(1))
+    parts = [part.strip() for part in text.split(",") if part.strip()]
+    if len(parts) > 1 and re.match(r"^\d{1,4}(?:\s*(?:bis|ter))?\s+", parts[0], flags=re.IGNORECASE):
+        return _clean_town_name(parts[1])
+    return _clean_town_name(parts[0] if parts else text)
+
+
+def _clean_town_name(value: str) -> str:
+    town = clean_text(value) or ""
+    town = re.sub(
+        r"\s+\d+(?:er|e|eme|ème)?\s+arrondissement\b.*$|\s+\d{1,2}(?:er|e|eme|ème)$", "", town, flags=re.IGNORECASE
+    )
+    town = re.sub(r"\s+-\s+localiser\b.*$", "", town, flags=re.IGNORECASE)
+    town = re.sub(r"^\d{5}\s+|\s*\([^()]*(?:\(\d{2,3}\))\)$|\s*\(\d{2,5}\)$", "", town)
+    return town.strip()
 
 
 def is_application_destination(url: object | None) -> bool:
@@ -241,6 +268,26 @@ def listing_url_key(url: str | None) -> str | None:
     if key and ("?" in key or (leaf and leaf not in GENERIC_LISTING_PATHS and route not in QUERY_LISTING_ROUTES)):
         return key
     return None
+
+
+def posting_url_key(url: str | None) -> str | None:
+    """Recognize stable requisition IDs without changing persisted listing keys."""
+    key = listing_url_key(url)
+    if not key or not url:
+        return key
+    parts = urlparse(url)
+    host = (parts.hostname or "").removeprefix("www.")
+    if host in {"jobs.implid.com", "careers.dcsit-group.com"} and (
+        posting := _NUMERIC_ANNOUNCEMENT_PATH.fullmatch(parts.path)
+    ):
+        return f"{host}{posting[1]}"
+    if host == "recrutement.alma.fr" and (posting := _ALMA_POSTING_PATH.fullmatch(parts.path)):
+        return f"{host}{posting[1]}"
+    if (host.endswith(".talent-soft.com") or host == "emploi.cea.fr") and (
+        posting := _TALENTSOFT_POSTING_PATH.fullmatch(parts.path)
+    ):
+        return f"{host}/offre-de-emploi/{posting[1]}"
+    return key
 
 
 def offer_link_keys(source_url: object, direct_url: object) -> set[str]:

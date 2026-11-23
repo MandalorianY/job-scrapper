@@ -22,10 +22,13 @@ from scrapper.scrapers.common import (
     posted_date_is_before_cutoff,
 )
 from scrapper.storage import JobStore
-from scrapper.text import clean_text, is_application_destination
+from scrapper.text import clean_text, is_application_destination, posting_url_key
 
 WTTJ_SOURCE = "welcome_to_the_jungle"
 WINDOW_ENV_MARKER_RE = re.compile(r"window\.env\s*=\s*")
+_CONTRACT_LABEL = r"(CDI|CDD|Intérim|Freelance|Stage|Alternance|Apprentissage|Fonctionnaire)"
+_FAQ_CONTRACT = re.compile(rf"\bLe contrat pour ce poste est de type\s+{_CONTRACT_LABEL}\b", re.IGNORECASE)
+_TITLE_CONTRACT = re.compile(rf"\s-\s{_CONTRACT_LABEL}\b(?:\s*/\s*Temporaire)?(?:\s+à\s+[^|]+)?$", re.IGNORECASE)
 log = structlog.get_logger(__name__)
 
 
@@ -356,11 +359,22 @@ async def _enrich_public_detail(client: httpx.AsyncClient, throttle: HostThrottl
     response.raise_for_status()
     if response.status_code != 200 or "text/html" not in response.headers.get("content-type", ""):
         return
+    if posting_url_key(str(response.url)) != posting_url_key(offer.source_url):
+        return
     soup = BeautifulSoup(response.text, "lxml")
+    contract = _FAQ_CONTRACT.search(soup.get_text(" ", strip=True))
+    if contract is None and soup.title:
+        contract = _TITLE_CONTRACT.search(soup.title.get_text(" ", strip=True))
+    if contract:
+        offer.employment_type = contract[1]
     job = json_ld_jobposting(soup)
     if job:
         offer.description = clean_text(job.get("description")) or offer.description
         offer.direct_url = offer.direct_url or apply_url(soup, offer.source_url)
+        offer.date_posted = offer.date_posted or clean_text(job.get("datePosted"))
+        if job.get("jobLocationType") == "TELECOMMUTE":
+            offer.is_remote = True
+        offer.raw = {**(offer.raw or {}), "json_ld": job}
 
 
 def _localized(value: object, locale: str) -> str | None:

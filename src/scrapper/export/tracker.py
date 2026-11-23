@@ -11,16 +11,20 @@ from urllib.parse import urlparse
 
 import pandas as pd
 
+from scrapper.contracts import contract_evidence
 from scrapper.dates import parse_posted_date
 from scrapper.filters import ListingFilters
 from scrapper.salary import _review_note, _salary_label, salary_bounds
 from scrapper.source_rules import get_source_rules
-from scrapper.text import clean_text, has_excluded_contract_signal, listing_url_key
+from scrapper.text import clean_text, has_excluded_contract_signal, listing_url_key, posting_url_key
+from scrapper.text import town_name as _town_fr
 
 HYPERLINK_RE = re.compile(r'^=HYPERLINK\("(?P<url>[^"]+)"(?:,"[^"]*")?\)$', re.IGNORECASE)
 LINK_COLUMNS = ("Lien", "Postuler", "Offre source")
+REPOSTED_STATUS = "Republié"
 STATUS_COLORS = {
     "En Attente": ("#FFF2CC", "#7F6000"),
+    REPOSTED_STATUS: ("#DDEBF7", "#1F4E78"),
     "Postulé": ("#E2F0D9", "#375623"),
     "Refusé": ("#FCE4D6", "#9C0006"),
 }
@@ -104,11 +108,14 @@ def _merge_existing_tracker_rows(
     filters: ListingFilters,
     excluded_urls: set[str] | None = None,
     current_link_aliases: dict[str, set[str]] | None = None,
+    keep_reposts: bool = False,
 ) -> pd.DataFrame:
     if previous.empty:
         return current
 
     current = current.copy()
+    if excluded_urls:
+        excluded_urls = excluded_urls | {key for link in excluded_urls if (key := posting_url_key(f"https://{link}"))}
     known_current_keys = {key for aliases in (current_link_aliases or {}).values() for key in aliases}
     previous = previous.loc[
         previous.apply(
@@ -123,11 +130,12 @@ def _merge_existing_tracker_rows(
     previous = cast(
         pd.DataFrame, previous.apply(_normalize_previous_tracker_row, axis=1, location_review=location_review)
     )
-    previous_by_key: dict[str, pd.Series] = {}
+    if not keep_reposts and "Statut" in previous:
+        previous.loc[previous["Statut"].eq(REPOSTED_STATUS), "Statut"] = DEFAULT_STATUS
+    previous_by_key: dict[str, list[pd.Series]] = {}
     for _, row in previous.iterrows():
-        key = _tracker_row_key(row)
-        if key and key not in previous_by_key:
-            previous_by_key[key] = row
+        if key := _tracker_row_key(row):
+            previous_by_key.setdefault(key, []).append(row)
 
     current_keys: set[str] = set()
     for index, row in current.iterrows():
@@ -137,25 +145,24 @@ def _merge_existing_tracker_rows(
         aliases = (current_link_aliases or {}).get(key, {key})
         current_keys.update(aliases)
         matching = [
-            previous_by_key[alias]
+            row
             for alias in sorted(aliases, key=lambda alias: (alias != key, alias))
-            if alias in previous_by_key
+            for row in previous_by_key.get(alias, ())
         ]
         if matching:
-            previous_row = max(matching, key=lambda row: STATUS_OPTIONS.index(_normalize_status(row.get("Statut"))))
-            _preserve_tracker_state(current, index, previous_row)
-        statuses = {_normalize_status(row.get("Statut")) for row in matching}
-        if len(statuses) > 1 and "À vérifier" in current.columns:
-            _append_review_note(current, index, "Statuts divergents entre doublons : " + " / ".join(sorted(statuses)))
+            _restore_matching_state(current, index, matching)
 
-    retained_previous = [
-        row for _, row in previous.iterrows() if (key := _tracker_row_key(row)) and key not in current_keys
-    ]
-    if not retained_previous:
+    retained_groups = [rows for key, rows in previous_by_key.items() if key not in current_keys]
+    if not retained_groups:
         if "Rejeté" in current.columns:
             current["Rejeté"] = current["Rejeté"].apply(_coerce_checkbox_value)
         return current
-    retained = pd.DataFrame(retained_previous).reindex(columns=current.columns)
+    retained = (
+        pd.DataFrame([rows[0] for rows in retained_groups]).reindex(columns=current.columns).reset_index(drop=True)
+    )
+    for index, rows in enumerate(retained_groups):
+        if len(rows) > 1:
+            _restore_matching_state(retained, index, rows)
     merged = pd.concat([current, retained], ignore_index=True)
     if "Rejeté" in merged.columns:
         merged["Rejeté"] = merged["Rejeté"].apply(_coerce_checkbox_value)
@@ -164,17 +171,31 @@ def _merge_existing_tracker_rows(
 
 def _canonical_link_aliases(frame: pd.DataFrame, direct_links: dict[str, bool]) -> dict[str, set[str]]:
     """Recognize historical links to the same canonical offer after its winning source changes."""
-    aliases = {}
+    aliases: dict[str, set[str]] = {}
+    has_reposts = not frame.empty and cast("pd.Series", frame["is_repost"]).any()
+    if has_reposts:
+        frame = frame.sort_values(["is_repost", "date_posted"], kind="stable")
     for _, row in frame.iterrows():
-        key = listing_url_key(_tracker_apply_link(row, direct_links))
+        key = posting_url_key(_tracker_apply_link(row, direct_links, source_for_reposts=True))
         if key:
             links = [str(row.get(field) or "") for field in ("all_source_links", "all_direct_links")]
             aliases[f"url:{key}"] = {f"url:{key}"} | {
-                f"url:{alias}" for link in "\n".join(links).splitlines() if (alias := listing_url_key(link))
+                f"url:{alias}"
+                for link in "\n".join(links).splitlines()
+                for alias in (listing_url_key(link), posting_url_key(link))
+                if alias
             }
             filtered_keys = row.get("status_alias_keys")
             if isinstance(filtered_keys, tuple):
                 aliases[f"url:{key}"].update(f"url:{alias}" for alias in filtered_keys)
+                aliases[f"url:{key}"].update(
+                    f"url:{alias}" for link in filtered_keys if (alias := posting_url_key(f"https://{link}"))
+                )
+    if has_reposts:
+        # Keep source links tied to their own publication. An old shared apply link belongs to the original row.
+        owners = {key: key for key in aliases}
+        for key, links in aliases.items():
+            aliases[key] = {link for link in links if owners.setdefault(link, key) == key}
     return aliases
 
 
@@ -204,7 +225,10 @@ def _tracker_row_allowed(
     known_current_keys: set[str],
 ) -> bool:
     if excluded_urls and any(
-        listing_url_key(_extract_hyperlink_url(row.get(column))) in excluded_urls for column in LINK_COLUMNS
+        key in excluded_urls
+        for column in LINK_COLUMNS
+        if (url := _extract_hyperlink_url(row.get(column)))
+        for key in (listing_url_key(url), posting_url_key(url))
     ):
         return False
     if has_excluded_contract_signal(row.get("Intitulé"), row.get("Contrat"), row.get("Description")):
@@ -248,6 +272,14 @@ def _normalize_previous_tracker_row(
         normalized["Lieu"] = _tracker_town(normalized.get("Lieu"), location_review)
     if "Publié le" in normalized.index:
         normalized["Publié le"] = _date_value(normalized.get("Publié le"))
+    if "Contrat" in normalized.index:
+        contract = str(normalized["Contrat"] or "").replace("CDD / Temporaire", "Temporaire")
+        evidence = {
+            "employment_type": contract,
+            "title": normalized.get("Intitulé"),
+            "description": normalized.get("Description"),
+        }
+        normalized["Contrat"] = contract_evidence(evidence.get)[1]
     for column in ("Lien", "Postuler", "Offre source", "URL entreprise"):
         if column not in normalized.index:
             continue
@@ -257,17 +289,24 @@ def _normalize_previous_tracker_row(
     return normalized
 
 
-def _preserve_tracker_state(current: pd.DataFrame, index: Hashable, previous: pd.Series) -> None:
+def _restore_matching_state(current: pd.DataFrame, index: Hashable, matching: list[pd.Series]) -> None:
+    previous = max(matching, key=lambda row: STATUS_OPTIONS.index(_normalize_status(row.get("Statut"))))
     if "Statut" in current.columns:
-        current.at[index, "Statut"] = _normalize_status(previous.get("Statut"))
+        status = _normalize_status(previous.get("Statut"))
+        if status != DEFAULT_STATUS or current.at[index, "Statut"] != REPOSTED_STATUS:
+            current.at[index, "Statut"] = status
     if "Postulé" in current.columns:
         current.at[index, "Postulé"] = _checkbox_value_from_previous(previous)
     if "Rejeté" in current.columns:
-        current.at[index, "Rejeté"] = _coerce_checkbox_value(previous.get("Rejeté"))
+        current.at[index, "Rejeté"] = any(_coerce_checkbox_value(row.get("Rejeté")) for row in matching)
     if "À vérifier" in current.columns:
-        for note in str(previous.get("À vérifier") or "").split(" ; "):
-            if note.startswith("Statuts divergents entre doublons :"):
-                _append_review_note(current, index, note)
+        statuses = {_normalize_status(row.get("Statut")) for row in matching}
+        for row in matching:
+            for note in str(row.get("À vérifier") or "").split(" ; "):
+                if note.startswith("Statuts divergents entre doublons :"):
+                    _append_review_note(current, index, note)
+        if len(statuses) > 1:
+            _append_review_note(current, index, "Statuts divergents entre doublons : " + " / ".join(sorted(statuses)))
 
 
 def _append_review_note(frame: pd.DataFrame, index: Hashable, note: str) -> None:
@@ -282,7 +321,7 @@ def _tracker_row_key(row: pd.Series) -> str | None:
         if column not in row.index:
             continue
         extracted_url = _extract_hyperlink_url(row.get(column))
-        key = listing_url_key(extracted_url)
+        key = posting_url_key(extracted_url)
         if key:
             return f"url:{key}"
 
@@ -337,6 +376,10 @@ def _normalize_status(value: object) -> str:
     return text if text in STATUS_OPTIONS else DEFAULT_STATUS
 
 
+def _tracker_status_colors(*, keep_reposts: bool) -> dict[str, tuple[str, str]]:
+    return {status: colors for status, colors in STATUS_COLORS.items() if keep_reposts or status != REPOSTED_STATUS}
+
+
 def _localized_job_tracker(
     frame: pd.DataFrame,
     repair_fields_enabled_by_default: bool = True,
@@ -348,7 +391,9 @@ def _localized_job_tracker(
     repair_fields_by_source = repair_fields_by_source or {}
     direct_links_enabled_by_source = direct_links_enabled_by_source or {}
     for _, row in frame.iterrows():
-        salary_min, salary_max = salary_bounds(row.get)
+        bounds = row.get("annual_salary_bounds")
+        salary_min, salary_max = bounds if isinstance(bounds, tuple) else salary_bounds(row.get)
+        contract = row.get("contract_type")
         best_source = str(row.get("best_source") or "").strip()
         should_repair = repair_fields_by_source.get(best_source, repair_fields_enabled_by_default)
         source_rules = get_source_rules(best_source)
@@ -368,15 +413,15 @@ def _localized_job_tracker(
             {
                 "Postulé": False,
                 "Rejeté": False,
-                "Lien": _hyperlink(apply_link),
-                "Statut": DEFAULT_STATUS,
+                "Lien": _hyperlink(_tracker_apply_link(row, direct_links_enabled_by_source, source_for_reposts=True)),
+                "Statut": REPOSTED_STATUS if row.get("is_repost", False) else DEFAULT_STATUS,
                 "Postuler": _hyperlink(apply_link),
                 "Offre source": _hyperlink(row.get("best_source_url")),
                 "Autres liens": _compact_links(row.get("all_source_links"), row.get("all_direct_links")),
                 "Intitulé": title,
                 "Entreprise": company,
                 "Lieu": _tracker_town(location, location_review),
-                "Contrat": _contract_fr(row.get("employment_type")),
+                "Contrat": contract if isinstance(contract, str) else contract_evidence(row.get)[1],
                 "Télétravail": _remote_fr(row.get("is_remote")),
                 "Salaire min (€ annuel)": salary_min,
                 "Salaire max (€ annuel)": salary_max,
@@ -399,12 +444,16 @@ def _localized_job_tracker(
     return pd.DataFrame.from_records(records, columns=LOCALIZED_TRACKER_COLUMNS)
 
 
-def _tracker_apply_link(row: pd.Series, direct_links_enabled_by_source: dict[str, bool]) -> str | None:
+def _tracker_apply_link(
+    row: pd.Series, direct_links_enabled_by_source: dict[str, bool], *, source_for_reposts: bool = False
+) -> str | None:
+    source_url = row.get("best_source_url")
+    if source_for_reposts and row.get("is_repost", False) and isinstance(source_url, str):
+        return source_url
     source = str(row.get("best_source") or "").strip()
     direct_url = row.get("best_direct_url")
     if direct_links_enabled_by_source.get(source, True) and isinstance(direct_url, str) and direct_url:
         return direct_url
-    source_url = row.get("best_source_url")
     return source_url if isinstance(source_url, str) else None
 
 
@@ -442,26 +491,6 @@ def _compact_links(*values: object) -> str:
     return "\n".join(links[:5])
 
 
-def _contract_fr(value: object) -> str:
-    text = str(value or "").strip()
-    mapping = {
-        "fulltime": "Temps plein",
-        "parttime": "Temps partiel",
-        "temporary": "CDD / Temporaire",
-        "contract": "Contrat",
-        "contractor": "Indépendant",
-        "other": "Autre",
-    }
-    parts = [
-        mapping.get(re.sub(r"[\s_-]+", "", part.casefold()), part) for part in map(str.strip, text.split(",")) if part
-    ]
-    deduped = []
-    for part in parts:
-        if part and part not in deduped:
-            deduped.append(part)
-    return ", ".join(deduped)
-
-
 def _remote_fr(value: object) -> str:
     if value is True or str(value).lower() == "true":
         return "Oui"
@@ -474,30 +503,6 @@ def _tracker_town(value: object | None, location_review: Callable[[object | None
     if location_review is not None and location_review(value):
         return clean_text(value) or ""
     return _town_fr(value)
-
-
-def _town_fr(value: object) -> str:
-    text = clean_text(value)
-    if not text:
-        return ""
-    text = re.sub(r"\s*\(\d{2,3}\s*-\s*[^()]+\)$", "", text)
-    department_match = re.search(r"(?:^|\b)\d{2,3}\s*-\s*([^,]+)", text)
-    if department_match:
-        return _clean_town_name(department_match.group(1))
-    parts = [part.strip() for part in text.split(",") if part.strip()]
-    if len(parts) > 1 and re.match(r"^\d{1,4}(?:\s*(?:bis|ter))?\s+", parts[0], flags=re.IGNORECASE):
-        return _clean_town_name(parts[1])
-    return _clean_town_name(parts[0] if parts else text)
-
-
-def _clean_town_name(value: str) -> str:
-    town = clean_text(value) or ""
-    town = re.sub(
-        r"\s+\d+(?:er|e|eme|ème)?\s+arrondissement\b.*$|\s+\d{1,2}(?:er|e|eme|ème)$", "", town, flags=re.IGNORECASE
-    )
-    town = re.sub(r"\s+-\s+localiser\b.*$", "", town, flags=re.IGNORECASE)
-    town = re.sub(r"^\d{5}\s+|\s*\([^()]*(?:\(\d{2,3}\))\)$|\s*\(\d{2,5}\)$", "", town)
-    return town.strip()
 
 
 def _date_value(value: object, today: date | None = None) -> date | None:
