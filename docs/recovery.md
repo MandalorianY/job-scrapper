@@ -14,7 +14,7 @@ To carry application statuses forward, put a copy of your editable tracker in
 `exports/rebuilt` before running the command.
 
 ```sh
-uv run --locked job-scrapper \
+uv run --locked jobsfr \
   --replay-from data/job_search.duckdb \
   --db data/rebuilt.duckdb \
   --export-dir exports/rebuilt \
@@ -22,7 +22,7 @@ uv run --locked job-scrapper \
 ```
 
 Use `--profile PATH` if you normally run with a profile. Add `--extra ods` before
-`job-scrapper` if ODS is selected. Keep a full copy of the original DuckDB file to
+`jobsfr` if ODS is selected. Keep a full copy of the original DuckDB file to
 retain listings outside the observation archive.
 
 ## Diagnose source failures

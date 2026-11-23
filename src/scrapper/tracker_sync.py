@@ -14,6 +14,7 @@ from uuid import uuid4
 
 from pydantic import BaseModel
 
+from scrapper import CLI_NAME
 from scrapper.cli import run
 from scrapper.config import SearchConfig
 from scrapper.export import export_paths
@@ -252,7 +253,7 @@ def _sync(config: SearchConfig, path: Path, settings: SyncSettings, preference: 
 
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(
-        prog="job-scrapper sync", description="Run the scraper and sync your private tracker."
+        prog=f"{CLI_NAME} sync", description="Run the scraper and sync your private tracker."
     )
     action = parser.add_mutually_exclusive_group()
     action.add_argument("--status", action="store_true", help="Show sync status and test remote access.")

@@ -27,12 +27,13 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 
 FROM gcr.io/distroless/cc-debian13:nonroot@sha256:cb87acc574abe719b6e5c547384defa2f7b1f24af9605d3f618cf852495d8be2
 ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1
+    PYTHONUNBUFFERED=1 \
+    SCRAPPER_USE_WORKING_DIRECTORY=1
 COPY --from=build /opt/python /opt/python
 COPY --from=build /opt/venv /opt/venv
 COPY --from=build --chown=65532:65532 /work /work
 WORKDIR /work
 USER 65532:65532
 # Validate the packaged configuration at build time.
-RUN --network=none ["/opt/venv/bin/job-scrapper", "--status"]
-ENTRYPOINT ["/opt/venv/bin/job-scrapper"]
+RUN --network=none ["/opt/venv/bin/jobsfr", "--status"]
+ENTRYPOINT ["/opt/venv/bin/jobsfr"]

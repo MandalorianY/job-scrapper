@@ -11,7 +11,7 @@ from tempfile import TemporaryDirectory
 
 from openpyxl import load_workbook
 
-from scrapper import __version__
+from scrapper import CLI_NAME, __version__
 from scrapper.models import JobOffer
 from scrapper.storage import JobStore
 
@@ -29,7 +29,6 @@ def smoke(command: list[str], workspace: Path) -> None:
         "  export_dir: custom exports\n",
         encoding="utf-8",
     )
-    (workspace / "config.local.yaml").write_text("paths: [invalid\n", encoding="utf-8")
     archive = workspace / "observation archive.duckdb"
     store = JobStore(archive)
     try:
@@ -57,8 +56,23 @@ def smoke(command: list[str], workspace: Path) -> None:
     finally:
         store.close()
 
-    environment = {**os.environ, "PYTHONUTF8": "1", "PYTHONTZPATH": "", "NO_COLOR": "1"}
+    home = workspace / "home"
+    app_dir = "job-scrapper"
+    environment = {
+        **os.environ,
+        "HOME": str(home),
+        "USERPROFILE": str(home),
+        "APPDATA": str(home / "AppData/Roaming"),
+        "LOCALAPPDATA": str(home / "AppData/Local"),
+        "XDG_CONFIG_HOME": str(home / "config"),
+        "XDG_DATA_HOME": str(home / "data"),
+        "XDG_STATE_HOME": str(home / "state"),
+        "PYTHONUTF8": "1",
+        "PYTHONTZPATH": "",
+        "NO_COLOR": "1",
+    }
     environment.pop("SCRAPPER_DISABLE_LOCAL_CONFIG", None)
+    environment.pop("SCRAPPER_USE_WORKING_DIRECTORY", None)
 
     def run(*args: str) -> str:
         result = subprocess.run(
@@ -76,9 +90,41 @@ def smoke(command: list[str], workspace: Path) -> None:
             raise RuntimeError(f"CLI failed for {args!r}\n{result.stdout}\n{result.stderr}")
         return result.stdout.strip()
 
-    assert run("--version") == f"job-scrapper {__version__}"
+    assert run("--version") == f"{CLI_NAME} {__version__}"
     help_text = run("--help")
     assert "Usage:" in help_text, help_text
+    defaults = json.loads(run("--show-config"))["values"]["paths"]
+    if sys.platform == "darwin":
+        config_dir = data_dir = home / "Library/Application Support" / app_dir
+        log_dir = home / "Library/Logs" / app_dir
+    elif sys.platform == "win32":
+        config_dir = Path(environment["APPDATA"]) / app_dir
+        data_dir = Path(environment["LOCALAPPDATA"]) / app_dir
+        log_dir = data_dir / "Logs"
+    else:
+        config_dir = Path(environment["XDG_CONFIG_HOME"]) / app_dir
+        data_dir = Path(environment["XDG_DATA_HOME"]) / app_dir
+        log_dir = Path(environment["XDG_STATE_HOME"]) / app_dir
+    assert Path(defaults["database_path"]) == data_dir / "job_search.duckdb"
+    assert Path(defaults["log_file"]) == log_dir / "job-scrapper.jsonl"
+    export_dir = Path(defaults["export_dir"])
+    output_args: list[str] = []
+    if sys.platform == "win32":
+        assert export_dir.is_absolute() and export_dir.name == app_dir
+        # The Windows shell resolves the real account's Documents folder.
+        export_dir = workspace / "windows exports"
+        output_args = ["--export-dir", str(export_dir)]
+    else:
+        assert export_dir == home / "Documents" / app_dir
+
+    run("--replay-from", archive.name, *output_args)
+    assert (data_dir / "job_search.duckdb").is_file()
+    assert (log_dir / "job-scrapper.jsonl").is_file()
+    assert (export_dir / "jobs.xlsx").is_file()
+
+    config_dir.mkdir(parents=True, exist_ok=True)
+    local_config = config_dir / "config.local.yaml"
+    local_config.write_text("paths: [invalid\n", encoding="utf-8")
     assert "Search scope" in run("--profile", profile.name, "--status")
     settings = json.loads(run("--profile", profile.name, "--show-config"))["values"]
     assert settings["queries"] == ["example"]
@@ -97,15 +143,15 @@ def smoke(command: list[str], workspace: Path) -> None:
         workbook.close()
     assert all(example in (exports / filename).read_text(encoding="utf-8") for filename in ("jobs.csv", "jobs_raw.csv"))
     assert (workspace / "custom data/run.jsonl").is_file()
-    (workspace / "config.local.yaml").write_bytes(profile.read_bytes())
+    local_config.write_bytes(profile.read_bytes())
     assert run("sync", "--disable") == "Tracker sync disabled."
     assert run("sync", "--status") == "Tracker sync disabled."
     assert (workspace / "custom data/.tracker-sync/settings.json").is_file()
-    print(f"Verified {command[0]} with a YAML profile, replay, offline exports and tracker sync commands.")
+    print(f"Verified {command[0]} with installed defaults, a YAML profile, replay, exports and tracker sync.")
 
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
         raise SystemExit("Pass the installed CLI command to check.")
-    with TemporaryDirectory(prefix="job-scrapper-été-") as temporary:
+    with TemporaryDirectory(prefix=f"{CLI_NAME}-été-") as temporary:
         smoke(sys.argv[1:], Path(temporary))

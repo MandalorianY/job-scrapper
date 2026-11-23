@@ -12,12 +12,14 @@ from typing import Annotated
 
 import typer
 
+from scrapper import CLI_NAME
 from scrapper.cli_paths import existing_file
 from scrapper.config.settings import PROJECT_ROOT, WEEKDAYS, ScheduleConfig, Settings
+from scrapper.config.user_paths import user_log_dir
 
 TIMER_NAME = "job-scrapper.timer"
-HOMEBREW_FORMULA = "mandaloriany/tap/job-scrapper"
-HOMEBREW_LABEL = "homebrew.mxcl.job-scrapper"
+HOMEBREW_FORMULA = f"mandaloriany/tap/{CLI_NAME}"
+HOMEBREW_LABEL = f"homebrew.mxcl.{CLI_NAME}"
 
 
 def _systemd_argument(value: str) -> str:
@@ -53,7 +55,7 @@ def _install_systemd_timer(checkout: Path, schedule: ScheduleConfig, profile_arg
     for tool in ("systemctl", "flock"):
         if shutil.which(tool) is None:
             raise ValueError(f"Install {tool} before setting up the Linux timer.")
-    executable = Path(sys.executable).with_name("job-scrapper")
+    executable = Path(sys.executable).with_name(CLI_NAME)
     service, timer = _systemd_units(checkout, executable, schedule, profile_args)
     config_dir = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "systemd/user"
     config_dir.mkdir(parents=True, exist_ok=True)
@@ -64,9 +66,10 @@ def _install_systemd_timer(checkout: Path, schedule: ScheduleConfig, profile_arg
         subprocess.run(["systemctl", "--user", *args], check=True)
 
 
-def _homebrew_plist(workdir: Path, executable: Path, schedule: ScheduleConfig, profile_args: list[str]) -> bytes:
+def _homebrew_plist(
+    workdir: Path, executable: Path, schedule: ScheduleConfig, profile_args: list[str], log_path: Path | None = None
+) -> bytes:
     hour, minute = map(int, schedule.time.split(":"))
-    log_path = str(workdir / "data/service.log")
     return plistlib.dumps(
         {
             "Label": HOMEBREW_LABEL,
@@ -76,8 +79,7 @@ def _homebrew_plist(workdir: Path, executable: Path, schedule: ScheduleConfig, p
                 {"Weekday": (WEEKDAYS.index(day) + 1) % 7, "Hour": hour, "Minute": minute}
                 for day in dict.fromkeys(schedule.days)
             ],
-            "StandardOutPath": log_path,
-            "StandardErrorPath": log_path,
+            **({"StandardOutPath": str(log_path), "StandardErrorPath": str(log_path)} if log_path else {}),
             "Umask": 0o077,
         }
     )
@@ -85,13 +87,14 @@ def _homebrew_plist(workdir: Path, executable: Path, schedule: ScheduleConfig, p
 
 def _install_homebrew_timer(workdir: Path, schedule: ScheduleConfig, profile_args: list[str]) -> None:
     prefix = subprocess.check_output(["brew", "--prefix", HOMEBREW_FORMULA], text=True).strip()
-    executable = Path(prefix) / "bin/job-scrapper"
+    executable = Path(prefix) / "bin" / CLI_NAME
     if not executable.is_file():
         raise ValueError(f"Install {HOMEBREW_FORMULA} with Homebrew first.")
-    (workdir / "data").mkdir(exist_ok=True)
+    log_path = user_log_dir() / "service.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
     with TemporaryDirectory() as temp_dir:
         plist = Path(temp_dir) / f"{HOMEBREW_LABEL}.plist"
-        plist.write_bytes(_homebrew_plist(workdir, executable, schedule, profile_args))
+        plist.write_bytes(_homebrew_plist(workdir, executable, schedule, profile_args, log_path))
         subprocess.run(["brew", "services", "restart", HOMEBREW_FORMULA, f"--file={plist}"], check=True)
     typer.echo(f"Scheduled for {', '.join(schedule.days)} at {schedule.time} (Mac local time).")
 

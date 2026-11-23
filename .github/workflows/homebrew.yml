@@ -43,14 +43,15 @@ jobs:
           gh release download "$RELEASE_TAG" --pattern "$asset" --dir "$RUNNER_TEMP"
           checksum=$(sha256sum "$RUNNER_TEMP/$asset" | cut -d ' ' -f 1)
 
-          mkdir -p tap/Formula
-          sed -e "s/@VERSION@/$version/g" -e "s/@SHA256@/$checksum/g" \
-            deploy/homebrew/job-scrapper.rb.in > tap/Formula/job-scrapper.rb
-          git -C tap add Formula/job-scrapper.rb
+          message="Update jobsfr to $version"
+          if [[ -f tap/Formula/job-scrapper.rb ]]; then
+            message="jobsfr: renamed from job-scrapper"
+          fi
+          bash deploy/homebrew/stage-tap.sh tap "$version" "$checksum"
           if git -C tap diff --cached --quiet; then
             exit 0
           fi
           git -C tap -c user.name='github-actions[bot]' \
             -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
-            commit -m "Update job-scrapper to $version"
+            commit -m "$message"
           git -C tap push origin HEAD:main

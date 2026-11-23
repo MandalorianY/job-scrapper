@@ -14,18 +14,18 @@ from importlib.metadata import distributions
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from scrapper import __version__
+from scrapper import CLI_NAME, __version__
 from scrapper.company_types import COMPANY_TYPES_PATH
 from scrapper.config.settings import PACKAGE_CONFIG_DIR
 
 ROOT = Path(__file__).resolve().parents[1]
-NAME = "job-scrapper"
+LEGACY_NAME = "job-scrapper"
 ARCHITECTURES = {"aarch64": "arm64", "arm64": "arm64", "amd64": "amd64", "x86_64": "amd64"}
 
 
 def _copy_notices(directory: Path) -> None:
     directory.mkdir()
-    shutil.copyfile(ROOT / "LICENSE", directory / "job-scrapper.txt")
+    shutil.copyfile(ROOT / "LICENSE", directory / f"{CLI_NAME}.txt")
     for package in distributions():
         for item in package.files or ():
             if not item.parts[0].endswith(".dist-info") or not item.name.lower().startswith(
@@ -51,7 +51,7 @@ def _freeze(work: Path, notices: Path, *, onefile: bool) -> Path:
         "--clean",
         "--noupx",
         "--name",
-        NAME,
+        CLI_NAME,
         "--distpath",
         str(work / "dist"),
         "--workpath",
@@ -77,7 +77,7 @@ def _freeze(work: Path, notices: Path, *, onefile: bool) -> Path:
     for filename in ("config.yaml", "config.prod.yaml", "toulouse-graphiste.yaml"):
         command.extend(("--add-data", f"{PACKAGE_CONFIG_DIR / filename}:scrapper/config"))
     subprocess.run([*command, str(ROOT / "main.py")], cwd=work, check=True)
-    return work / "dist" / (f"{NAME}.exe" if onefile else NAME)
+    return work / "dist" / (f"{CLI_NAME}.exe" if onefile else CLI_NAME)
 
 
 def _build_deb(bundle: Path, work: Path, destination: Path, arch: str) -> None:
@@ -92,21 +92,22 @@ def _build_deb(bundle: Path, work: Path, destination: Path, arch: str) -> None:
     control = package / "DEBIAN"
     control.mkdir(parents=True)
     (package / "usr/bin").mkdir(parents=True)
-    (package / "usr/bin" / NAME).symlink_to(f"../lib/{NAME}/{NAME}")
-    shutil.copytree(bundle, package / "usr/lib" / NAME, symlinks=True)
-    docs = package / "usr/share/doc" / NAME
+    for name in (CLI_NAME, LEGACY_NAME):
+        (package / "usr/bin" / name).symlink_to(f"../lib/{LEGACY_NAME}/{CLI_NAME}")
+    shutil.copytree(bundle, package / "usr/lib" / LEGACY_NAME, symlinks=True)
+    docs = package / "usr/share/doc" / LEGACY_NAME
     docs.mkdir(parents=True)
     shutil.copyfile(ROOT / "LICENSE", docs / "copyright")
     size_kib = (
         sum(path.stat().st_size for path in bundle.rglob("*") if path.is_file() and not path.is_symlink()) + 1023
     ) // 1024
     (control / "control").write_text(
-        f"Package: {NAME}\n"
+        f"Package: {LEGACY_NAME}\n"
         f"Version: {__version__}\n"
         f"Architecture: {arch}\n"
         "Section: utils\n"
         "Priority: optional\n"
-        "Maintainer: Job Scrapper contributors <MandalorianY@users.noreply.github.com>\n"
+        "Maintainer: JobsFR contributors <MandalorianY@users.noreply.github.com>\n"
         f"Depends: libc6 (>= {glibc})\n"
         f"Installed-Size: {size_kib}\n"
         "Homepage: https://github.com/MandalorianY/job-scrapper\n"
@@ -126,25 +127,26 @@ def main() -> None:
     if sys.platform != "win32":
         os.umask(0o022)
     output.mkdir(parents=True, exist_ok=True)
-    with TemporaryDirectory(prefix=f"{NAME}-build-") as temporary:
+    with TemporaryDirectory(prefix=f"{CLI_NAME}-build-") as temporary:
         work = Path(temporary)
         notices = work / "notices"
         _copy_notices(notices)
         bundle = _freeze(work, notices, onefile=sys.platform == "win32")
         if sys.platform == "win32":
-            prefix = f"{NAME}-{__version__}-windows-{arch}"
+            prefix = f"{CLI_NAME}-{__version__}-windows-{arch}"
             with zipfile.ZipFile(output / f"{prefix}.zip", "w", zipfile.ZIP_DEFLATED) as archive:
-                archive.write(bundle, f"{prefix}.exe")
+                archive.write(bundle, f"{CLI_NAME}.exe")
                 for path in sorted(notices.rglob("*")):
                     if path.is_file():
                         archive.write(path, path.relative_to(work))
         else:
             platform_name = "linux" if sys.platform == "linux" else "macos"
-            prefix = f"{NAME}-{__version__}-{platform_name}-{arch}"
+            prefix = f"{CLI_NAME}-{__version__}-{platform_name}-{arch}"
+            (bundle / LEGACY_NAME).symlink_to(CLI_NAME)
             with tarfile.open(output / f"{prefix}.tar.gz", "w:gz") as archive:
-                archive.add(bundle, arcname=NAME)
+                archive.add(bundle, arcname=CLI_NAME)
             if sys.platform == "linux":
-                _build_deb(bundle, work, output / f"{NAME}_{__version__}_{arch}.deb", arch)
+                _build_deb(bundle, work, output / f"{LEGACY_NAME}_{__version__}_{arch}.deb", arch)
 
 
 if __name__ == "__main__":

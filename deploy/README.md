@@ -2,7 +2,7 @@
 
 ## Scheduled runs
 
-Set the days and time in your YAML profile or checkout's `config.local.yaml`. The default is weekdays at 15:30. Use `mon`, `tue`, `wed`, `thu`, `fri`, `sat`, or `sun` and a quoted 24-hour time.
+Set the days and time in your YAML profile or `config.local.yaml`. The default is weekdays at 15:30. Use `mon`, `tue`, `wed`, `thu`, `fri`, `sat`, or `sun` and a quoted 24-hour time.
 
 ```yaml
 schedule:
@@ -14,10 +14,10 @@ Run the installer again after changing the schedule. The same profile is passed 
 
 ### Export folder
 
-Scheduled runs write `jobs.xlsx`, `jobs.csv`, and `jobs_raw.csv` to `paths.export_dir` in your configuration. The default is `exports/`. When you use `--profile`, set the folder in that profile.
+Scheduled runs write `jobs.xlsx`, `jobs.csv`, and `jobs_raw.csv` to `paths.export_dir` in your configuration.
 
-- On macOS, `exports/` and other relative paths are based on the directory where you run `job-scrapper-install-timer`.
-- On Linux, relative paths are based on the repository checkout.
+- On macOS, the default is `~/Documents/job-scrapper`. Relative overrides are based on the directory where you run `jobsfr-install-timer`.
+- For a Linux checkout, the default is `exports/` and relative overrides are based on the repository checkout.
 
 Use an absolute path or a path starting with `~/` to choose a fixed folder.
 
@@ -28,15 +28,29 @@ paths:
 
 ### macOS with Homebrew
 
-Install the formula and run the timer installer from the directory where you keep your tracker. Pass `--profile` to use your own search and schedule settings.
+Install the formula and run the timer installer. Pass `--profile` or save your search and schedule settings in `~/Library/Application Support/job-scrapper/config.local.yaml`.
 
 ```sh
-brew install mandaloriany/tap/job-scrapper
-job-scrapper-install-timer --profile /path/to/profile.yaml
+brew install mandaloriany/tap/jobsfr
+jobsfr-install-timer --profile /path/to/profile.yaml
 brew services list
 ```
 
-The service uses the Mac's time zone and runs as your logged-in user. Run `brew services stop job-scrapper` to disable it. Console output goes to `data/service.log` in the directory where you ran the installer. To update the schedule, run the installer again from that directory with the profile.
+The service uses the Mac's time zone and runs as your logged-in user. Run `brew services stop jobsfr` to disable it. The timer installer writes a service that sends console output to `~/Library/Logs/job-scrapper/service.log`. To update the schedule, run the installer again with the same profile or local configuration.
+
+If you set up a timer under the old formula, run `brew services stop job-scrapper`
+before upgrading. Upgrade an existing Homebrew install with these commands.
+
+```sh
+brew update
+brew migrate --formula mandaloriany/tap/job-scrapper
+brew upgrade mandaloriany/tap/jobsfr
+```
+
+If you used the old timer, run `jobsfr-install-timer` again from the same directory
+with your original profile, if any. Existing scripts can still invoke `job-scrapper`.
+See the [path settings](../docs/configuration.md#database-export-and-log-paths) to
+reuse a tracker and DuckDB database from an earlier release.
 
 ### Linux with systemd
 
@@ -70,12 +84,12 @@ with `--db`, `--export-dir`, or `--log-file`.
 To pin an employer catalog, put its CSV under the mounted `data/` directory
 and set `company_catalog_path` to that relative path in your profile.
 
-To run `job-scrapper` from any directory, link the launcher into `~/.local/bin`
+To run `jobsfr` from any directory, link the launcher into `~/.local/bin`
 if it’s on your `PATH`.
 
 ```sh
 mkdir -p "$HOME/.local/bin"
-ln -s "$PWD/deploy/run-docker.sh" "$HOME/.local/bin/job-scrapper"
+ln -s "$PWD/deploy/run-docker.sh" "$HOME/.local/bin/jobsfr"
 ```
 
 Recreate the link if you move the checkout.

@@ -10,16 +10,13 @@ from rich.table import Table
 from rich.text import Text
 
 from scrapper.config import SearchConfig
-from scrapper.config.settings import LOCAL_CONFIG_FILE, PACKAGE_CONFIG_DIR
+from scrapper.config.settings import PACKAGE_CONFIG_DIR, default_local_config
 from scrapper.scrapers import JOBSPY_SITES
 from scrapper.scrapers.aggregators import AGGREGATORS_SOURCE
 from scrapper.scrapers.wttj import WTTJ_SOURCE
 
 console = Console()
-CONFIG_OVERRIDE_HELP = (
-    "Use config.local.yaml in the working directory for an installed CLI, or under src/scrapper/config "
-    "in a checkout. Use --profile FILE for a specific YAML profile."
-)
+CONFIG_OVERRIDE_HELP = "Use --status to find config.local.yaml. Use --profile FILE for a specific YAML profile."
 
 
 def print_tracker_sync_status(config: SearchConfig) -> None:
@@ -37,6 +34,7 @@ def print_tracker_sync_status(config: SearchConfig) -> None:
 
 
 def print_search_status(config: SearchConfig, setting_sources: dict[str, str], profile: Path | None) -> None:
+    local_config = default_local_config()
     scope = config.location_scope
     centers = ", ".join(center.name for center in scope.centers)
     location_filter = "Disabled"
@@ -57,7 +55,7 @@ def print_search_status(config: SearchConfig, setting_sources: dict[str, str], p
         if source not in {"default", base_config}:
             overrides.setdefault(Path(source).name, set()).add(setting.split(".", 1)[0])
     if profile is None:
-        profile_name = LOCAL_CONFIG_FILE.name
+        profile_name = local_config.name
         profile_applied = profile_name in overrides
     else:
         profile_name = profile.name
@@ -94,7 +92,9 @@ def print_search_status(config: SearchConfig, setting_sources: dict[str, str], p
         console.print()
 
     console.print("Configuration overrides", style="bold cyan")
-    console.print(CONFIG_OVERRIDE_HELP, width=width)
+    console.print(
+        Text(f"Use {local_config} for local settings. Use --profile FILE for a specific YAML profile."), width=width
+    )
     console.print()
     override_lines = "\n".join(f"{name}: {', '.join(sorted(fields))}" for name, fields in overrides.items())
     console.print(Text(override_lines or "None"), width=width)

@@ -69,7 +69,8 @@ jobs:
 
       - name: Check installed CLI and employer catalog
         run: |
-          uv run --locked --no-sync job-scrapper --status
+          uv run --locked --no-sync jobsfr --status
+          uv run --locked --no-sync job-scrapper --version
           uv run --locked --no-sync python -c "from scrapper.company_types import company_types; company_types()"
 
       - name: Type-check Windows, Linux, and macOS

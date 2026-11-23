@@ -17,6 +17,7 @@ from pydantic import (
 )
 from pydantic_settings import (
     BaseSettings,
+    DotEnvSettingsSource,
     InitSettingsSource,
     PydanticBaseSettingsSource,
     SettingsConfigDict,
@@ -30,11 +31,24 @@ from scrapper.config.aggregator_specs import (
     default_direct_specs,
     default_site_search_sources,
 )
+from scrapper.config.user_paths import user_config_dir, user_data_dir, user_export_dir, user_log_dir
 from scrapper.filters import ListingFilters
 
 PACKAGE_CONFIG_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = PACKAGE_CONFIG_DIR.parents[2] if PACKAGE_CONFIG_DIR.parents[1].name == "src" else None
 LOCAL_CONFIG_FILE = PACKAGE_CONFIG_DIR / "config.local.yaml"
+
+
+def _use_installed_paths() -> bool:
+    return PROJECT_ROOT is None and os.getenv("SCRAPPER_USE_WORKING_DIRECTORY") != "1"
+
+
+def default_local_config() -> Path:
+    if PROJECT_ROOT is not None:
+        return LOCAL_CONFIG_FILE
+    if _use_installed_paths():
+        return user_config_dir() / LOCAL_CONFIG_FILE.name
+    return Path.cwd() / LOCAL_CONFIG_FILE.name
 
 
 def _yaml_config_files(app_env: str, profile: Path | None = None) -> list[Path]:
@@ -45,8 +59,8 @@ def _yaml_config_files(app_env: str, profile: Path | None = None) -> list[Path]:
     if profile is not None:
         files.append(profile)
     elif os.getenv("SCRAPPER_DISABLE_LOCAL_CONFIG") not in {"1", "true", "TRUE", "yes", "YES"}:
-        local_config = LOCAL_CONFIG_FILE
-        if PROJECT_ROOT is None and not local_config.is_file():
+        local_config = default_local_config()
+        if _use_installed_paths() and not local_config.is_file():
             local_config = Path.cwd() / local_config.name
         files.append(local_config)
     return files
@@ -169,9 +183,13 @@ class AggregatorConfig(BaseModel):
 
 
 class PathsConfig(BaseModel):
-    database_path: Path
-    export_dir: Path
-    log_file: Path = Path("data/job-scrapper.jsonl")
+    database_path: Path = Field(
+        default_factory=lambda: (user_data_dir() if _use_installed_paths() else Path("data")) / "job_search.duckdb"
+    )
+    export_dir: Path = Field(default_factory=lambda: user_export_dir() if _use_installed_paths() else Path("exports"))
+    log_file: Path = Field(
+        default_factory=lambda: (user_log_dir() if _use_installed_paths() else Path("data")) / "job-scrapper.jsonl"
+    )
 
     @model_validator(mode="after")
     def resolve_project_relative_paths(self) -> PathsConfig:
@@ -290,7 +308,7 @@ class Settings(BaseSettings):
     http_per_host_concurrency: int = 2
     http_request_delay_secs: float = 0.25
     user_agent: str
-    paths: PathsConfig
+    paths: PathsConfig = Field(default_factory=PathsConfig)
     schedule: ScheduleConfig = Field(default_factory=ScheduleConfig)
     export: ExportConfig = Field(default_factory=ExportConfig)
     sync: TrackerSyncConfig | None = None
@@ -311,6 +329,8 @@ class Settings(BaseSettings):
     )
 
     def __init__(self, *, _refresh_company_catalog: bool = False, **values: object) -> None:
+        if _use_installed_paths() and (env_file := user_config_dir() / ".env").is_file():
+            values.setdefault("_env_file", env_file)
         super().__init__(**values)  # pyright: ignore[reportArgumentType]
         if not (types := self.filters.excluded_company_types()):
             return
@@ -347,7 +367,14 @@ class Settings(BaseSettings):
         file_secret_settings: PydanticBaseSettingsSource,
     ) -> tuple[PydanticBaseSettingsSource, ...]:
         assert isinstance(init_settings, InitSettingsSource)
-        app_env = init_settings.init_kwargs.get("app_env") or EnvironmentSettings().app_env
+        assert isinstance(dotenv_settings, DotEnvSettingsSource)
+        env_file = dotenv_settings.env_file
+        app_env = (
+            init_settings.init_kwargs.get("app_env")
+            or EnvironmentSettings(
+                _env_file=env_file  # pyright: ignore[reportCallIssue]
+            ).app_env
+        )
         yaml_override = init_settings.init_kwargs.pop("yaml_file", None)
         profile = init_settings.init_kwargs.pop("_profile", None)
         config_sources = init_settings.init_kwargs.pop("_config_sources", None)
@@ -357,7 +384,9 @@ class Settings(BaseSettings):
         sources = {
             type(init_settings).__name__: "command line",
             type(env_settings).__name__: "environment",
-            type(dotenv_settings).__name__: str(Path(".env").absolute()),
+            type(dotenv_settings).__name__: str(Path(env_file).absolute())
+            if isinstance(env_file, (str, Path))
+            else ".env",
         }
         yaml_sources = []
         for path in reversed(yaml_files):

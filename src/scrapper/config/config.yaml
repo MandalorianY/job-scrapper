@@ -40,9 +40,11 @@ refresh_known_details: false
 # 4. Outputs And Runtime Paths
 # =============================================================================
 
-paths:
-  database_path: data/job_search.duckdb
-  export_dir: exports
+# Optional path overrides. Installed builds use per-user folders by default.
+# paths:
+#   database_path: data/job_search.duckdb
+#   export_dir: exports
+#   log_file: data/job-scrapper.jsonl
 
 # Used when installing the timer. Linux uses Paris time, macOS uses the system time zone.
 schedule:

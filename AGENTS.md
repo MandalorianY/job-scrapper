@@ -17,7 +17,7 @@ Do not commit generated data or exports unless the user explicitly asks for that
 ## Stack
 
 - Python 3.14 with `uv` by default, with Python 3.13 as the minimum supported version
-- Typer CLI exposed as `job-scrapper`
+- Typer CLI exposed as `jobsfr`, with `job-scrapper` as a compatibility alias
 - DuckDB for local storage and incremental search state
 - JobSpy for supported boards: Indeed, LinkedIn, Glassdoor, Google Jobs, HelloWork
 - `httpx` + BeautifulSoup for APIs, aggregator pages, and sitemaps
@@ -26,7 +26,7 @@ Do not commit generated data or exports unless the user explicitly asks for that
 - PyInstaller in the locked `release` group for native Windows, Linux, and macOS releases. The release version lives in `pyproject.toml`.
 
 The tracked `src/scrapper/config/config.yaml` is the public example template. Use `src/scrapper/config/config.local.yaml` (when present) for live repository settings such as query/location tuning and source-specific overrides. Use `--profile PATH` to select an alternate YAML with its own database, export, and log paths.
-Installed builds also look for `config.local.yaml` in the working directory. Use paths under `data/` and `exports/` in Docker YAML profiles. The Docker launcher mounts host files passed via `--profile` or `--replay-from` and host destinations passed via `--db`, `--export-dir`, or `--log-file`.
+Installed builds use `config/user_paths.py` for the platform's config, data, log, and Documents folders. They also look for `config.local.yaml` in the working directory. Use paths under `data/` and `exports/` in Docker YAML profiles. The Docker launcher mounts host files passed via `--profile` or `--replay-from` and host destinations passed via `--db`, `--export-dir`, or `--log-file`.
 
 ## README Maintenance
 
@@ -42,7 +42,7 @@ one `--profile` example, and one contributor check command.
 - Extend the existing guides in `docs/` for advanced configuration, tracker
   sync, replay, and troubleshooting. Use `deploy/README.md` for Docker path
   rules and scheduling, and the Useful Commands section below for contributor
-  setup and checks. Use `job-scrapper --help` for the CLI option list and
+  setup and checks. Use `jobsfr --help` for the CLI option list and
   `.github/workflows/ci.yml` for the CI matrix. Link to the relevant guide
   from the README when readers need it.
 - Review the README diff for growth. Move detail that a first-time user can
@@ -60,7 +60,7 @@ uv sync --locked --group test
 Run the full scraper and export:
 
 ```bash
-uv run job-scrapper
+uv run jobsfr
 ```
 
 Run the full scraper and export with Docker:
@@ -70,20 +70,20 @@ Run the full scraper and export with Docker:
 ```
 
 Install or update the schedule using `./deploy/install-timer.sh` on Linux or
-`job-scrapper-install-timer` from the Homebrew installation on macOS. Both
+`jobsfr-install-timer` from the Homebrew installation on macOS. Both
 commands accept `--profile PATH` and use the YAML `schedule.days` and
 `schedule.time` settings.
 
 Re-export from the existing DuckDB without scraping:
 
 ```bash
-uv run job-scrapper --export-only
+uv run jobsfr --export-only
 ```
 
 Run a smaller smoke scrape:
 
 ```bash
-uv run job-scrapper --results-wanted 5 --custom-pages 1 
+uv run jobsfr --results-wanted 5 --custom-pages 1
 ```
 
 Compile check:
@@ -205,7 +205,18 @@ For broad sources, keep the include filter title-focused unless there is an expl
 
 ## Dedupe And Completeness
 
-Deduping matches provider IDs and listing-specific URLs first. Title/company and description matches across boards also consider location with the default settings. Same-board reposts require a matching title, employer, location, and substantial description. The canonical export ranks source priority, completeness, and scrape time, and preserves duplicate counts and links.
+Deduping matches provider IDs and listing-specific URLs first, including known
+employer URL variants that share a requisition ID. With the default settings it
+compares municipalities and uses substantial description overlap to match
+variations in titles and employer names. Distinct application URLs on the same
+employer portal keep separate requisitions apart. Board redirects do not veto
+matches supported by listing content. The canonical export ranks source priority,
+completeness, and scrape time and preserves duplicate counts and links. It carries
+tracker statuses across matched links and flags conflicting statuses when the
+review column is configured. By default, `export.keep_reposts` is enabled and `reposts.py`
+groups repeat publications within a vacancy before export. Each repost has its
+own tracker row and application status. Contract cleanup still applies to the
+whole vacancy.
 
 When changing dedupe behavior:
 
@@ -276,15 +287,17 @@ Preserve these user-facing features:
 - When both columns are configured, `Postulé` is formula-driven from `Statut`. With only `Postulé` configured, it is a manual checkbox.
 - Filters, frozen panes, Excel table, conditional status colors.
 - Annual salary min/max columns should be numeric when a reliable range exists.
+- Use contract evidence from matched source rows. Work schedules such as `Temps plein` belong outside `Contrat`.
 - Ugly raw schema salary payloads should not appear in the main `Salaire` column.
 - Empty salary is better than misleading salary.
 
-Only annual amounts and monthly amounts multiplied by 12 belong in annual salary
-columns. Hourly/daily rates, unknown units, foreign currencies, and invalid ranges
-stay empty. The optional `À vérifier` column flags unusually low reported pay for
+Only advertised annual amounts and monthly amounts multiplied by 12 belong in
+annual salary columns. Use a reliable amount from a matched source when the
+primary listing omits pay. Hourly/daily rates, unknown units, foreign currencies,
+uncorroborated estimates, and invalid ranges stay empty. The optional `À vérifier` column flags unusually low reported pay for
 manual contract review; low pay alone must not exclude an offer.
 
-The `job-scrapper` CLI writes local exports for normal runs, audits, and smoke runs.
+The `jobsfr` CLI writes local exports for normal runs, audits, and smoke runs.
 
 Generate all files selected by `export.formats` in staging before replacing the
 published files. The first selected format is the tracker to edit.
@@ -307,7 +320,7 @@ status edits survive regeneration.
 
 ## Cross-Platform Compatibility
 
-Keep the native `job-scrapper` CLI, configuration, DuckDB storage, and exports
+Keep the native `jobsfr` CLI, configuration, DuckDB storage, and exports
 working on Windows, Linux, and macOS. Target Python 3.13 as the minimum and
 preserve x64 and ARM64 support when changing dependencies or packaging.
 
@@ -335,13 +348,13 @@ For most scraper/storage/export changes, run:
 ```bash
 uv run python -m compileall src main.py
 uv run --locked poe test
-uv run job-scrapper --export-only
+uv run jobsfr --export-only
 ```
 
 For source changes, also run a small scrape:
 
 ```bash
-uv run job-scrapper --results-wanted 5 --custom-pages 1
+uv run jobsfr --results-wanted 5 --custom-pages 1
 ```
 
 Then verify:

@@ -16,7 +16,7 @@ def test_native_timers_use_profile_schedule(tmp_path: Path) -> None:
     schedule = Settings(_profile=profile).schedule
     profile_args = ["--profile", str(profile)]
 
-    executable = tmp_path / "custom env %" / "bin/job-scrapper"
+    executable = tmp_path / "custom env %" / "bin/jobsfr"
     service, timer = _systemd_units(PROJECT_ROOT, executable, schedule, profile_args)
     quoted_profile = json.dumps(str(profile).replace("%", "%%"), ensure_ascii=False)
     quoted_exec_env = json.dumps(f"JOB_SCRAPPER_EXECUTABLE={executable}".replace("%", "%%"), ensure_ascii=False)
@@ -25,14 +25,17 @@ def test_native_timers_use_profile_schedule(tmp_path: Path) -> None:
     assert f'./deploy/run.sh "--profile" {quoted_profile}\n' in service
     assert "OnCalendar=Mon,Sun *-*-* 09:15:00 Europe/Paris\n" in timer
 
-    plist = plistlib.loads(_homebrew_plist(tmp_path, executable, schedule, profile_args))
-    assert plist["Label"] == HOMEBREW_LABEL
+    log_path = tmp_path / "Library/Logs/job-scrapper/service.log"
+    plist = plistlib.loads(_homebrew_plist(tmp_path, executable, schedule, profile_args, log_path))
+    assert plist["Label"] == HOMEBREW_LABEL == "homebrew.mxcl.jobsfr"
     assert plist["ProgramArguments"] == [str(executable), *profile_args]
+    assert plist["StandardOutPath"] == plist["StandardErrorPath"] == str(log_path)
     assert plist["StartCalendarInterval"] == [
         {"Weekday": 1, "Hour": 9, "Minute": 15},
         {"Weekday": 0, "Hour": 9, "Minute": 15},
     ]
     assert "RunAtLoad" not in plist
+    assert "StandardOutPath" not in plistlib.loads(_homebrew_plist(tmp_path, executable, schedule, profile_args))
 
 
 @pytest.mark.parametrize("schedule", [{"days": []}, {"days": ["sunday"]}, {"time": "25:30"}])

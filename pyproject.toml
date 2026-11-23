@@ -40,6 +40,8 @@ dependencies = [
 ]
 
 [project.scripts]
+jobsfr = "scrapper.cli:main"
+jobsfr-install-timer = "scrapper.scheduling:main"
 job-scrapper = "scrapper.cli:main"
 job-scrapper-install-timer = "scrapper.scheduling:main"
 

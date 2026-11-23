@@ -22,4 +22,4 @@ if ! flock --nonblock 9; then
     exit 0
 fi
 
-exec "${JOB_SCRAPPER_EXECUTABLE:-.venv/bin/job-scrapper}" "$@"
+exec "${JOB_SCRAPPER_EXECUTABLE:-.venv/bin/jobsfr}" "$@"

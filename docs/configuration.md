@@ -65,6 +65,23 @@ Use `--show-config` to inspect effective settings, their origins, and available
 cached geography offline. `--status` uses saved geographic scope when
 available.
 
+## Keep reposts in the tracker
+
+The tracker keeps later publications of a vacancy on separate rows by default.
+To show one row per vacancy, add this to your profile.
+
+```yaml
+export:
+  keep_reposts: false
+```
+
+The tracker identifies a repost when the same board lists an already matched
+vacancy under a new listing link at least seven days after its earlier
+publication. A repost shows `Republié` while pending and keeps its own `Postulé`
+or `Refusé` status after you update it. `Lien` opens the board's repost.
+`Postuler`, if selected, opens the application link. An export with reposts adds
+`Statut` and `Lien` to custom layouts that omit them.
+
 ## Excluding employer types
 
 List the employer types you want to exclude in your profile.
@@ -87,7 +104,7 @@ Use `exclude.names` alongside `exclude.types` to also exclude companies by
 name or regex. The existing `company.exclude: [Example Company]` form still
 works for name rules alone.
 
-Run `job-scrapper --export-only` to apply the filters to saved offers and the
+Run `jobsfr --export-only` to apply the filters to saved offers and the
 existing tracker without scraping. Type filters compare the full employer
 name after normalizing case, accents, punctuation, and common French legal
 suffixes. Previously stored offers remain in DuckDB and the raw exports.
@@ -121,11 +138,31 @@ See the [built-in provider specs](../src/scrapper/config/aggregator_specs.py).
 
 ## Database, export, and log paths
 
-Use separate values for `paths.database_path`, `paths.export_dir`, and
-`paths.log_file` to keep profiles independent. `paths.export_dir` defaults to
-`exports`.
+Installed builds, including Homebrew, store exports in a `job-scrapper` folder
+inside your Documents folder. On Linux this follows `XDG_DOCUMENTS_DIR` from
+`user-dirs.dirs` when configured. On Windows it follows the system Documents
+folder, including redirects.
 
-Relative paths in YAML resolve from the checkout root when running from source
-and from the working directory when using an installed CLI. Absolute paths and
-paths beginning with `~/` work for local installations. See the path rules for
-[Docker](../deploy/README.md#docker-cli) and [scheduled runs](../deploy/README.md#export-folder).
+| Platform | `config.local.yaml` and `.env` | DuckDB and its caches | Run logs |
+| --- | --- | --- | --- |
+| macOS | `~/Library/Application Support/job-scrapper` | `~/Library/Application Support/job-scrapper` | `~/Library/Logs/job-scrapper` |
+| Linux | `~/.config/job-scrapper` | `~/.local/share/job-scrapper` | `~/.local/state/job-scrapper` |
+| Windows | `%APPDATA%\job-scrapper` | `%LOCALAPPDATA%\job-scrapper` | `%LOCALAPPDATA%\job-scrapper\Logs` |
+
+On Linux, absolute `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, and `XDG_STATE_HOME`
+override the corresponding roots. Installed builds also look in the working
+directory for `config.local.yaml` and `.env` if the corresponding files are
+absent from the user configuration folder. Create the configuration folder
+before saving either file there. Check the location with `jobsfr --status`.
+
+Source checkouts and [Docker](../deploy/README.md#docker-cli) default to `exports/`
+and `data/`. Relative paths in YAML resolve from the checkout root for source
+runs and the working directory for installed builds. Absolute paths and paths
+beginning with `~/` work for local installations. Give separate
+`paths.database_path`, `paths.export_dir`, and `paths.log_file` values to keep
+profiles independent.
+
+If an earlier release stored your database and tracker in the working directory,
+set `paths.database_path` and `paths.export_dir` to their existing locations to
+reuse your listings and application statuses. Use `jobsfr --show-config`
+to verify the paths before running the scraper.

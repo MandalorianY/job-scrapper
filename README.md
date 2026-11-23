@@ -31,7 +31,7 @@ Parmi les fonctionnalités supplémentaires, l'exécution planifiée des recherc
 Install [uv](https://docs.astral.sh/uv/getting-started/installation/) and run from the checkout root. The project defaults to Python 3.14 and requires at least 3.13.
 
 ```sh
-uv run --locked job-scrapper
+uv run --locked jobsfr
 ```
 
 Download a build for your platform from [GitHub Releases](https://github.com/MandalorianY/job-scrapper/releases).
@@ -43,13 +43,13 @@ See [Docker setup](deploy/README.md#docker-cli) for host paths and launcher setu
 
 ## Homebrew
 
-Run `job-scrapper` from the directory where you want to keep `data/` and `exports/`.
-
 Install the latest published release from the project's tap.
 
 ```sh
-brew install mandaloriany/tap/job-scrapper
+brew install mandaloriany/tap/jobsfr
 ```
+
+See [Homebrew upgrades](deploy/README.md#macos-with-homebrew) if you installed `job-scrapper` before the rename.
 
 ## Job sources
 
@@ -83,7 +83,7 @@ tracker sync. Set a source to `false` under `enabled_sources` in
 Save your search settings in `config.local.yaml`.
 
 - **Checkout and Docker** use `src/scrapper/config/config.local.yaml`.
-- **Homebrew and standalone builds** use `config.local.yaml` in the directory where you run the scraper.
+- **Homebrew and standalone builds** use your platform’s [user configuration folder](docs/configuration.md#database-export-and-log-paths). Run `jobsfr --status` to see where to save `config.local.yaml`.
 
 ```yaml
 # Send these searches to the job boards.
@@ -114,12 +114,16 @@ for the YAML example, offline behavior, and pinning a local catalog.
 Use `--profile` to select a separate YAML file. Preview the bundled Toulouse Graphiste profile with this command.
 
 ```sh
-uv run --locked job-scrapper --profile src/scrapper/config/toulouse-graphiste.yaml --status
+uv run --locked jobsfr --profile src/scrapper/config/toulouse-graphiste.yaml --status
 ```
 
 See the [configuration reference](docs/configuration.md) for filters, geography, aggregator overrides, and file paths.
 
 ## Results
+
+Installed builds save the tracker and CSV files in `job-scrapper` inside your
+Documents folder. The paths below are relative to the checkout for source and
+Docker runs. Run `jobsfr --show-config` to see your effective paths.
 
 | File | Contents |
 | --- | --- |
@@ -150,7 +154,7 @@ Select `[ods]` for just the LibreOffice tracker. Whenever ODS is selected, run
 with the optional dependency.
 
 ```sh
-uv run --locked --extra ods job-scrapper --export-only
+uv run --locked --extra ods jobsfr --export-only
 ```
 
 The ODS tracker uses the same `export.excel_columns` list. Include `Statut` for the

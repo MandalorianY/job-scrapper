@@ -18,7 +18,7 @@ import yaml
 from pydantic import ValidationError
 from rich.text import Text
 
-from scrapper import __version__
+from scrapper import CLI_NAME, __version__
 from scrapper.cli_output import (
     CONFIG_OVERRIDE_HELP,
     console,
@@ -51,13 +51,13 @@ ProgressReporter = Callable[[str], None]
 
 def _show_version(value: bool) -> None:
     if value:
-        typer.echo(f"job-scrapper {__version__}")
+        typer.echo(f"{CLI_NAME} {__version__}")
         raise typer.Exit()
 
 
 @app.command(
     help="[bold cyan]Scrape example role jobs and export deduped XLSX, ODS, or CSV files.[/bold cyan]",
-    epilog=f"{CONFIG_OVERRIDE_HELP} Run job-scrapper sync --help for tracker sync.",
+    epilog=f"{CONFIG_OVERRIDE_HELP} Run {CLI_NAME} sync --help for tracker sync.",
 )
 def run(
     query: Annotated[
@@ -158,7 +158,7 @@ def run(
             )
         return
     if "ods" in config.export.formats and find_spec("odf") is None:
-        raise typer.BadParameter("ODS export requires odfpy. Run with uv run --locked --extra ods job-scrapper.")
+        raise typer.BadParameter(f"ODS export requires odfpy. Run with uv run --locked --extra ods {CLI_NAME}.")
     if export_only and replay_from is None and not config.database_path.is_file():
         raise typer.BadParameter(f"Database file not found: {config.database_path}", param_hint="--db")
     _validate_artifact_paths(config, replay_from)

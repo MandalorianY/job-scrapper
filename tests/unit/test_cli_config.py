@@ -8,7 +8,7 @@ import pytest
 from pydantic import ValidationError
 from typer.testing import CliRunner
 
-from scrapper import __version__, cli, search_regions
+from scrapper import CLI_NAME, __version__, cli, search_regions
 from scrapper.config import SearchConfig
 from scrapper.config.settings import PACKAGE_CONFIG_DIR
 from scrapper.location_scope import location_is_in_scope
@@ -82,7 +82,7 @@ def test_version_and_explicit_profile_work_with_invalid_local_config(
 
     version = runner.invoke(cli.app, ["--version"])
     assert version.exit_code == 0
-    assert version.stdout.strip() == f"job-scrapper {__version__}"
+    assert version.stdout.strip() == f"{CLI_NAME} {__version__}"
     bad_config = runner.invoke(cli.app, ["--status"])
     assert bad_config.exit_code == 2
     assert "Invalid YAML configuration" in bad_config.output
@@ -118,6 +118,8 @@ def test_installed_config_and_cli_paths_use_the_home_directory(monkeypatch: pyte
     monkeypatch.setenv("USERPROFILE", str(home))
     monkeypatch.setattr(settings_module, "PROJECT_ROOT", None)
     monkeypatch.setattr(settings_module, "LOCAL_CONFIG_FILE", tmp_path / "package" / "config.local.yaml")
+    config_dir = home / "app config"
+    monkeypatch.setattr(settings_module, "user_config_dir", lambda: config_dir)
     monkeypatch.delenv("SCRAPPER_DISABLE_LOCAL_CONFIG", raising=False)
     (workdir / "config.local.yaml").write_text("queries: [local]\n", encoding="utf-8")
     profile = home / "profile.yaml"
@@ -127,6 +129,12 @@ def test_installed_config_and_cli_paths_use_the_home_directory(monkeypatch: pyte
     )
 
     assert SearchConfig().queries == ("local",)
+    config_dir.mkdir()
+    (config_dir / "config.local.yaml").write_text("queries: [installed]\n", encoding="utf-8")
+    (config_dir / ".env").write_text("SCRAPPER_APP_ENV=prod\n", encoding="utf-8")
+    assert SearchConfig().queries == ("installed",)
+    assert SearchConfig().custom_max_pages == 3
+
     runner = CliRunner()
     result = runner.invoke(
         cli.app,
@@ -142,6 +150,14 @@ def test_installed_config_and_cli_paths_use_the_home_directory(monkeypatch: pyte
     }
     assert report["sources"]["paths.database_path"] == str(profile)
     assert report["sources"]["paths.export_dir"] == "command line"
+    assert report["sources"]["app_env"] == str(config_dir / ".env")
+
+    monkeypatch.setenv("SCRAPPER_USE_WORKING_DIRECTORY", "1")
+    config = SearchConfig()
+    assert config.queries == ("local",)
+    assert config.database_path.resolve() == (workdir / "data/job_search.duckdb").resolve()
+    assert config.export_dir.resolve() == (workdir / "exports").resolve()
+    assert config.log_file.resolve() == (workdir / "data/job-scrapper.jsonl").resolve()
 
 
 def test_show_config_reports_effective_values_and_origins(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -282,7 +298,7 @@ def test_status_previews_search_configuration_without_running(monkeypatch: pytes
     result = runner.invoke(cli.app, ["--status"])
     assert result.exit_code == 0, result.output
     assert "Search profile None" in " ".join(result.stdout.split())
-    assert "Use config.local.yaml in the working directory for an installed CLI" in " ".join(result.stdout.split())
+    assert "config.local.yaml for local settings." in " ".join(result.stdout.split())
     assert "Use --profile FILE for a specific YAML profile." in " ".join(result.stdout.split())
 
 

@@ -54,7 +54,7 @@ jobs:
         run: |
           uv sync --locked --no-default-groups --no-install-project --no-build
           uv pip install --no-deps dist/*.whl
-          uv run --locked --no-sync python deploy/smoke_release.py "$PWD/.venv/bin/job-scrapper"
+          uv run --locked --no-sync python deploy/smoke_release.py "$PWD/.venv/bin/jobsfr"
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -103,24 +103,26 @@ jobs:
           $archive = Get-Item dist/*.zip
           $destination = Join-Path $env:RUNNER_TEMP $archive.BaseName
           Expand-Archive -LiteralPath $archive.FullName -DestinationPath $destination
-          if (-not (Test-Path -LiteralPath (Join-Path $destination 'notices/job-scrapper.txt') -PathType Leaf)) {
+          if (-not (Test-Path -LiteralPath (Join-Path $destination 'notices/jobsfr.txt') -PathType Leaf)) {
             throw 'Windows archive is missing its license notices.'
           }
-          $executable = Join-Path $destination "$($archive.BaseName).exe"
+          $executable = Join-Path $destination 'jobsfr.exe'
           uv run --locked --no-sync python deploy/smoke_release.py "$executable"
 
       - name: Smoke-test portable archive
         if: runner.os != 'Windows'
         shell: bash
         run: |
-          tar -xzf dist/job-scrapper-*.tar.gz -C "$RUNNER_TEMP"
-          uv run --locked --no-sync python deploy/smoke_release.py "$RUNNER_TEMP/job-scrapper/job-scrapper"
+          tar -xzf dist/jobsfr-*.tar.gz -C "$RUNNER_TEMP"
+          uv run --locked --no-sync python deploy/smoke_release.py "$RUNNER_TEMP/jobsfr/jobsfr"
+          "$RUNNER_TEMP/jobsfr/job-scrapper" --version
 
       - name: Smoke-test Debian package
         if: runner.os == 'Linux'
         run: |
           sudo dpkg -i dist/*.deb
-          uv run --locked --no-sync python deploy/smoke_release.py /usr/bin/job-scrapper
+          uv run --locked --no-sync python deploy/smoke_release.py /usr/bin/jobsfr
+          /usr/bin/job-scrapper --version
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
