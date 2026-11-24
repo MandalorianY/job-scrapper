@@ -1,6 +1,6 @@
 [project]
 name = "jobsfr"
-version = "0.3.0"
+version = "0.3.1"
 description = "Open-source Python scraper for French job boards including France Travail, HelloWork, and Welcome to the Jungle. Exports listings to Excel and CSV."
 readme = "README.md"
 requires-python = ">=3.13"

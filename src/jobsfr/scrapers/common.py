@@ -13,7 +13,7 @@ from jobsfr.config import SearchConfig
 from jobsfr.geography.scope import location_is_allowed, mentions_location_in_scope
 from jobsfr.offers.dates import parse_posted_date
 from jobsfr.offers.filters import has_excluded_contract_signal
-from jobsfr.offers.models import JobOffer
+from jobsfr.offers.models import JobOffer, OfferRejection
 from jobsfr.offers.text import clean_text, is_application_destination
 
 APPLY_SIGNAL_RE = re.compile(
@@ -45,18 +45,42 @@ def offer_matches_search(
     require_details: bool = True,
     allow_description_location: bool = False,
 ) -> bool:
-    if not offer.source_url or (require_details and not (offer.description or offer.employment_type)):
-        return False
+    return (
+        offer_rejection(
+            offer, config, require_details=require_details, allow_description_location=allow_description_location
+        )
+        is None
+    )
+
+
+def offer_rejection(
+    offer: JobOffer,
+    config: SearchConfig,
+    *,
+    require_details: bool = True,
+    allow_description_location: bool = False,
+    check_location: bool = True,
+) -> OfferRejection | None:
+    if not offer.has_source():
+        return "incomplete"
     if has_excluded_contract_signal(offer.title, offer.employment_type, offer.description):
-        return False
+        return "contract"
+    if require_details and not (offer.description or offer.employment_type):
+        return "incomplete"
     if require_details:
         if not config.filters.allows(lambda field: offer.raw if field == "raw_json" else getattr(offer, field, None)):
-            return False
+            return "filters"
     elif not config.filters.title.allows(offer.title):
-        return False
-    if not offer.location and allow_description_location:
-        return mentions_location_in_scope(offer.description, config.location_scope)
-    return location_is_allowed(offer.location, config.location_scope)
+        return "filters"
+    if not check_location:
+        return None
+    if (
+        not offer.location
+        and allow_description_location
+        and mentions_location_in_scope(offer.description, config.location_scope)
+    ):
+        return None
+    return None if location_is_allowed(offer.location, config.location_scope) else "location"
 
 
 def absolutize(base_url: str, href: str | None) -> str | None:

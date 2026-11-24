@@ -4,9 +4,9 @@ from collections.abc import Mapping
 
 from jobsfr.config import SearchConfig
 from jobsfr.offers.filters import has_excluded_contract_signal
-from jobsfr.offers.models import JobOffer
+from jobsfr.offers.models import JobOffer, OfferRejection
 from jobsfr.offers.text import is_application_destination
-from jobsfr.scrapers.common import float_or_none, offer_matches_search
+from jobsfr.scrapers.common import float_or_none, offer_rejection
 
 
 def row_to_offer(row: Mapping[str, object], site: str, query: str, search_location: str) -> JobOffer:
@@ -37,11 +37,12 @@ def row_to_offer(row: Mapping[str, object], site: str, query: str, search_locati
     )
 
 
-def offer_is_usable(offer: JobOffer, row: Mapping[str, object], config: SearchConfig) -> bool:
+def jobspy_offer_rejection(offer: JobOffer, row: Mapping[str, object], config: SearchConfig) -> OfferRejection | None:
+    rejection = offer_rejection(offer, config)
     extra_contract_labels = (row.get("listing_type"), row.get("job_level"))
-    return offer_matches_search(offer, config) and not any(
-        has_excluded_contract_signal(None, label, None) for label in extra_contract_labels
-    )
+    if any(has_excluded_contract_signal(None, label, None) for label in extra_contract_labels) and offer.has_source():
+        return "contract"
+    return rejection
 
 
 def string_or_none(value: object) -> str | None:

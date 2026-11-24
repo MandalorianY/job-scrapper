@@ -14,12 +14,12 @@ from jobsfr.geography.scope import normalize_location_text
 from jobsfr.offers.contracts import contract_evidence
 from jobsfr.offers.salary import salary_bounds
 from jobsfr.offers.text import (
-    GENERIC_LISTING_PATHS,
     company_name_key,
     description_dedupe_key_for_fields,
     is_application_destination,
     normalize_text,
     posting_url_key,
+    provider_listing_key,
     town_name,
 )
 
@@ -262,15 +262,8 @@ def build_group_keys(
         keys: list[tuple[str, ...]] = [
             ("url", key) for link in (row.source_url, apply_urls[index]) if (key := posting_url_key(link))
         ]
-        source_id = row.source_id
-        if (
-            isinstance(source_id, str)
-            and source_id
-            and "/" not in source_id
-            and source_id.lower() not in GENERIC_LISTING_PATHS
-        ):
-            host = (urlparse(row.source_url).hostname or "").removeprefix("www.")
-            keys.append(("id", row.source, host, source_id))
+        if provider_key := provider_listing_key(row.source_url, row.source_id):
+            keys.append(("id", row.source, *provider_key))
         for key in keys:
             left, right = find(index), find(seen_identity.setdefault(key, index))
             if left != right:

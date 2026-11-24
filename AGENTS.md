@@ -25,7 +25,7 @@ Do not commit generated data or exports unless the user explicitly asks for that
 - Pandera for validating the community employer CSV catalog
 - PyInstaller in the locked `release` group for native Windows, Linux, and macOS releases. The release version lives in `pyproject.toml`.
 
-The tracked `src/jobsfr/config/config.yaml` is the public example template. Use `src/jobsfr/config/config.local.yaml` (when present) for live repository settings such as query/location tuning and source-specific overrides. Use `--profile PATH` to select an alternate YAML with its own database, export, and log paths.
+The tracked `src/jobsfr/config/config.yaml` is the public example template. Use `src/jobsfr/config/config.local.yaml` (when present) for live repository settings such as query/location tuning and source-specific overrides. Use `--profile PATH` to select an alternate YAML. Named profiles get separate database, export, and log paths by default and can override them in `paths`.
 Installed builds use `config/user_paths.py` for the platform's config, data, log, and Documents folders. They read `config.yaml` from the user config folder (`~/.config/jobsfr` on macOS and Linux by default, `%APPDATA%\jobsfr` on Windows). Use paths under `data/` and `exports/` in Docker YAML profiles. The Docker launcher mounts host files passed via `--profile` or `replay --archive` and host destinations passed via `--db`, `--export-dir`, or `--log-file`.
 
 ## README Maintenance
@@ -242,7 +242,7 @@ failures, and retryable HTTP errors get one retry. Honor the host's Retry-After
 window on HTTP 429 and 503. If the delay exceeds the wait budget, defer requests
 to that host until the window expires and keep processing other sources.
 
-Search attempts keep their run ID, outcome, and seen count in DuckDB. `source_health` shows the latest attempt and successful watermark. The 90-day observation archive records offers accepted at ingestion and supports offline `replay --archive`. Back up the full DuckDB file to retain listings that predate the archive or its retention window.
+Search attempts keep their run ID, outcome, and seen count in DuckDB. `source_health` shows the latest attempt and successful watermark. Keep the previous watermark when JobSpy reaches its cap, Welcome to the Jungle reports additional pages, or a direct aggregator leaves discovered detail links unchecked. The 90-day observation archive records normalized offers, including those rejected by contract, listing, or location rules, and supports offline `replay --archive`. Back up the full DuckDB file to retain listings that predate the archive or its retention window.
 
 Custom/detail scrapers should skip known detail pages by default using `store.source_url_seen(...)`, unless `config.refresh_known_details` is true. Search/list pages may still be revisited to discover new links.
 

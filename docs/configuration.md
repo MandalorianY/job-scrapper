@@ -12,8 +12,8 @@ then uncomment the optional settings you want to override. [Complete YAML exampl
 Run `jobsfr setup --example` to print the same YAML from an installed build.
 
 Run `jobsfr setup` to create your default configuration file, or add `--profile PATH` to save
-the settings to a new YAML file. Pass the same `--profile PATH` to subsequent
-commands to load that file in place of the default profile.
+the settings and dedicated output paths to a new YAML file. Pass the same
+`--profile PATH` to subsequent commands to use that profile.
 Live searches require explicit `queries` and `locations` from your settings
 or command-line overrides.
 Use `jobsfr status --profile PATH` to validate the profile offline. The CLI
@@ -163,7 +163,10 @@ Source checkouts and Docker load `src/jobsfr/config/config.local.yaml` and
 default to `exports/` and `data/`. Relative paths in YAML resolve from the
 checkout root for source runs and the working directory for installed builds.
 Absolute paths and paths beginning with `~/` work for local installations.
-Give separate `paths.database_path`, `paths.export_dir`, and `paths.log_file`
-values to keep profiles independent.
+Each explicit `--profile` gets a `profiles/` subfolder under each default output
+location, identified by the YAML filename and a hash of its resolved path.
+You can override each destination with `paths.database_path`,
+`paths.export_dir`, and `paths.log_file`. To keep using a previously shared
+tracker or database, set its original path explicitly in the profile.
 
 Use `jobsfr status --json` to verify the paths before running the scraper. [Docker setup](../deploy/README.md#docker-cli)

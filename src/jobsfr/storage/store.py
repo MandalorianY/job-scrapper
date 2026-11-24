@@ -6,6 +6,7 @@ from contextlib import contextmanager
 from datetime import UTC, datetime
 from hashlib import sha256
 from pathlib import Path
+from threading import Lock
 from uuid import uuid4
 
 import duckdb
@@ -13,7 +14,7 @@ import pandas as pd
 
 from jobsfr.offers.dates import absolute_posted_date
 from jobsfr.offers.filters import has_excluded_contract_signal
-from jobsfr.offers.models import JobOffer
+from jobsfr.offers.models import JobOffer, OfferRejection
 from jobsfr.offers.text import (
     clean_text,
     completeness_score,
@@ -27,13 +28,22 @@ from jobsfr.offers.text import (
 )
 from jobsfr.source_rules.cadremploi import offer_id as cadremploi_offer_id
 from jobsfr.storage.dedupe import aggregate_group_links, build_group_keys
+from jobsfr.storage.observations import (
+    OBSERVATION_RETENTION_DAYS,
+    append_observation,
+    contract_observations,
+    excluded_url_keys,
+    observation_timestamp,
+    rejection_counts,
+)
 from jobsfr.storage.reposts import split_reposts
 from jobsfr.storage.schema import ensure_schema
 
 SOURCE_DIRECT_URL_IDENTITY_HOST_BLOCKLIST = {
     "jobijoba": "jobijoba.com",
 }
-OBSERVATION_RETENTION_DAYS = 90
+_SALARY_FIELDS = ("min_amount", "max_amount", "currency", "interval")
+_OFFER_WRITE_LOCK = Lock()
 CANONICAL_COLUMNS = [
     "title",
     "company",
@@ -79,19 +89,6 @@ def _offer_url_key(record: Mapping[str, object]) -> str | None:
         if direct_key:
             return direct_key
     return url_key(clean_text(record.get("source_url")))
-
-
-def _datetime_value(value: object | None) -> datetime | None:
-    if isinstance(value, datetime):
-        return value if value.tzinfo else value.replace(tzinfo=UTC)
-    text = clean_text(value)
-    if not text:
-        return None
-    try:
-        parsed = datetime.fromisoformat(text)
-    except ValueError:
-        return None
-    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
 
 
 class JobStore:
@@ -204,24 +201,31 @@ class JobStore:
         ).fetchone()
         return row is not None
 
-    def upsert_offer(self, offer: JobOffer) -> bool:
+    def upsert_offer(self, offer: JobOffer, *, rejection: OfferRejection | None = None) -> bool:
+        """Archive a normalized observation and materialize it when eligible."""
+        if rejection == "incomplete":
+            return False
+        if not offer.has_source():
+            raise ValueError("An observation needs a source and an HTTP listing URL.")
         record = offer.to_record()
+        timestamp = observation_timestamp(record["scraped_at"])
+        if timestamp is None:
+            raise ValueError("An observation needs a valid scrape timestamp.")
+        record["scraped_at"] = timestamp.isoformat()
         if offer.source == "cadremploi":
             record["source_id"] = cadremploi_offer_id(offer.source_url)
-        observed_at = datetime.now(UTC)
-        payload = json.dumps(record, ensure_ascii=False, default=str, sort_keys=True)
-        observation_id = sha256(payload.encode()).hexdigest()
-        inserted = self.conn.execute(
-            "INSERT OR IGNORE INTO offer_observations VALUES (?, ?, ?, ?::JSON) RETURNING observation_id",
-            [observation_id, self.run_id, observed_at, payload],
-        ).fetchone()
-        if not inserted:
-            observation = self.conn.execute(
-                "SELECT observed_at FROM offer_observations WHERE observation_id = ?", [observation_id]
-            ).fetchone()
-            assert observation is not None
-            observed_at = observation[0]
-        return self._upsert_record(record, observed_at)
+        observation = {**record, "_identity": url_key(offer.source_url)}
+        if rejection is not None:
+            observation["_rejection"] = rejection
+        # Source groups use separate connections and can clear the same exclusion key.
+        with _OFFER_WRITE_LOCK, self._transaction():
+            observed_at = append_observation(self.conn, self.run_id, observation)
+            if rejection is None:
+                self._upsert_record(record, observed_at)
+        return rejection is None
+
+    def rejection_counts(self) -> list[dict[str, object]]:
+        return rejection_counts(self.conn, self.run_id)
 
     def prune_observations(self) -> None:
         self.conn.execute(
@@ -229,14 +233,14 @@ class JobStore:
             [OBSERVATION_RETENTION_DAYS],
         )
 
-    def replay_observations(self, archive: Path) -> int:
+    def replay_observations(self, archive: Path, *, reaccept: Callable[[JobOffer], bool] | None = None) -> int:
         same_db = self.path.resolve() == archive.resolve()
         source = self.conn if same_db else duckdb.connect(str(archive), read_only=True)
         try:
-            archived_exclusions = source.execute("SELECT url_key FROM replay_excluded_offer_urls").fetchall()
+            archived_exclusions = excluded_url_keys(source)
             rows = source.execute(
                 """
-                SELECT observed_at, payload FROM offer_observations
+                SELECT observation_id, run_id, observed_at, payload FROM offer_observations
                 WHERE observed_at >= now() - INTERVAL (?) DAY
                 ORDER BY observed_at, observation_id
                 """,
@@ -248,31 +252,37 @@ class JobStore:
         with self._transaction():
             if archived_exclusions and not same_db:
                 self.conn.executemany(
-                    "INSERT OR IGNORE INTO replay_excluded_offer_urls VALUES (?)", archived_exclusions
+                    "INSERT OR IGNORE INTO replay_excluded_offer_urls VALUES (?)",
+                    [(key,) for key in archived_exclusions],
                 )
-            excluded = {
-                row[0] for row in self.conn.execute("SELECT url_key FROM replay_excluded_offer_urls").fetchall()
-            }
+            excluded = self.excluded_url_keys()
             replayed = 0
-            for observed_at, payload in rows:
+            if rows and not same_db:
+                self.conn.executemany("INSERT OR IGNORE INTO offer_observations VALUES (?, ?, ?, ?::JSON)", rows)
+            for _, _, observed_at, payload in rows:
                 record = json.loads(payload)
+                rejection = record.pop("_rejection", None)
+                record.pop("_identity", None)
+                if rejection == "contract":
+                    continue
                 if excluded & offer_link_keys(record.get("source_url"), record.get("direct_url")):
                     continue
+                if rejection:
+                    _normalize_posted_date(record)
+                    if reaccept is None or not reaccept(JobOffer(**record)):
+                        continue
                 self._upsert_record(record, observed_at)
                 replayed += 1
         return replayed
 
     def _upsert_record(self, record: dict[str, object], observed_at: datetime) -> bool:
-        record["date_posted"] = absolute_posted_date(
-            record.get("date_posted"),
-            now=_datetime_value(record.get("scraped_at")),
-        )
+        _normalize_posted_date(record)
         source_url_key = _offer_url_key(record)
         source = record["source"]
         identity = source_url_key or record["source_url"]
         existing = self.conn.execute(
             """
-            SELECT offer_id FROM raw_offers
+            SELECT offer_id, min_amount, max_amount, currency, interval FROM raw_offers
             WHERE source = ? AND (source_url_key = ? OR source_url = ?)
             ORDER BY (source_url = ?) DESC, (source_url_key = ?) DESC NULLS LAST, first_seen_at, offer_id
             LIMIT 1
@@ -280,6 +290,9 @@ class JobStore:
             [source, identity, record["source_url"], record["source_url"], identity],
         ).fetchone()
         offer_id = existing[0] if existing else sha256(f"{source}\0{identity}".encode()).hexdigest()
+        # A partial refresh cannot supply the unit or currency for an older amount.
+        if existing and not (clean_text(record.get("interval")) and (record["min_amount"] or record["max_amount"])):
+            record.update(zip(_SALARY_FIELDS, existing[1:], strict=True))
         duplicate_key = dedupe_key_for_fields(
             record,
             fields=self.dedupe_primary_fields,
@@ -351,10 +364,10 @@ class JobStore:
                 date_posted = COALESCE(raw_offers.date_posted, excluded.date_posted),
                 employment_type = COALESCE(excluded.employment_type, raw_offers.employment_type),
                 salary = COALESCE(excluded.salary, raw_offers.salary),
-                min_amount = COALESCE(excluded.min_amount, raw_offers.min_amount),
-                max_amount = COALESCE(excluded.max_amount, raw_offers.max_amount),
-                currency = COALESCE(excluded.currency, raw_offers.currency),
-                interval = COALESCE(excluded.interval, raw_offers.interval),
+                min_amount = excluded.min_amount,
+                max_amount = excluded.max_amount,
+                currency = excluded.currency,
+                interval = excluded.interval,
                 is_remote = COALESCE(excluded.is_remote, raw_offers.is_remote),
                 company_url = COALESCE(excluded.company_url, raw_offers.company_url),
                 company_description = COALESCE(excluded.company_description, raw_offers.company_description),
@@ -379,6 +392,7 @@ class JobStore:
         self,
         *,
         allows: Callable[[pd.Series], bool] | None = None,
+        candidate_allowed: Callable[[pd.Series], bool] | None = None,
         exclude_contracts: bool = False,
         keep_reposts: bool = False,
     ) -> pd.DataFrame:
@@ -451,6 +465,8 @@ class JobStore:
         )
 
         candidates = frame.loc[frame["title"].notna() & frame["company"].notna()].copy()
+        if candidate_allowed is not None and not candidates.empty:
+            candidates = candidates.loc[candidates.apply(candidate_allowed, axis=1)]
         if candidates.empty:
             return pd.DataFrame(columns=pd.Index(CANONICAL_COLUMNS))
 
@@ -515,26 +531,41 @@ class JobStore:
             FROM raw_offers ORDER BY offer_id
             """
         ).df()
-        if frame.empty:
+        evidence = contract_observations(self.conn)
+        if frame.empty and not evidence:
             return 0
-        rejected = frame.apply(_has_excluded_contract, axis=1)
-        if not rejected.to_numpy().any():
+        excluded_urls = self.excluded_url_keys()
+        rejected = frame.apply(
+            lambda row: (
+                _has_excluded_contract(row)
+                or bool(excluded_urls and excluded_urls & offer_link_keys(row["source_url"], row["direct_url"]))
+            ),
+            axis=1,
+        ).astype(bool)
+        if not evidence and not rejected.to_numpy().any():
             return 0
+        if evidence:
+            for record in evidence:
+                _normalize_posted_date(record)
+                record["dedupe_key"] = dedupe_key_for_fields(
+                    record, fields=self.dedupe_primary_fields, fallback_fields=self.dedupe_fallback_fields
+                )
+            frame = pd.concat([frame, pd.DataFrame(evidence).reindex(columns=frame.columns)], ignore_index=True)
+            rejected = rejected.reindex(frame.index, fill_value=True)
         # A sparse copy must not hide the contract disclosed by another board for
         # the same offer. Use the same identity groups as the canonical export.
         groups = self._build_group_keys(frame)
         rejected_groups = set(groups[rejected])
-        offer_ids = frame.loc[groups.isin(rejected_groups), "offer_id"].tolist()
-        self._delete_offer_ids(offer_ids)
+        excluded = frame.loc[groups.isin(rejected_groups)]
+        keys = {(key,) for row in excluded.itertuples() for key in offer_link_keys(row.source_url, row.direct_url)}
+        if keys:
+            self.conn.executemany("INSERT OR IGNORE INTO replay_excluded_offer_urls (url_key) VALUES (?)", list(keys))
+        offer_ids = excluded["offer_id"].dropna().tolist()
+        if offer_ids:
+            self._delete_offer_ids(offer_ids)
         return len(offer_ids)
 
     def _delete_offer_ids(self, offer_ids: list[str]) -> None:
-        rows = self.conn.execute(
-            "SELECT source_url, direct_url FROM raw_offers WHERE offer_id IN (SELECT unnest(?))", [offer_ids]
-        ).fetchall()
-        keys = list({(key,) for source_url, direct_url in rows for key in offer_link_keys(source_url, direct_url)})
-        if keys:
-            self.conn.executemany("INSERT OR IGNORE INTO replay_excluded_offer_urls (url_key) VALUES (?)", keys)
         params = [(offer_id,) for offer_id in offer_ids]
         try:
             self.conn.executemany("DELETE FROM raw_offers WHERE offer_id = ?", params)
@@ -549,12 +580,7 @@ class JobStore:
 
     def excluded_url_keys(self) -> set[str]:
         """Prevent old tracker copies from restoring offers removed by a purge."""
-        rows = self.conn.execute("""
-            SELECT url_key FROM excluded_offer_urls
-            UNION
-            SELECT url_key FROM replay_excluded_offer_urls
-        """).fetchall()
-        return {row[0] for row in rows}
+        return excluded_url_keys(self.conn)
 
     @staticmethod
     def search_key(source: str, query: str, location: str) -> str:
@@ -563,3 +589,9 @@ class JobStore:
 
 def _has_excluded_contract(row: pd.Series) -> bool:
     return has_excluded_contract_signal(row.get("title"), row.get("employment_type"), row.get("description"))
+
+
+def _normalize_posted_date(record: dict[str, object]) -> None:
+    record["date_posted"] = absolute_posted_date(
+        record.get("date_posted"), now=observation_timestamp(record.get("scraped_at"))
+    )

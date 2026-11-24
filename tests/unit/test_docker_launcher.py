@@ -55,6 +55,7 @@ def test_docker_launcher_maps_host_paths_and_reuses_replay_destination(tmp_path:
     by_source = {volume["src"]: volume["dst"] for volume in volumes}
     assert by_source[str((checkout / "data").resolve())] == "/work/data"
     assert f"--profile={by_source[str(profile.resolve())]}" in args
+    assert f"JOBSFR_PROFILE_HOST_PATH={profile.resolve()}" in args
     database = f"{by_source[str(external.resolve())]}/{archive.name}"
     assert args[args.index("--archive") + 1] == args[args.index("--db") + 1] == database
     assert args[args.index("--log-file") + 1] == "/work/data/custom.jsonl"

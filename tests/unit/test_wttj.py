@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import TracebackType
 from typing import Self
@@ -196,6 +196,62 @@ def test_wttj_hit_uses_known_direct_apply_fields() -> None:
     offer = wttj._hit_to_offer(hit, "communication", SearchConfig())
 
     assert offer.direct_url == "https://ats.example/apply/1"
+
+
+def test_wttj_yearly_salary_keeps_its_unit_when_periodic_amount_is_missing() -> None:
+    offer = wttj._hit_to_offer(
+        {"salary_yearly_minimum": 50000, "salary_period": "month", "salary_currency": "EUR"}, "analyste", SearchConfig()
+    )
+    record = offer.to_record()
+    assert offer.interval == "year"
+    assert salary_bounds(record.get) == (50000, None)
+
+
+def test_wttj_capped_search_keeps_window_open_for_unseen_results(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, mock_public_algolia_config: None
+) -> None:
+    query = "analyste"
+    config = SearchConfig(
+        queries=(query,),
+        locations=("Toulouse, France",),
+        location_scope={"enabled": False},
+        custom_max_pages=1,
+        results_wanted_per_query=1,
+    )
+    responses = iter(
+        [
+            (2, {"slug": "new", "published_at": datetime.now(UTC).isoformat()}),
+            (1, {"slug": "older", "published_at": (datetime.now(UTC) - timedelta(days=2)).isoformat()}),
+        ]
+    )
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            return httpx.Response(
+                200, headers={"content-type": "text/html"}, text="<title>Analyste - Example - CDI</title>"
+            )
+        page_count, data = next(responses)
+        hit = {
+            "name": "Analyste",
+            "organization": {"slug": "example", "name": "Example"},
+            "contract_type": "CDI",
+            **data,
+        }
+        return httpx.Response(200, json={"results": [{"hits": [hit], "nbPages": page_count}]})
+
+    client_class = httpx.AsyncClient
+    transport = httpx.MockTransport(respond)
+    monkeypatch.setattr(wttj.httpx, "AsyncClient", lambda **kwargs: client_class(transport=transport, **kwargs))
+
+    store = JobStore(tmp_path / "jobs.duckdb")
+    try:
+        assert asyncio.run(wttj.scrape_welcome_to_the_jungle(config, store)) == 1
+        assert store.get_last_success(wttj.WTTJ_SOURCE, query, "Toulouse, France") is None
+        assert asyncio.run(wttj.scrape_welcome_to_the_jungle(config, store)) == 1
+        assert store.get_last_success(wttj.WTTJ_SOURCE, query, "Toulouse, France") is not None
+        assert len(store.raw_dataframe()) == 2
+    finally:
+        store.close()
 
 
 def test_wttj_keeps_recent_hits_after_old_relevance_results(

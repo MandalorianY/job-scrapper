@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import os
 from collections import ChainMap
 from collections.abc import Iterator, Mapping
+from hashlib import sha256
 from pathlib import Path
 from typing import Literal, TypedDict
 
@@ -222,6 +224,24 @@ class PathsConfig(_ConfigSection):
         return self
 
 
+def profile_paths(profile: Path) -> dict[str, str]:
+    # Docker mounts the profile at a temporary path. Use its host path for the same identity.
+    host_path = os.environ.get("JOBSFR_PROFILE_HOST_PATH")
+    identity = Path(host_path) if host_path else profile.expanduser().resolve()
+    digest = sha256(os.fsencode(os.path.normcase(identity))).hexdigest()[:16]
+    directory = Path("profiles") / f"{identity.stem[:48]}-{digest}"
+    defaults = PathsConfig()
+    paths = {
+        "database_path": defaults.database_path.parent / directory / defaults.database_path.name,
+        "export_dir": defaults.export_dir / directory,
+        "log_file": defaults.log_file.parent / directory / defaults.log_file.name,
+    }
+    if not _use_installed_paths():
+        root = PROJECT_ROOT or Path.cwd()
+        paths = {name: path.relative_to(root) for name, path in paths.items()}
+    return {name: path.as_posix() for name, path in paths.items()}
+
+
 Weekday = Literal["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
 WEEKDAYS: tuple[Weekday, ...] = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
 
@@ -430,6 +450,11 @@ class Settings(BaseSettings):
             source.__name__ = str(path)
             sources[source.__name__] = str(path)
             yaml_sources.append(source)
+        if profile is not None:
+            path_defaults = InitSettingsSource(settings_cls, {"paths": profile_paths(Path(profile))})
+            path_defaults.__name__ = "profile defaults"
+            sources[path_defaults.__name__] = "profile defaults"
+            yaml_sources.append(path_defaults)
         settings_sources = (init_settings, env_settings, dotenv_settings, *yaml_sources)
         if config_sources is None:
             return settings_sources

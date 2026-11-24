@@ -112,8 +112,9 @@ async def _extract_detail_offer(
         raw={"json_ld": job, "url": url},
     )
     if source == "jobijoba" and cutoff is not None and not _offer_is_usable(offer, config, cutoff=cutoff):
-        return None
-    direct_url = await _direct_url_for_detail(client, soup, url, source, throttle)
+        direct_url = apply_url(soup, url)
+    else:
+        direct_url = await _direct_url_for_detail(client, soup, url, source, throttle)
     if _direct_url_is_blocked(source, direct_url, config):
         return None
     offer.source_id = _offer_source_id(source, url, direct_url)
@@ -212,6 +213,10 @@ def _offer_is_usable(
     *,
     cutoff: datetime | None = None,
 ) -> TypeGuard[JobOffer]:
+    return _offer_is_candidate(offer, cutoff) and offer_matches_search(offer, config, allow_description_location=True)
+
+
+def _offer_is_candidate(offer: JobOffer | None, cutoff: datetime | None) -> TypeGuard[JobOffer]:
     if not offer or not offer.title:
         return False
     if cutoff is not None:
@@ -220,9 +225,7 @@ def _offer_is_usable(
         date = offer.date_posted or modified
         if posted_date_is_before_cutoff(date, cutoff):
             return False
-    if _is_meteojob_placeholder_offer(offer):
-        return False
-    return offer_matches_search(offer, config, allow_description_location=True)
+    return not _is_meteojob_placeholder_offer(offer)
 
 
 def _is_meteojob_placeholder_offer(offer: JobOffer) -> bool:

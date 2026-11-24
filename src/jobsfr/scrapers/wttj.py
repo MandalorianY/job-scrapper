@@ -21,6 +21,7 @@ from jobsfr.scrapers.common import (
     float_or_none,
     json_ld_jobposting,
     offer_matches_search,
+    offer_rejection,
     posted_date_is_before_cutoff,
 )
 from jobsfr.storage import JobStore
@@ -112,6 +113,7 @@ async def scrape_welcome_to_the_jungle(config: SearchConfig, store: JobStore) ->
             for center_name, center_lat_lng in _search_centers(config):
                 store.start_search(WTTJ_SOURCE, query, center_name)
                 seen = 0
+                pages_remaining = False
                 try:
                     geo_params: dict[str, str | int] = {}
                     if center_lat_lng:
@@ -153,7 +155,10 @@ async def scrape_welcome_to_the_jungle(config: SearchConfig, store: JobStore) ->
                         result = response.json()["results"][0]
                         hits = result.get("hits", [])
                         if not hits:
+                            pages_remaining = False
                             break
+                        page_count = result.get("nbPages")
+                        pages_remaining = isinstance(page_count, int) and page + 1 < page_count
                         for hit in hits:
                             seen += 1
                             if posted_date_is_before_cutoff(hit.get("published_at"), cutoff):
@@ -164,17 +169,17 @@ async def scrape_welcome_to_the_jungle(config: SearchConfig, store: JobStore) ->
                             if not offer.source_url or offer.source_url in processed_urls:
                                 continue
                             if not offer_matches_search(offer, config, require_details=False):
+                                store.upsert_offer(offer, rejection=offer_rejection(offer, config))
                                 continue
                             if not config.refresh_known_details and store.source_url_seen(
                                 WTTJ_SOURCE, offer.source_url
                             ):
                                 continue
                             await _enrich_public_detail(detail_client, throttle, offer)
-                            if offer_matches_search(offer, config):
-                                store.upsert_offer(offer)
-                                written += 1
+                            written += store.upsert_offer(offer, rejection=offer_rejection(offer, config))
                             processed_urls.add(offer.source_url)
-                    store.finish_search(WTTJ_SOURCE, query, center_name, seen)
+                    error = "Welcome to the Jungle page limit reached; watermark kept." if pages_remaining else None
+                    store.finish_search(WTTJ_SOURCE, query, center_name, seen, error=error)
                     log.info(
                         "wttj_search_finished",
                         source=WTTJ_SOURCE,
@@ -182,6 +187,7 @@ async def scrape_welcome_to_the_jungle(config: SearchConfig, store: JobStore) ->
                         location=center_name,
                         seen=seen,
                         stored=written,
+                        error=error,
                     )
                 except Exception as exc:
                     error = str(exc) or type(exc).__name__
@@ -310,7 +316,15 @@ def _hit_to_offer(hit: dict[str, object], query: str, config: SearchConfig) -> J
     )
     contract_names = hit.get("contract_type_names")
     contract_names = contract_names if isinstance(contract_names, dict) else {}
-    salary = _salary(hit)
+    minimum = float_or_none(hit.get("salary_minimum"))
+    maximum = float_or_none(hit.get("salary_maximum"))
+    period = clean_text(hit.get("salary_period"))
+    if minimum is None:
+        annual_minimum = float_or_none(hit.get("salary_yearly_minimum"))
+        annual_maximum = float_or_none(hit.get("salary_yearly_maximum"))
+        if annual_minimum is not None or annual_maximum is not None:
+            minimum, maximum, period = annual_minimum, annual_maximum, "year"
+    currency = clean_text(hit.get("salary_currency"))
     company_description = _localized((org.get("descriptions") or {}), "fr") or _localized(
         (org.get("descriptions") or {}),
         "en",
@@ -337,11 +351,11 @@ def _hit_to_offer(hit: dict[str, object], query: str, config: SearchConfig) -> J
         description=description,
         date_posted=clean_text(hit.get("published_at")),
         employment_type=clean_text(contract_names.get("fr") or hit.get("contract_type")),
-        salary=salary,
-        min_amount=float_or_none(hit.get("salary_minimum") or hit.get("salary_yearly_minimum")),
-        max_amount=float_or_none(hit.get("salary_maximum")),
-        currency=clean_text(hit.get("salary_currency")),
-        interval=clean_text(hit.get("salary_period")),
+        salary=_salary(minimum, maximum, currency, period),
+        min_amount=minimum,
+        max_amount=maximum,
+        currency=currency,
+        interval=period,
         is_remote=_is_remote(hit.get("remote")),
         company_url=f"{config.welcome_to_the_jungle.site_url}/fr/companies/{org_slug}" if org_slug else None,
         company_description=company_description,
@@ -407,15 +421,11 @@ def _location(office: dict[str, object]) -> str | None:
     )
 
 
-def _salary(hit: dict[str, object]) -> str | None:
-    minimum = hit.get("salary_minimum") or hit.get("salary_yearly_minimum")
-    maximum = hit.get("salary_maximum")
-    currency = hit.get("salary_currency")
-    period = hit.get("salary_period")
+def _salary(minimum: float | None, maximum: float | None, currency: str | None, period: str | None) -> str | None:
     if minimum and maximum:
-        return clean_text(f"{minimum} - {maximum} {currency or ''} {period or ''}")
-    if minimum:
-        return clean_text(f"{minimum} {currency or ''} {period or ''}")
+        return clean_text(f"{minimum:g} - {maximum:g} {currency or ''} {period or ''}")
+    if amount := minimum or maximum:
+        return clean_text(f"{amount:g} {currency or ''} {period or ''}")
     return None
 
 

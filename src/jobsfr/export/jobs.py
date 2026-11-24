@@ -72,9 +72,13 @@ def export_job_formats(
     export_dir.mkdir(parents=True, exist_ok=True)
 
     filters = filters or ListingFilters()
+
     canonical = _excel_safe(
         store.canonical_dataframe(
-            allows=lambda row: filters.allows(row.get), exclude_contracts=True, keep_reposts=keep_reposts
+            allows=lambda row: filters.allows(row.get),
+            candidate_allowed=(lambda row: location_allowed(_offer_location(row))) if location_allowed else None,
+            exclude_contracts=True,
+            keep_reposts=keep_reposts,
         )
     )
     raw = store.raw_dataframe()
@@ -88,8 +92,6 @@ def export_job_formats(
     raw = _excel_safe(raw.drop(columns=["company_description", "raw_json", "currency"]))
     if not canonical.empty:
         canonical["location"] = canonical.apply(_offer_location, axis=1)
-        if location_allowed is not None:
-            canonical = canonical.loc[cast("pd.Series", canonical["location"].map(location_allowed))]
     columns = tuple(excel_columns or DEFAULT_LOCALIZED_TRACKER_COLUMNS)
     if keep_reposts and cast("pd.Series", canonical["is_repost"]).any():
         columns = (*(column for column in ("Statut", "Lien") if column not in columns), *columns)

@@ -43,6 +43,7 @@ from jobsfr.scrapers import (
 )
 from jobsfr.scrapers.aggregators import AGGREGATORS_SOURCE
 from jobsfr.scrapers.async_http import SourceBlockedError
+from jobsfr.scrapers.common import offer_rejection
 from jobsfr.scrapers.wttj import WTTJ_SOURCE
 from jobsfr.storage import JobStore
 
@@ -177,7 +178,16 @@ def run(
         if replay_from is None and not (skip_jobspy and skip_custom):
             store.prune_observations()
         if replay_from is not None:
-            counts["observations_replayed"] = store.replay_observations(replay_from)
+            counts["observations_replayed"] = store.replay_observations(
+                replay_from,
+                reaccept=lambda offer: (
+                    offer_rejection(
+                        offer, config, allow_description_location=True, check_location=location_allowed is not None
+                    )
+                    is None
+                ),
+            )
+            save_location_scope(unrouted_config, config.location_scope)
         elif not skip_jobspy and not skip_custom:
             console.print(
                 "[bold cyan]Running JobSpy and custom sources in parallel[/bold cyan] (separate DuckDB connections)"
@@ -237,6 +247,7 @@ def run(
         log.info(
             "scrape_run_completed",
             counts=counts,
+            archived_rejections=store.rejection_counts() if live_search else [],
             deduped_total=total,
             export_paths=[str(path) for path in outputs],
             duration_seconds=round(time.monotonic() - started_at, 3),

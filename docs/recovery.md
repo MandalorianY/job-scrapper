@@ -5,8 +5,13 @@
 Replay applies the current filters to up to 90 days of saved observations without
 scraping. Run from the checkout root and choose a separate database and export
 folder for the rebuild.
-Contract exclusions carry over to the rebuilt database. A fresh, accepted scrape
-can clear an exclusion.
+Replay can recover archived offers that now match a wider title, company, or
+location filter. The archive contains offers that reached normalization within
+the original search limits. Earlier versions archived only accepted offers.
+Replay saves the resolved geographic scope for later exports from the rebuilt
+database. Contract exclusions carry over and apply to rows already in that
+database. A fresh, accepted scrape of the same source listing can supersede
+earlier contract evidence.
 Replay reads separate archives in read-only mode. Use an archive created or
 opened for a normal run by the current version.
 
@@ -39,8 +44,11 @@ duckdb -readonly data/job_search.duckdb
 ```
 
 The `source_health` view shows the latest recorded attempt for each source, query,
-and location alongside the last successful run. Use the original database for
-this query because replay imports observations and starts with empty search history.
+and location alongside the last successful run. When JobSpy reaches its result
+limit, Welcome to the Jungle reports pages beyond its configured limit, or a
+direct aggregator leaves discovered detail links unchecked, the attempt keeps
+the previous watermark. Use the original database for this query because
+replay imports observations and starts with empty search history.
 
 ```sql
 SELECT source, query, location, status, error, last_success_at

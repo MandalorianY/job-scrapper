@@ -138,7 +138,7 @@ filters:
 #   fallback: [location]
 #   description: [description, company, location]
 
-# Runtime paths for a separate profile. Installed builds have per-user defaults.
+# Optional overrides for profile-specific database, export, and log paths.
 # paths:
 #   database_path: data/toulouse-data-analyst/job_search.duckdb
 #   export_dir: exports/toulouse-data-analyst

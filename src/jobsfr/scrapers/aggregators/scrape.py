@@ -10,7 +10,7 @@ import structlog
 from jobsfr.config import DirectAggregatorConfig, SearchConfig, SiteSearchConfig
 from jobsfr.config.source_names import AGGREGATORS_SOURCE
 from jobsfr.offers.models import JobOffer
-from jobsfr.scrapers.aggregators.detail import _extract_detail_offer, _offer_is_usable
+from jobsfr.scrapers.aggregators.detail import _extract_detail_offer, _offer_is_candidate
 from jobsfr.scrapers.aggregators.discovery import (
     EMPLOI_COLLECTIVITES_SITEMAP,
     SITEMAP_URL_RE,
@@ -24,6 +24,7 @@ from jobsfr.scrapers.aggregators.discovery import (
 from jobsfr.scrapers.async_http import HostThrottle, SourceBlockedError, get_checked_page
 from jobsfr.scrapers.common import (
     custom_search_cutoff,
+    offer_rejection,
 )
 from jobsfr.storage import JobStore
 
@@ -75,11 +76,13 @@ async def _scrape_direct_spec(
 ) -> int:
     written = 0
     batch_size = min(2, throttle.per_host_concurrency) if throttle else 1
+    detail_budget = min(spec.max_links, config.aggregators.max_detail_pages)
     for query in config.queries:
         checked_urls: set[str] = set()
         listing_dates: dict[str, str] = {}
         store.start_search(spec.source, query, config.location_label)
         seen_count = 0
+        capped = False
         try:
             cutoff = custom_search_cutoff(store, spec.source, query, config.location_label, config)
             for search_url in _search_urls(spec, query, config):
@@ -97,7 +100,7 @@ async def _scrape_direct_spec(
                     if url not in checked_urls
                     and (config.refresh_known_details or not store.source_url_seen(spec.source, url))
                 )
-                for batch in batched(islice(candidates, config.aggregators.max_detail_pages), batch_size):
+                for batch in batched(islice(candidates, detail_budget), batch_size):
                     checked_urls.update(batch)
                     seen_count += len(batch)
                     offers = await asyncio.gather(
@@ -118,13 +121,16 @@ async def _scrape_direct_spec(
                         if offer and not offer.date_posted:
                             offer.date_posted = listing_dates.get(url)
                         # Relevance-ordered pages can contain newer offers after an old one.
-                        if not _offer_is_usable(offer, config, cutoff=cutoff):
+                        if not _offer_is_candidate(offer, cutoff):
                             continue
-                        store.upsert_offer(offer)
-                        written += 1
+                        written += store.upsert_offer(
+                            offer, rejection=offer_rejection(offer, config, allow_description_location=True)
+                        )
                     if batch_error is not None:
                         raise batch_error
-            store.finish_search(spec.source, query, config.location_label, seen_count)
+                capped = capped or next(candidates, None) is not None
+            error = "Detail page limit reached; watermark kept." if capped else None
+            store.finish_search(spec.source, query, config.location_label, seen_count, error=error)
             log.info(
                 "aggregator_direct_search_finished",
                 source=spec.source,
@@ -132,6 +138,7 @@ async def _scrape_direct_spec(
                 location=config.location_label,
                 seen=seen_count,
                 stored=written,
+                error=error,
             )
         except Exception as exc:
             error = str(exc) or type(exc).__name__
@@ -228,10 +235,12 @@ async def _scrape_site_specs(
                         continue
                     if offer is not None and offer.title:
                         parsed_details[url] = offer
-                    if not _offer_is_usable(offer, config, cutoff=cutoff):
+                    if not _offer_is_candidate(offer, cutoff):
                         continue
-                    store.upsert_offer(replace(offer, search_query=search_query, search_location=search_location))
-                    written += 1
+                    written += store.upsert_offer(
+                        replace(offer, search_query=search_query, search_location=search_location),
+                        rejection=offer_rejection(offer, config, allow_description_location=True),
+                    )
                 if error is not None:
                     raise error
                 store.finish_search(spec.source, search_query, search_location, seen)

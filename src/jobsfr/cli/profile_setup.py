@@ -6,7 +6,7 @@ from typing import Annotated
 import typer
 import yaml
 
-from jobsfr.config.settings import EXAMPLE_CONFIG_FILE, PROJECT_ROOT, default_local_config
+from jobsfr.config.settings import EXAMPLE_CONFIG_FILE, PROJECT_ROOT, default_local_config, profile_paths
 
 
 def example_config_hint() -> str:
@@ -37,8 +37,14 @@ def setup(
     if not query or not location:
         raise typer.BadParameter("Enter both a job title and a town.")
 
-    settings = {"queries": [query], "locations": [location], "filters": {"title": {"include": [query]}}}
+    settings: dict[str, object] = {
+        "queries": [query],
+        "locations": [location],
+        "filters": {"title": {"include": [query]}},
+    }
     try:
+        if profile is not None:
+            settings["paths"] = profile_paths(path)
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("x", encoding="utf-8") as file:
             yaml.safe_dump(settings, file, allow_unicode=True, sort_keys=False)

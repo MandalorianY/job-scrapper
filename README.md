@@ -111,7 +111,8 @@ so you can pick up new classifications between scraper releases. See the
 [employer-type filter guide](docs/configuration.md#excluding-employer-types)
 for offline behavior and pinning a local catalog.
 
-Use `--profile` to select a separate YAML file. Preview the example profile with this command.
+Use `--profile` to select a separate YAML file with its own database, exports,
+and log by default. Preview the example profile with this command.
 
 ```sh
 uv run --locked jobsfr status --profile docs/config.local.example.yaml

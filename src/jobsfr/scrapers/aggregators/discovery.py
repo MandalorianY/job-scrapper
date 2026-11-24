@@ -207,11 +207,9 @@ async def _detail_links(
             location = first_text(anchor, ("address",))
             if location and location_is_in_scope(location, config.location_scope):
                 regional_urls.add(url)
-        elif len(urls) >= spec.max_links:
-            break
     if regional_urls:
         urls.sort(key=lambda url: url not in regional_urls)
-    return urls[: spec.max_links]
+    return urls
 
 
 def _search_urls(spec: DirectAggregatorConfig, query: str, config: SearchConfig) -> list[str]:

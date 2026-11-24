@@ -239,6 +239,21 @@ def offer_link_keys(source_url: object, direct_url: object) -> set[str]:
     return {key for link in links if isinstance(link, str) and (key := listing_url_key(link))}
 
 
+def provider_listing_key(source_url: str, source_id: object) -> tuple[str, str] | None:
+    if (
+        not isinstance(source_id, str)
+        or not source_id
+        or "/" in source_id
+        or source_id.lower() in GENERIC_LISTING_PATHS
+    ):
+        return None
+    try:
+        host = (urlparse(source_url).hostname or "").removeprefix("www.")
+    except ValueError:
+        return None
+    return (host, source_id) if host else None
+
+
 def hostname_matches(hostname: str | None, domain: str) -> bool:
     host = (hostname or "").lower().rstrip(".")
     domain = domain.lower().rstrip(".")

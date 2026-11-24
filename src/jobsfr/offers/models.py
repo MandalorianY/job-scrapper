@@ -2,6 +2,10 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
+from typing import Literal
+from urllib.parse import urlsplit
+
+type OfferRejection = Literal["incomplete", "contract", "filters", "location"]
 
 
 @dataclass(slots=True)
@@ -29,6 +33,13 @@ class JobOffer:
     search_location: str | None = None
     scraped_at: str | None = None
     raw: dict[str, object] | None = None
+
+    def has_source(self) -> bool:
+        try:
+            page = urlsplit(self.source_url)
+        except ValueError:
+            return False
+        return bool(self.source.strip() and page.scheme in {"http", "https"} and page.hostname)
 
     def to_record(self) -> dict[str, object]:
         record = asdict(self)

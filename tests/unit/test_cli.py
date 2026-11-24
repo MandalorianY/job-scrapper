@@ -18,6 +18,36 @@ from jobsfr.scrapers.async_http import SourceBlockedError
 from jobsfr.storage import JobStore
 
 
+def test_named_profiles_isolate_paths_even_with_the_same_filename(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    runner = CliRunner()
+    created = tmp_path / "first" / "profil été.yaml"
+    existing = tmp_path / "second" / created.name
+    result = runner.invoke(cli.app, ["setup", "--profile", str(created)], input="analyste\nToulouse\n")
+    assert result.exit_code == 0, result.output
+    existing.parent.mkdir()
+    existing.write_text("queries: [analyste]\nlocations: [Toulouse]\n", encoding="utf-8")
+
+    def paths_and_sources(profile: Path) -> tuple[dict[str, str], dict[str, str]]:
+        result = runner.invoke(cli.app, ["status", "--json", "--profile", str(profile)])
+        assert result.exit_code == 0, result.output
+        report = json.loads(result.stdout)
+        return report["values"]["paths"], report["sources"]
+
+    first, first_sources = paths_and_sources(created)
+    second, second_sources = paths_and_sources(existing)
+    for key in ("database_path", "export_dir", "log_file"):
+        assert first[key] != second[key]
+        assert first_sources[f"paths.{key}"] == str(created)
+        assert second_sources[f"paths.{key}"] == "profile defaults"
+
+    mounted = tmp_path / "mounted.yaml"
+    mounted.write_bytes(existing.read_bytes())
+    monkeypatch.setenv("JOBSFR_PROFILE_HOST_PATH", str(existing.resolve()))
+    assert paths_and_sources(mounted)[0] == second
+
+
 @pytest.mark.parametrize("command", ["search", "sync"])
 def test_live_commands_require_search_setup(command: str, tmp_path: Path) -> None:
     profile = tmp_path / "incomplete.yaml"

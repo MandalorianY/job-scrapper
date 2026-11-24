@@ -19,7 +19,7 @@ from jobsfr.config.source_names import JOBSPY_SITES
 from jobsfr.offers.models import JobOffer
 from jobsfr.scrapers.jobspy_sources.hellowork import patch_hellowork_scraper
 from jobsfr.scrapers.jobspy_sources.linkedin import patch_linkedin_scraper
-from jobsfr.scrapers.jobspy_sources.offers import offer_is_usable, row_to_offer, string_or_none
+from jobsfr.scrapers.jobspy_sources.offers import jobspy_offer_rejection, row_to_offer, string_or_none
 from jobsfr.storage import JobStore
 
 INDEED_EXPIRED_MESSAGE = "cette offre a expiré sur indeed"
@@ -243,10 +243,10 @@ def _run_jobspy_plan(
             continue
         seen_by_site[site] += 1
         offer = row_to_offer(row, site, plan.query, plan.location)
-        if not offer_is_usable(offer, row, config) or is_expired_indeed(offer):
+        rejection = jobspy_offer_rejection(offer, row, config)
+        if rejection not in {"contract", "incomplete"} and is_expired_indeed(offer):
             continue
-        store.upsert_offer(offer)
-        stored_by_site[site] += 1
+        stored_by_site[site] += store.upsert_offer(offer, rejection=rejection)
 
     for site in plan.sites:
         _finish_successful_site(
@@ -259,9 +259,17 @@ def _run_jobspy_plan(
             progress,
             search_index,
             total_searches,
-            source_error=jobs.attrs.get("errors", {}).get(site),
+            source_error=jobs.attrs.get("errors", {}).get(site)
+            or _result_limit_error(seen_by_site[site], plan.results_wanted),
         )
     return stored_by_site
+
+
+def _result_limit_error(seen: int, limit: int) -> str | None:
+    # Remove this check once JobSpy reports whether the search window was exhausted.
+    if seen >= limit:
+        return f"JobSpy reached the {limit}-result limit. Search coverage unconfirmed; watermark kept."
+    return None
 
 
 def _finish_successful_site(

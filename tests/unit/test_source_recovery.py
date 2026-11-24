@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -279,6 +279,51 @@ def test_direct_budget_allows_later_titles_and_regions(monkeypatch: pytest.Monke
         store.close()
 
 
+@pytest.mark.asyncio
+async def test_direct_detail_budget_advances_past_known_links_without_narrowing_window(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    config = SearchConfig(queries=("analyste",), location_scope={"enabled": False})
+    spec = config.aggregators.direct_specs[0].model_copy(
+        update={
+            "base_url": "https://example.test",
+            "link_prefixes": ("/jobs/",),
+            "max_links": 1,
+            "search_url_templates": ("https://example.test/search",),
+            "use_direct_locations": False,
+        }
+    )
+    dates = {"first": datetime.now(UTC), "later": datetime.now(UTC) - timedelta(days=2)}
+
+    async def extract(
+        client: httpx.AsyncClient, url: str, source: str, query: str, config: SearchConfig, **kwargs: object
+    ) -> JobOffer:
+        return JobOffer(
+            source=source,
+            source_url=url,
+            title="Analyste",
+            employment_type="CDI",
+            date_posted=dates[url.rsplit("/", 1)[-1]].isoformat(),
+        )
+
+    monkeypatch.setattr(scrape, "_extract_detail_offer", extract)
+    html = '<a href="/jobs/first">Analyste</a><a href="/jobs/later">Analyste</a>'
+    transport = httpx.MockTransport(lambda _: httpx.Response(200, text=html))
+    store = JobStore(tmp_path / "jobs.duckdb")
+    try:
+        async with httpx.AsyncClient(transport=transport) as client:
+            assert await scrape._scrape_direct_spec(client, spec, config, store) == 1
+            assert store.get_last_success(spec.source, "analyste", config.location_label) is None
+            assert await scrape._scrape_direct_spec(client, spec, config, store) == 1
+            assert store.get_last_success(spec.source, "analyste", config.location_label) is not None
+        assert set(store.raw_dataframe()["source_url"]) == {
+            "https://example.test/jobs/first",
+            "https://example.test/jobs/later",
+        }
+    finally:
+        store.close()
+
+
 def test_makesense_prioritizes_matching_local_cards_before_consuming_detail_budget(
     toulouse_scope: LocationScopeConfig,
 ) -> None:
@@ -306,7 +351,10 @@ def test_makesense_prioritizes_matching_local_cards_before_consuming_detail_budg
                 client, spec, "https://jobs.makesense.org/fr/s/jobs/all", config=config
             )
 
-    assert asyncio.run(run()) == ["https://jobs.makesense.org/fr/jobs/cdi-789"]
+    assert asyncio.run(run()) == [
+        "https://jobs.makesense.org/fr/jobs/cdi-789",
+        "https://jobs.makesense.org/fr/jobs/paris-567",
+    ]
 
 
 def test_optioncarriere_verification_page_is_a_failure_not_empty_search() -> None:

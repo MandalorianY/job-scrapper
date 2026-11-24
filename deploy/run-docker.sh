@@ -8,6 +8,7 @@ checkout=$(pwd -P)
 mkdir -p data exports
 
 mounts=()
+profile_host_path=
 host_dirs=("$(realpath data)" "$(realpath exports)")
 container_dirs=(/work/data /work/exports)
 
@@ -67,6 +68,9 @@ map_input() {
     target=/work/.input-$index
     mapped_path=$target/$(basename -- "$path")
     bind_mount "$path" "$mapped_path" readonly
+    if [[ $option == --profile ]]; then
+        profile_host_path=$path
+    fi
     if [[ $option == --archive ]]; then
         for companion in "$path.wal" "$path".location-scope-*.json "$(dirname -- "$path")/.geography"; do
             if [[ -e $companion ]]; then
@@ -128,6 +132,9 @@ for phase in output input; do
     done
 done
 
+if [[ -n $profile_host_path ]]; then
+    mounts+=(--env "JOBSFR_PROFILE_HOST_PATH=$profile_host_path")
+fi
 image=$(docker build --quiet --tag jobsfr:local .)
 exec docker run --rm --init --read-only --cap-drop ALL \
     --security-opt no-new-privileges=true --user "$(id -u):$(id -g)" \
