@@ -10,6 +10,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from openpyxl import load_workbook
+from rich.text import Text
 
 from jobsfr import CLI_NAME, __version__
 from jobsfr.config.settings import EXAMPLE_CONFIG_FILE
@@ -89,7 +90,8 @@ def smoke(command: list[str], workspace: Path) -> None:
         )
         if result.returncode != expected_code:
             raise RuntimeError(f"CLI failed for {args!r}\n{result.stdout}\n{result.stderr}")
-        return (result.stderr if expected_code else result.stdout).strip()
+        output = result.stderr if expected_code else result.stdout
+        return Text.from_ansi(output).plain.strip()
 
     assert run("--version") == f"{CLI_NAME} {__version__}"
     help_text = run("--help")
