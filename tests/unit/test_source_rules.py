@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from bs4 import BeautifulSoup
 
-from scrapper.source_rules import get_source_rules
-from scrapper.source_rules.common import normalize_offer_title
-from scrapper.source_rules.france_travail import infer_company_from_description
+from jobsfr.source_rules import get_source_rules
+from jobsfr.source_rules.common import normalize_offer_title
+from jobsfr.source_rules.france_travail import infer_company_from_description
 
 
 def test_common_title_normalizer_removes_offer_reference_prefixes() -> None:

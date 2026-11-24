@@ -9,11 +9,12 @@ from pathlib import Path
 import httpx
 import pytest
 
-from scrapper.config import DirectAggregatorConfig, SearchConfig, SiteSearchConfig
-from scrapper.scrapers import async_http, cadremploi
-from scrapper.scrapers.aggregators import discovery, scrape, scrape_aggregators
-from scrapper.scrapers.async_http import HostThrottle, SourceBlockedError
-from scrapper.storage import JobStore
+from jobsfr.config import DirectAggregatorConfig, SearchConfig, SiteSearchConfig
+from jobsfr.offers.models import JobOffer
+from jobsfr.scrapers import async_http, cadremploi
+from jobsfr.scrapers.aggregators import discovery, scrape, scrape_aggregators
+from jobsfr.scrapers.async_http import HostThrottle, SourceBlockedError
+from jobsfr.storage import JobStore
 
 
 @pytest.mark.asyncio
@@ -338,14 +339,20 @@ async def test_custom_source_stops_queued_details_and_keeps_completed_offers(tmp
     )
     config.aggregators.site_search_sources = tuple(reversed(config.aggregators.site_search_sources))
     requests: list[tuple[str, str, str | None]] = []
+    cadremploi_started = asyncio.Event()
+    isarta_started = asyncio.Event()
 
-    def respond(request: httpx.Request) -> httpx.Response:
+    async def respond(request: httpx.Request) -> httpx.Response:
         requests.append((request.url.host, request.url.path, request.url.params.get("login")))
         if request.url.host == "www.cadremploi.fr":
+            cadremploi_started.set()
+            await asyncio.wait_for(isarta_started.wait(), timeout=1)
             if request.url.params["q"] == "communication":
                 return httpx.Response(503, headers={"retry-after": "0"})
             return httpx.Response(200, headers={"content-type": "text/html"})
         if request.url.path == "/search":
+            isarta_started.set()
+            await asyncio.wait_for(cadremploi_started.wait(), timeout=1)
             return httpx.Response(
                 200,
                 headers={"content-type": "text/html"},
@@ -377,7 +384,48 @@ async def test_custom_source_stops_queued_details_and_keeps_completed_offers(tmp
         ("isarta.fr", "/cgi-bin/emplois/pm.cgi", "1"),
         ("isarta.fr", "/cgi-bin/emplois/pm.cgi", "2"),
     ]
-    assert requests[3][0] == "www.cadremploi.fr"
+
+
+@pytest.mark.asyncio
+async def test_direct_batches_stop_on_challenge_and_save_completed_offer(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    config = SearchConfig(queries=("communication", "marketing"), location_scope={"enabled": False})
+    spec = next(spec for spec in config.aggregators.direct_specs if spec.source == "makesense")
+    urls = [f"https://example.org/jobs/{number}" for number in range(3)]
+    started: list[str] = []
+    second_started = asyncio.Event()
+
+    async def links(*args: object, **kwargs: object) -> list[str]:
+        return urls
+
+    async def extract(
+        _client: httpx.AsyncClient, url: str, source: str, _query: str, _config: SearchConfig, **kwargs: object
+    ) -> JobOffer:
+        started.append(url)
+        if url == urls[1]:
+            second_started.set()
+            raise SourceBlockedError()
+        await asyncio.wait_for(second_started.wait(), timeout=1)
+        return JobOffer(
+            source=source,
+            source_url=url,
+            title="Chargé de communication",
+            company="Example employer",
+            employment_type="CDI",
+        )
+
+    monkeypatch.setattr(scrape, "_detail_links", links)
+    monkeypatch.setattr(scrape, "_extract_detail_offer", extract)
+    store = JobStore(tmp_path / "jobs.duckdb")
+    try:
+        async with httpx.AsyncClient() as client:
+            assert await scrape._scrape_direct_spec(client, spec, config, store, HostThrottle(2, 0)) == 1
+        assert started == urls[:2]
+        assert store.sources_with_search_error(SourceBlockedError.message) == [spec.source]
+        assert store.raw_dataframe()["source_url"].tolist() == urls[:1]
+    finally:
+        store.close()
 
 
 @pytest.mark.asyncio

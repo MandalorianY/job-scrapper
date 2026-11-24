@@ -1,4 +1,4 @@
-# Job Scraper for France | Automated Job Search & Excel Application Tracker
+# JobsFR | French Job Search and Excel Application Tracker
 
 Open-source Python tool to automate job searches in France and track applications in Excel.
 
@@ -28,17 +28,18 @@ Parmi les fonctionnalités supplémentaires, l'exécution planifiée des recherc
 
 ## Quick start
 
-Install [uv](https://docs.astral.sh/uv/getting-started/installation/) and run from the checkout root. The project defaults to Python 3.14 and requires at least 3.13.
+Install [uv](https://docs.astral.sh/uv/getting-started/installation/) and run from the checkout root. The project defaults to Python 3.14 and requires at least 3.13. On your first run, `setup` asks for a job title and a French town.
 
 ```sh
-uv run --locked jobsfr
+uv run --locked jobsfr setup
+uv run --locked jobsfr search
 ```
 
-Download a build for your platform from [GitHub Releases](https://github.com/MandalorianY/job-scrapper/releases).
+You can also download a build for your platform and run `jobsfr setup` followed by `jobsfr search`. [GitHub Releases](https://github.com/MandalorianY/jobsfr/releases)
 
 ### Docker CLI
 
-With Docker running, run `./deploy/run-docker.sh` from the checkout root.
+Save your settings using the example below, then run `./deploy/run-docker.sh search` from the checkout root with Docker running.
 See [Docker setup](deploy/README.md#docker-cli) for host paths and launcher setup.
 
 ## Homebrew
@@ -46,16 +47,20 @@ See [Docker setup](deploy/README.md#docker-cli) for host paths and launcher setu
 Install the latest published release from the project's tap.
 
 ```sh
+brew tap mandaloriany/tap
+brew trust mandaloriany/tap
 brew install mandaloriany/tap/jobsfr
+jobsfr setup
+jobsfr search
 ```
 
-See [Homebrew upgrades](deploy/README.md#macos-with-homebrew) if you installed `job-scrapper` before the rename.
+See the [Homebrew setup guide](deploy/README.md#macos-with-homebrew) for scheduled runs.
 
 ## Job sources
 
-Use `--status` for an offline summary of search settings, enabled sources, and
-tracker sync. Set a source to `false` under `enabled_sources` in
-`config.local.yaml` to disable it.
+Use `jobsfr status` for an offline summary of search settings, enabled sources, and
+tracker sync. Set a source to `false` under `enabled_sources` in your YAML
+configuration to disable it.
 
 ✅ Working · ⚠️ Unverified · ⛔ Blocked or disabled
 
@@ -80,10 +85,10 @@ tracker sync. Set a source to `false` under `enabled_sources` in
 
 ## Configuration and Quick start
 
-Save your search settings in `config.local.yaml`.
+Run `jobsfr status` to find your default configuration file.
 
-- **Checkout and Docker** use `src/scrapper/config/config.local.yaml`.
-- **Homebrew and standalone builds** use your platform’s [user configuration folder](docs/configuration.md#database-export-and-log-paths). Run `jobsfr --status` to see where to save `config.local.yaml`.
+- **Checkout and Docker** use `src/jobsfr/config/config.local.yaml`.
+- **Homebrew and standalone builds** use `config.yaml` in your platform’s [user configuration folder](docs/configuration.md#database-export-and-log-paths).
 
 ```yaml
 # Send these searches to the job boards.
@@ -92,11 +97,6 @@ queries: [data analyst, analyste de données, analyste BI]
 filters:
   title:
     include: [data analyst, analyste de données, analyste BI, BI analyst]
-    exclude: [chef-de-projet, {regex: '\b(?:senior|lead)\b'}]
-  description:
-    exclude: [déplacements fréquents, porte-à-porte]
-  contract:
-    exclude: [intérim]
 
 locations: ["Toulouse, France"]
 distance_km: 10
@@ -109,21 +109,22 @@ and `temporary_staffing` under `filters.company.exclude.types`. Online scrapes
 with the filter enabled check for catalog updates at most once every 24 hours,
 so you can pick up new classifications between scraper releases. See the
 [employer-type filter guide](docs/configuration.md#excluding-employer-types)
-for the YAML example, offline behavior, and pinning a local catalog.
+for offline behavior and pinning a local catalog.
 
-Use `--profile` to select a separate YAML file. Preview the bundled Toulouse Graphiste profile with this command.
+Use `--profile` to select a separate YAML file. Preview the example profile with this command.
 
 ```sh
-uv run --locked jobsfr --profile src/scrapper/config/toulouse-graphiste.yaml --status
+uv run --locked jobsfr status --profile docs/config.local.example.yaml
 ```
 
-See the [configuration reference](docs/configuration.md) for filters, geography, aggregator overrides, and file paths.
+See the [complete YAML example](docs/config.local.example.yaml) and the
+[configuration reference](docs/configuration.md) for optional settings.
 
 ## Results
 
-Installed builds save the tracker and CSV files in `job-scrapper` inside your
+Installed builds save the tracker and CSV files in `jobsfr` inside your
 Documents folder. The paths below are relative to the checkout for source and
-Docker runs. Run `jobsfr --show-config` to see your effective paths.
+Docker runs. Run `jobsfr status --json` to see your effective paths.
 
 | File | Contents |
 | --- | --- |
@@ -132,19 +133,14 @@ Docker runs. Run `jobsfr --show-config` to see your effective paths.
 | `exports/jobs.csv` | Deduplicated listings |
 | `exports/jobs_raw.csv` | Source listings |
 | `data/job_search.duckdb` | Listings and search history |
-| `data/job-scrapper.jsonl` | Run logs |
+| `data/jobsfr.jsonl` | Run logs |
 
-Use `--help` for available options or `--export-only` to regenerate files from an existing DuckDB without scraping.
+Run `jobsfr --help` to see all commands. Run `jobsfr export` to regenerate files from saved listings.
 
 ### Export formats
 
-Choose one or more formats in your local configuration or profile. The default
-is `[xlsx, csv]`. Selecting `csv` writes both CSV files.
-
-```yaml
-export:
-  formats: [ods, xlsx, csv]
-```
+Choose one or more formats under `export.formats` in your local configuration
+or profile. The default is `[xlsx, csv]`. Selecting `csv` writes both CSV files.
 
 Edit the first format in the list to carry application statuses forward. If that
 file is missing, the exporter looks for another selected workbook, then an
@@ -154,7 +150,7 @@ Select `[ods]` for just the LibreOffice tracker. Whenever ODS is selected, run
 with the optional dependency.
 
 ```sh
-uv run --locked --extra ods jobsfr --export-only
+uv run --locked --extra ods jobsfr export
 ```
 
 The ODS tracker uses the same `export.excel_columns` list. Include `Statut` for the
@@ -171,6 +167,8 @@ See the [tracker sync guide](docs/tracker-sync.md).
 See the [recovery guide](docs/recovery.md) to rebuild from saved observations or diagnose a source failure.
 
 ## Development
+
+JobsFR is under active development and currently follows pre-1.0 versioning. Configuration schemas, CLI commands, database schemas and internal APIs may change between minor releases.
 
 Run the offline checks before submitting changes.
 

@@ -11,9 +11,10 @@ from tempfile import TemporaryDirectory
 
 from openpyxl import load_workbook
 
-from scrapper import CLI_NAME, __version__
-from scrapper.models import JobOffer
-from scrapper.storage import JobStore
+from jobsfr import CLI_NAME, __version__
+from jobsfr.config.settings import EXAMPLE_CONFIG_FILE
+from jobsfr.offers.models import JobOffer
+from jobsfr.storage import JobStore
 
 
 def smoke(command: list[str], workspace: Path) -> None:
@@ -21,6 +22,7 @@ def smoke(command: list[str], workspace: Path) -> None:
     profile = workspace / "profil été.yaml"
     profile.write_text(
         "queries: [example]\n"
+        'locations: ["Toulouse, France"]\n'
         "filters:\n  title: {include: [example]}\n"
         "  company: {exclude: {types: [esn, recruitment_agency, temporary_staffing]}}\n"
         "location_scope: {enabled: false}\n"
@@ -57,9 +59,9 @@ def smoke(command: list[str], workspace: Path) -> None:
         store.close()
 
     home = workspace / "home"
-    app_dir = "job-scrapper"
+    app_dir = "jobsfr"
     environment = {
-        **os.environ,
+        **{key: value for key, value in os.environ.items() if not key.upper().startswith("JOBSFR_")},
         "HOME": str(home),
         "USERPROFILE": str(home),
         "APPDATA": str(home / "AppData/Roaming"),
@@ -71,10 +73,8 @@ def smoke(command: list[str], workspace: Path) -> None:
         "PYTHONTZPATH": "",
         "NO_COLOR": "1",
     }
-    environment.pop("SCRAPPER_DISABLE_LOCAL_CONFIG", None)
-    environment.pop("SCRAPPER_USE_WORKING_DIRECTORY", None)
 
-    def run(*args: str) -> str:
+    def run(*args: str, input_text: str | None = None, expected_code: int = 0) -> str:
         result = subprocess.run(
             [*command, *args],
             cwd=workspace,
@@ -83,19 +83,33 @@ def smoke(command: list[str], workspace: Path) -> None:
             text=True,
             encoding="utf-8",
             timeout=60,
-            stdin=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL if input_text is None else None,
+            input=input_text,
             check=False,
         )
-        if result.returncode:
+        if result.returncode != expected_code:
             raise RuntimeError(f"CLI failed for {args!r}\n{result.stdout}\n{result.stderr}")
-        return result.stdout.strip()
+        return (result.stderr if expected_code else result.stdout).strip()
 
     assert run("--version") == f"{CLI_NAME} {__version__}"
     help_text = run("--help")
     assert "Usage:" in help_text, help_text
-    defaults = json.loads(run("--show-config"))["values"]["paths"]
+    assert run() == help_text
+    for name in ("setup", "search", "export", "replay", "status", "schedule", "sync"):
+        assert name in help_text and "usage:" in run(name, "--help").lower(), name
+    assert run("setup", "--example") == EXAMPLE_CONFIG_FILE.read_text(encoding="utf-8").strip()
+    assert "jobsfr setup" in " ".join(run("search", expected_code=2).split())
+    guidance = run("setup", input_text=f"{example}\nToulouse\n")
+    assert "jobsfr schedule enable" in guidance and "jobsfr search" in guidance
+    assert "--yes" in run("schedule", "enable", "--help")
+    assert "schedule disable" in run("schedule", "disable", "--help")
+    configured = json.loads(run("status", "--json"))["values"]
+    assert configured["queries"] == [example]
+    assert configured["locations"] == ["Toulouse"]
+    defaults = configured["paths"]
     if sys.platform == "darwin":
-        config_dir = data_dir = home / "Library/Application Support" / app_dir
+        config_dir = home / ".config" / app_dir
+        data_dir = home / "Library/Application Support" / app_dir
         log_dir = home / "Library/Logs" / app_dir
     elif sys.platform == "win32":
         config_dir = Path(environment["APPDATA"]) / app_dir
@@ -106,7 +120,7 @@ def smoke(command: list[str], workspace: Path) -> None:
         data_dir = Path(environment["XDG_DATA_HOME"]) / app_dir
         log_dir = Path(environment["XDG_STATE_HOME"]) / app_dir
     assert Path(defaults["database_path"]) == data_dir / "job_search.duckdb"
-    assert Path(defaults["log_file"]) == log_dir / "job-scrapper.jsonl"
+    assert Path(defaults["log_file"]) == log_dir / "jobsfr.jsonl"
     export_dir = Path(defaults["export_dir"])
     output_args: list[str] = []
     if sys.platform == "win32":
@@ -117,21 +131,25 @@ def smoke(command: list[str], workspace: Path) -> None:
     else:
         assert export_dir == home / "Documents" / app_dir
 
-    run("--replay-from", archive.name, *output_args)
+    run("replay", "--archive", archive.name, *output_args)
     assert (data_dir / "job_search.duckdb").is_file()
-    assert (log_dir / "job-scrapper.jsonl").is_file()
+    assert (log_dir / "jobsfr.jsonl").is_file()
     assert (export_dir / "jobs.xlsx").is_file()
 
     config_dir.mkdir(parents=True, exist_ok=True)
-    local_config = config_dir / "config.local.yaml"
+    local_config = config_dir / "config.yaml"
+    local_config.write_text("queries: [installed]\n", encoding="utf-8")
+    installed = json.loads(run("status", "--json"))
+    assert installed["values"]["queries"] == ["installed"]
+    assert Path(installed["sources"]["queries"]) == local_config
     local_config.write_text("paths: [invalid\n", encoding="utf-8")
-    assert "Search scope" in run("--profile", profile.name, "--status")
-    settings = json.loads(run("--profile", profile.name, "--show-config"))["values"]
+    assert "Search scope" in run("status", "--profile", profile.name)
+    settings = json.loads(run("status", "--json", "--profile", profile.name))["values"]
     assert settings["queries"] == ["example"]
     if not all(Path(path).resolve().is_relative_to(workspace.resolve()) for path in settings["paths"].values()):
         raise RuntimeError("Run the release smoke test against an installed wheel or standalone executable.")
-    run("--profile", profile.name, "--replay-from", archive.name)
-    run("--profile", profile.name, "--export-only")
+    run("replay", "--archive", archive.name, "--profile", profile.name)
+    run("export", "--profile", profile.name)
     exports = workspace / "custom exports"
     workbook = load_workbook(exports / "jobs.xlsx")
     try:
@@ -143,10 +161,7 @@ def smoke(command: list[str], workspace: Path) -> None:
         workbook.close()
     assert all(example in (exports / filename).read_text(encoding="utf-8") for filename in ("jobs.csv", "jobs_raw.csv"))
     assert (workspace / "custom data/run.jsonl").is_file()
-    local_config.write_bytes(profile.read_bytes())
-    assert run("sync", "--disable") == "Tracker sync disabled."
-    assert run("sync", "--status") == "Tracker sync disabled."
-    assert (workspace / "custom data/.tracker-sync/settings.json").is_file()
+    assert run("sync", "--profile", profile.name, "--status") == "Tracker sync disabled."
     print(f"Verified {command[0]} with installed defaults, a YAML profile, replay, exports and tracker sync.")
 
 

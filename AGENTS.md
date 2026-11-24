@@ -7,7 +7,7 @@ This repository is a Python job-search scraper for configured example roles in E
 Primary outputs are ignored runtime artifacts:
 
 - `data/job_search.duckdb`
-- `data/job-scrapper.jsonl`
+- `data/jobsfr.jsonl`
 - `exports/jobs.xlsx` and/or `exports/jobs.ods` as selected in `export.formats`
 - `exports/jobs.csv`
 - `exports/jobs_raw.csv`
@@ -17,7 +17,7 @@ Do not commit generated data or exports unless the user explicitly asks for that
 ## Stack
 
 - Python 3.14 with `uv` by default, with Python 3.13 as the minimum supported version
-- Typer CLI exposed as `jobsfr`, with `job-scrapper` as a compatibility alias
+- Typer CLI exposed as `jobsfr`
 - DuckDB for local storage and incremental search state
 - JobSpy for supported boards: Indeed, LinkedIn, Glassdoor, Google Jobs, HelloWork
 - `httpx` + BeautifulSoup for APIs, aggregator pages, and sitemaps
@@ -25,8 +25,8 @@ Do not commit generated data or exports unless the user explicitly asks for that
 - Pandera for validating the community employer CSV catalog
 - PyInstaller in the locked `release` group for native Windows, Linux, and macOS releases. The release version lives in `pyproject.toml`.
 
-The tracked `src/scrapper/config/config.yaml` is the public example template. Use `src/scrapper/config/config.local.yaml` (when present) for live repository settings such as query/location tuning and source-specific overrides. Use `--profile PATH` to select an alternate YAML with its own database, export, and log paths.
-Installed builds use `config/user_paths.py` for the platform's config, data, log, and Documents folders. They also look for `config.local.yaml` in the working directory. Use paths under `data/` and `exports/` in Docker YAML profiles. The Docker launcher mounts host files passed via `--profile` or `--replay-from` and host destinations passed via `--db`, `--export-dir`, or `--log-file`.
+The tracked `src/jobsfr/config/config.yaml` is the public example template. Use `src/jobsfr/config/config.local.yaml` (when present) for live repository settings such as query/location tuning and source-specific overrides. Use `--profile PATH` to select an alternate YAML with its own database, export, and log paths.
+Installed builds use `config/user_paths.py` for the platform's config, data, log, and Documents folders. They read `config.yaml` from the user config folder (`~/.config/jobsfr` on macOS and Linux by default, `%APPDATA%\jobsfr` on Windows). Use paths under `data/` and `exports/` in Docker YAML profiles. The Docker launcher mounts host files passed via `--profile` or `replay --archive` and host destinations passed via `--db`, `--export-dir`, or `--log-file`.
 
 ## README Maintenance
 
@@ -42,7 +42,7 @@ one `--profile` example, and one contributor check command.
 - Extend the existing guides in `docs/` for advanced configuration, tracker
   sync, replay, and troubleshooting. Use `deploy/README.md` for Docker path
   rules and scheduling, and the Useful Commands section below for contributor
-  setup and checks. Use `jobsfr --help` for the CLI option list and
+  setup and checks. Use `jobsfr --help` for the available commands and
   `.github/workflows/ci.yml` for the CI matrix. Link to the relevant guide
   from the README when readers need it.
 - Review the README diff for growth. Move detail that a first-time user can
@@ -57,33 +57,34 @@ Install/sync dependencies:
 uv sync --locked --group test
 ```
 
-Run the full scraper and export:
+Set up search settings once, then run the full scraper and export:
 
 ```bash
-uv run jobsfr
+uv run jobsfr setup
+uv run jobsfr search
 ```
 
 Run the full scraper and export with Docker:
 
 ```bash
-./deploy/run-docker.sh
+./deploy/run-docker.sh search
 ```
 
-Install or update the schedule using `./deploy/install-timer.sh` on Linux or
-`jobsfr-install-timer` from the Homebrew installation on macOS. Both
-commands accept `--profile PATH` and use the YAML `schedule.days` and
-`schedule.time` settings.
+Install or update the schedule with `uv run --locked jobsfr schedule enable`
+from a Linux checkout or `jobsfr schedule enable` with Homebrew on macOS.
+Pass `--profile PATH` to select a profile. Add `--yes` to use the YAML
+`schedule.days` and `schedule.time` without prompts. Use `schedule disable` to stop it.
 
 Re-export from the existing DuckDB without scraping:
 
 ```bash
-uv run jobsfr --export-only
+uv run jobsfr export
 ```
 
 Run a smaller smoke scrape:
 
 ```bash
-uv run jobsfr --results-wanted 5 --custom-pages 1
+uv run jobsfr search --results-wanted 5 --custom-pages 1
 ```
 
 Compile check:
@@ -110,7 +111,7 @@ Enable the hook for this clone with `git config --local core.hooksPath .githooks
 Build native release assets for the current machine and smoke-test the installed CLI with `deploy/smoke_release.py`.
 
 ```bash
-uv sync --locked --no-default-groups --group release --no-editable
+uv sync --locked --no-default-groups --group release --no-editable --reinstall-package jobsfr
 uv run --locked --no-sync python deploy/build_release.py
 ```
 
@@ -138,18 +139,18 @@ PY
 
 ## Architecture
 
-- `src/scrapper/config/`: Pydantic Settings models, packaged `config.yaml` defaults, and `config.prod.yaml` scrape limits. `aggregator_specs.py` defines the built-in provider specs. Secrets belong in `.env`.
-- `datasets/employers/v1/`: community-maintained employer catalog, bundled as a snapshot at build time. `company_types.py` loads and indexes it, `schemas/company_catalog.py` validates it, and `catalog_updates.py` refreshes the runtime cache from the default branch.
-- `src/scrapper/models.py`: `JobOffer`, the single normalized offer shape used by every source.
-- `src/scrapper/storage/`: DuckDB access in `store.py`, schema setup in `schema.py`, and canonical grouping in `dedupe.py`.
-- `src/scrapper/text.py`: text cleanup, URL keys, stable hashes, dedupe key, include/exclude matching, completeness scoring.
-- `src/scrapper/filters.py` and `salary.py`: listing rules and annual salary normalization shared by ingestion and export.
-- `src/scrapper/export/`: export orchestration, shared tracker state, and separate XLSX and ODS workbook writers.
-- `src/scrapper/cli.py`: command-line options and run orchestration. `cli_output.py` renders the status screens and export summary.
-- `src/scrapper/search_regions.py`: caches French municipality and region data alongside DuckDB so runs fetch only missing locations. Resolves provider routes and saves the radius filter for offline export and replay.
-- `src/scrapper/scrapers/`: modules and packages grouped by scraper family. `aggregators/` separates discovery, detail parsing, and orchestration. `jobspy_sources/` separates search orchestration, offer normalization, and LinkedIn adaptation.
+- `src/jobsfr/config/`: Pydantic Settings models, packaged `config.yaml` defaults, and `config.prod.yaml` scrape limits. `aggregator_specs.py` defines the built-in provider specs. Secrets belong in `.env`.
+- `src/jobsfr/catalogs/` loads and validates the community employer catalog from `datasets/employers/v1/` in a checkout or the bundled snapshot in an installed build. `updates.py` refreshes the runtime cache from the default branch.
+- `src/jobsfr/offers/` defines `JobOffer` in `models.py` and shares listing filters, contract and salary normalization, date parsing, text cleanup, and stable listing keys across ingestion and export.
+- `src/jobsfr/storage/`: DuckDB access in `store.py`, schema setup in `schema.py`, and canonical grouping in `dedupe.py`.
+- `src/jobsfr/export/`: export orchestration, shared tracker state, and separate XLSX and ODS workbook writers.
+- `src/jobsfr/cli/` contains Typer commands, options, terminal output, setup, scheduling, and tracker sync. `runner.py` orchestrates searches, exports, and replay.
+- `src/jobsfr/geography/` matches locations against the configured scope. `regions.py` caches French geography alongside DuckDB, resolves provider routes, and saves the radius filter for offline export and replay.
+- `src/jobsfr/runtime/` provides shared structured logging and cross-platform file locking.
+- `src/jobsfr/scrapers/`: modules and packages grouped by scraper family. `aggregators/` separates discovery, detail parsing, and orchestration. `jobspy_sources/` separates search orchestration, offer normalization, and LinkedIn adaptation.
+- `src/jobsfr/source_rules/` provides provider-specific listing normalization shared with storage and export.
 
-Keep source-specific parsing inside its scraper family. Put shared extraction helpers in `scrapers/common.py`, general text and matching helpers in `text.py`, and persistent schema and queries in `storage/`.
+Keep source-specific extraction inside its scraper family. Put shared extraction helpers in `scrapers/common.py`, general text and matching helpers in `offers/text.py`, and persistent schema and queries in `storage/`.
 
 ## Source Rules
 
@@ -182,7 +183,7 @@ Use the existing helpers instead of ad hoc substring checks:
 
 Use `offer_matches_search` on normalized offers before upsert for configured
 listing filters, the built-in contract policy, and geographic scope. Offers
-need a description or a contract type. Put real-search filters in `config.local.yaml`.
+need a description or a contract type. Put real-search filters in the user config or a separate profile.
 Use `filters.company.exclude.types` with employer types from the community
 catalog at `datasets/employers/v1/company_types.csv`. Keep that path and CSV
 schema compatible so older installations can fetch catalog updates.
@@ -199,7 +200,7 @@ names in `location_scope.city_aliases` in the relevant profile. Use Toulouse
 for public search examples and keep real-search towns and aliases in local
 configuration. Test geographic changes across multiple towns.
 
-Be careful with false positives. Do not remove an offer just because a description mentions managing an intern/alternant, internal example role, or international work. The stricter contract-stage logic lives in `text.py`; extend the phrase patterns there with focused examples when needed.
+Be careful with false positives. Do not remove an offer just because a description mentions managing an intern/alternant, internal example role, or international work. The built-in policy uses the bundled `filters.contract.exclude` terms and the evidence patterns in `filters.py`. Extend the phrase patterns with focused examples when needed.
 
 For broad sources, keep the include filter title-focused unless there is an explicit product decision to broaden it. This prevents generic "responsable" or non-configured example roles from leaking into the workbook.
 
@@ -241,7 +242,7 @@ failures, and retryable HTTP errors get one retry. Honor the host's Retry-After
 window on HTTP 429 and 503. If the delay exceeds the wait budget, defer requests
 to that host until the window expires and keep processing other sources.
 
-Search attempts keep their run ID, outcome, and seen count in DuckDB. `source_health` shows the latest attempt and successful watermark. The 90-day observation archive records offers accepted at ingestion and supports offline `--replay-from`. Back up the full DuckDB file to retain listings that predate the archive or its retention window.
+Search attempts keep their run ID, outcome, and seen count in DuckDB. `source_health` shows the latest attempt and successful watermark. The 90-day observation archive records offers accepted at ingestion and supports offline `replay --archive`. Back up the full DuckDB file to retain listings that predate the archive or its retention window.
 
 Custom/detail scrapers should skip known detail pages by default using `store.source_url_seen(...)`, unless `config.refresh_known_details` is true. Search/list pages may still be revisited to discover new links.
 
@@ -308,7 +309,7 @@ status edits survive regeneration.
 
 ## Coding Style
 
-- Pass file paths to `wc -l` to check file lengths, for example `wc -l src/scrapper/cli.py`. Keep maintained files at or below 600 lines by grouping related responsibilities into modules and packages. Allow rare exceptions for cohesive test files and keep generated files in their tool's format.
+- Pass file paths to `wc -l` to check file lengths, for example `wc -l src/jobsfr/cli/runner.py`. Keep maintained files at or below 600 lines by grouping related responsibilities into modules and packages. Allow rare exceptions for cohesive test files and keep generated files in their tool's format.
 - Keep code small, readable, and source-specific.
 - Annotate function parameters and return types, including private helpers and tests. Ruff enforces the annotations.
 - Prefer reusable helpers over repeated parsing snippets.
@@ -348,13 +349,13 @@ For most scraper/storage/export changes, run:
 ```bash
 uv run python -m compileall src main.py
 uv run --locked poe test
-uv run jobsfr --export-only
+uv run jobsfr export
 ```
 
 For source changes, also run a small scrape:
 
 ```bash
-uv run jobsfr --results-wanted 5 --custom-pages 1
+uv run jobsfr search --results-wanted 5 --custom-pages 1
 ```
 
 Then verify:

@@ -2,7 +2,13 @@
 
 ## Scheduled runs
 
-Set the days and time in your YAML profile or `config.local.yaml`. The default is weekdays at 15:30. Use `mon`, `tue`, `wed`, `thu`, `fri`, `sat`, or `sun` and a quoted 24-hour time.
+Create your search settings with `jobsfr setup` or supply a YAML profile with
+`queries` and `locations`. Run `jobsfr schedule enable` to choose your days and
+time and start automatic searches. Run `jobsfr schedule disable` to stop them.
+
+The prompts start with weekdays at 15:30. If your YAML already has a schedule,
+choose whether to enable it as saved or modify it first. Use comma-separated
+days from `mon` through `sun` and a 24-hour time.
 
 ```yaml
 schedule:
@@ -10,16 +16,21 @@ schedule:
   time: "09:15"
 ```
 
-Run the installer again after changing the schedule. The same profile is passed to the scraper on each run.
+After the timer is enabled, new choices are saved to the selected `--profile`
+file, `config.local.yaml` in a checkout, or the installed user's `config.yaml`.
+For scripts, `jobsfr schedule enable --yes` applies the configured values
+without prompts. Disabling the timer keeps the saved schedule for later.
 
 ### Export folder
 
-Scheduled runs write `jobs.xlsx`, `jobs.csv`, and `jobs_raw.csv` to `paths.export_dir` in your configuration.
+Scheduled runs use `paths.export_dir` from your configuration. The timer starts from a fixed directory on each platform.
 
-- On macOS, the default is `~/Documents/job-scrapper`. Relative overrides are based on the directory where you run `jobsfr-install-timer`.
-- For a Linux checkout, the default is `exports/` and relative overrides are based on the repository checkout.
+| Platform | Default export folder | Base for relative paths |
+| --- | --- | --- |
+| macOS with Homebrew | `~/Documents/jobsfr` | `~/Library/Application Support/jobsfr` |
+| Linux with systemd | `exports/` in your checkout | Repository checkout |
 
-Use an absolute path or a path starting with `~/` to choose a fixed folder.
+Use absolute paths or paths starting with `~/` to share the same database and exports between scheduled runs and commands you launch from other directories.
 
 ```yaml
 paths:
@@ -28,55 +39,41 @@ paths:
 
 ### macOS with Homebrew
 
-Install the formula and run the timer installer. Pass `--profile` or save your search and schedule settings in `~/Library/Application Support/job-scrapper/config.local.yaml`.
+Install the formula and run `jobsfr schedule enable`. Pass `--profile` or save your search and schedule settings in `~/.config/jobsfr/config.yaml`.
 
 ```sh
 brew install mandaloriany/tap/jobsfr
-jobsfr-install-timer --profile /path/to/profile.yaml
+jobsfr schedule enable --profile /path/to/profile.yaml
 brew services list
 ```
 
-The service uses the Mac's time zone and runs as your logged-in user. Run `brew services stop jobsfr` to disable it. The timer installer writes a service that sends console output to `~/Library/Logs/job-scrapper/service.log`. To update the schedule, run the installer again with the same profile or local configuration.
-
-If you set up a timer under the old formula, run `brew services stop job-scrapper`
-before upgrading. Upgrade an existing Homebrew install with these commands.
-
-```sh
-brew update
-brew migrate --formula mandaloriany/tap/job-scrapper
-brew upgrade mandaloriany/tap/jobsfr
-```
-
-If you used the old timer, run `jobsfr-install-timer` again from the same directory
-with your original profile, if any. Existing scripts can still invoke `job-scrapper`.
-See the [path settings](../docs/configuration.md#database-export-and-log-paths) to
-reuse a tracker and DuckDB database from an earlier release.
+The service uses the Mac's time zone and runs as your logged-in user. It sends console output to `~/Library/Logs/jobsfr/service.log`.
 
 ### Linux with systemd
 
 Install `uv` and make sure a systemd user session and `flock` are available. From your checkout, run:
 
 ```sh
-./deploy/install-timer.sh
+uv run --locked jobsfr schedule enable
 ```
 
-The installer uses the checkout's path, enables the timer, and prints the next run. Add `--profile /path/to/profile.yaml` to use a specific profile. The timer uses Europe/Paris time and skips missed runs. The wrapper uses `flock` to prevent overlapping runs. Run `systemctl --user disable --now job-scrapper.timer` to disable the timer.
+The installer uses the checkout's path, enables the timer, and prints the next run. Add `--profile /path/to/profile.yaml` to use a specific profile. The timer uses Europe/Paris time and skips missed runs. The wrapper uses `flock` to prevent overlapping runs. Run `uv run --locked jobsfr schedule disable` to disable the timer from a checkout.
 
-Put optional environment overrides in `~/.config/job-scrapper/environment` with mode `600`. Keep the checkout's `data/`, `exports/`, and local configuration when updating the source.
+Put optional environment overrides in `~/.config/jobsfr/environment` with mode `600`. Keep the checkout's `data/`, `exports/`, and local configuration when updating the source.
 
-Read console output in `data/service.log` and structured events in `data/job-scrapper.jsonl`. If the timer must run while you are logged out, enable lingering for the deployment user.
+Read console output in `data/service.log` and structured events in `data/jobsfr.jsonl`. If the timer must run while you are logged out, enable lingering for the deployment user.
 
 ## Docker CLI
 
 With Docker running, start a live scrape from the checkout root.
 
 ```sh
-./deploy/run-docker.sh
+./deploy/run-docker.sh search
 ```
 
 The launcher builds the image and uses the checkout’s local config, `data/`, and
 `exports/`.
-Use `--profile PATH` or `--replay-from PATH` to pass in a host file. Relative
+Use `--profile PATH` or `replay --archive PATH` to pass in a host file. Relative
 input paths are looked up from the calling directory first, then from the
 checkout. Use relative YAML output paths under `data/` or `exports/` to keep
 them in the checkout. For output elsewhere on the host, pass an absolute path

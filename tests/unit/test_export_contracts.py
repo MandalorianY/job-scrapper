@@ -5,11 +5,11 @@ from pathlib import Path
 
 import pytest
 
-from scrapper.contracts import contract_evidence
-from scrapper.export import export_job_formats
-from scrapper.export.xlsx import read_xlsx_tracker
-from scrapper.models import JobOffer
-from scrapper.storage import JobStore
+from jobsfr.export import export_job_formats
+from jobsfr.export.xlsx import read_xlsx_tracker
+from jobsfr.offers.contracts import contract_evidence
+from jobsfr.offers.models import JobOffer
+from jobsfr.storage import JobStore
 
 
 @pytest.mark.parametrize(

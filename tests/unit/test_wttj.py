@@ -11,11 +11,11 @@ from urllib.parse import parse_qs
 import httpx
 import pytest
 
-from scrapper.config import SearchConfig
-from scrapper.salary import salary_bounds
-from scrapper.scrapers import wttj
-from scrapper.scrapers.async_http import HostThrottle, SourceBlockedError
-from scrapper.storage import JobStore
+from jobsfr.config import SearchConfig
+from jobsfr.offers.salary import salary_bounds
+from jobsfr.scrapers import wttj
+from jobsfr.scrapers.async_http import HostThrottle, SourceBlockedError
+from jobsfr.storage import JobStore
 
 
 def test_wttj_discovers_runtime_config_with_client_default_headers(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -175,7 +175,7 @@ def test_blank_env_key_falls_back_to_public_algolia_key(
 
     monkeypatch.setattr(wttj.httpx, "AsyncClient", DummyClient)
 
-    monkeypatch.setenv("SCRAPPER_WELCOME_TO_THE_JUNGLE__ALGOLIA_API_KEY", "")
+    monkeypatch.setenv("JOBSFR_WELCOME_TO_THE_JUNGLE__ALGOLIA_API_KEY", "")
     config = SearchConfig(
         queries=("example role",),
         paths={"database_path": tmp_path / "jobs.duckdb"},

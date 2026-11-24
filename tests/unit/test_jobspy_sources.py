@@ -14,11 +14,11 @@ from jobspy.util import RequestsRotating
 from requests import PreparedRequest, Response
 from requests.adapters import HTTPAdapter
 
-from scrapper.config import SearchConfig
-from scrapper.config.settings import LocationScopeConfig
-from scrapper.models import JobOffer
-from scrapper.scrapers.jobspy_sources import JOBSPY_SITES, linkedin, scrape, scrape_jobspy_sources
-from scrapper.storage import JobStore
+from jobsfr.config import SearchConfig
+from jobsfr.config.settings import LocationScopeConfig
+from jobsfr.offers.models import JobOffer
+from jobsfr.scrapers.jobspy_sources import JOBSPY_SITES, linkedin, scrape, scrape_jobspy_sources
+from jobsfr.storage import JobStore
 
 
 def _jobspy_only(*sites: str) -> dict[str, bool]:

@@ -447,6 +447,94 @@ wheels = [
 ]
 
 [[package]]
+name = "jobsfr"
+version = "0.2.0"
+source = { editable = "." }
+dependencies = [
+    { name = "beautifulsoup4" },
+    { name = "duckdb" },
+    { name = "httpx" },
+    { name = "lxml" },
+    { name = "openpyxl" },
+    { name = "pandas" },
+    { name = "pandera", extra = ["pandas"] },
+    { name = "pydantic" },
+    { name = "pydantic-settings", extra = ["yaml"] },
+    { name = "python-dotenv" },
+    { name = "python-jobspy" },
+    { name = "rich" },
+    { name = "structlog" },
+    { name = "typer" },
+    { name = "tzdata" },
+    { name = "xlsxwriter" },
+]
+
+[package.optional-dependencies]
+ods = [
+    { name = "odfpy" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "poethepoet" },
+    { name = "pyright" },
+    { name = "ruff" },
+]
+lint = [
+    { name = "ruff" },
+]
+release = [
+    { name = "pyinstaller" },
+]
+test = [
+    { name = "anyio" },
+    { name = "hypothesis" },
+    { name = "pytest" },
+    { name = "pytest-asyncio" },
+    { name = "pytest-cov" },
+    { name = "ruff" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "beautifulsoup4", specifier = ">=4.15.0" },
+    { name = "duckdb", specifier = ">=2.0.1" },
+    { name = "httpx", specifier = ">=0.28.1" },
+    { name = "lxml", specifier = ">=6.1.3" },
+    { name = "odfpy", marker = "extra == 'ods'", specifier = ">=1.4.1" },
+    { name = "openpyxl", specifier = ">=3.1.5" },
+    { name = "pandas", specifier = "==3.1.1" },
+    { name = "pandera", extras = ["pandas"], specifier = ">=0.36.0" },
+    { name = "pydantic", specifier = ">=2.14.4" },
+    { name = "pydantic-settings", extras = ["yaml"], specifier = ">=2.16.3" },
+    { name = "python-dotenv", specifier = ">=1.2.4" },
+    { name = "python-jobspy", specifier = ">=1.4.1" },
+    { name = "rich", specifier = ">=15.0.0" },
+    { name = "structlog", specifier = ">=26.1.0" },
+    { name = "typer", specifier = ">=0.29.2" },
+    { name = "tzdata", specifier = ">=2026.1" },
+    { name = "xlsxwriter", specifier = ">=3.3.3" },
+]
+provides-extras = ["ods"]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "poethepoet", specifier = ">=0.49.0" },
+    { name = "pyright", specifier = ">=1.1.414" },
+    { name = "ruff", specifier = ">=0.17.6" },
+]
+lint = [{ name = "ruff", specifier = ">=0.17.6" }]
+release = [{ name = "pyinstaller", specifier = ">=6.22.3" }]
+test = [
+    { name = "anyio", specifier = ">=4.16.0" },
+    { name = "hypothesis", specifier = ">=6.170.17" },
+    { name = "pytest", specifier = ">=9.2.0" },
+    { name = "pytest-asyncio", specifier = ">=1.5.0" },
+    { name = "pytest-cov", specifier = ">=7.1.0" },
+    { name = "ruff", specifier = ">=0.17.6" },
+]
+
+[[package]]
 name = "lxml"
 version = "6.1.3"
 source = { registry = "https://pypi.org/simple" }
@@ -1170,94 +1258,6 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/2e/09/28329441dfa2c463e2d377a69d4ebbe4d51665e9dbd49fb421f3bc80d775/ruff-0.17.6-py3-none-win32.whl", hash = "sha256:c2f4af6670b7a0501904e881bb3f1f24bd0d964dec1eedbd85f0eb73786e1128", size = 9966266, upload-time = "2026-11-19T15:56:21.581Z" },
     { url = "https://files.pythonhosted.org/packages/4b/9d/18ba9730addfc7554c70d6f171fb8dc2c08e774d9fb2b98e7946ef845c59/ruff-0.17.6-py3-none-win_amd64.whl", hash = "sha256:9cd2fd9923e9806b8b6b67a3469e2258e84bd4d21e45d5a1a690afdfb9c8e57d", size = 10365847, upload-time = "2026-11-19T15:56:23.582Z" },
     { url = "https://files.pythonhosted.org/packages/70/8a/59c33e2a64a4f9672f7f842a0dc522915cfbbaffd13d37d0cec57d1c5c5d/ruff-0.17.6-py3-none-win_arm64.whl", hash = "sha256:d8b14e1473dc86ab9069cf7a2ba5041dc012f59110201844ed04cfddf07055a0", size = 9926224, upload-time = "2026-11-19T15:56:25.269Z" },
-]
-
-[[package]]
-name = "scrapper"
-version = "0.2.0"
-source = { editable = "." }
-dependencies = [
-    { name = "beautifulsoup4" },
-    { name = "duckdb" },
-    { name = "httpx" },
-    { name = "lxml" },
-    { name = "openpyxl" },
-    { name = "pandas" },
-    { name = "pandera", extra = ["pandas"] },
-    { name = "pydantic" },
-    { name = "pydantic-settings", extra = ["yaml"] },
-    { name = "python-dotenv" },
-    { name = "python-jobspy" },
-    { name = "rich" },
-    { name = "structlog" },
-    { name = "typer" },
-    { name = "tzdata" },
-    { name = "xlsxwriter" },
-]
-
-[package.optional-dependencies]
-ods = [
-    { name = "odfpy" },
-]
-
-[package.dev-dependencies]
-dev = [
-    { name = "poethepoet" },
-    { name = "pyright" },
-    { name = "ruff" },
-]
-lint = [
-    { name = "ruff" },
-]
-release = [
-    { name = "pyinstaller" },
-]
-test = [
-    { name = "anyio" },
-    { name = "hypothesis" },
-    { name = "pytest" },
-    { name = "pytest-asyncio" },
-    { name = "pytest-cov" },
-    { name = "ruff" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "beautifulsoup4", specifier = ">=4.15.0" },
-    { name = "duckdb", specifier = ">=2.0.1" },
-    { name = "httpx", specifier = ">=0.28.1" },
-    { name = "lxml", specifier = ">=6.1.3" },
-    { name = "odfpy", marker = "extra == 'ods'", specifier = ">=1.4.1" },
-    { name = "openpyxl", specifier = ">=3.1.5" },
-    { name = "pandas", specifier = "==3.1.1" },
-    { name = "pandera", extras = ["pandas"], specifier = ">=0.36.0" },
-    { name = "pydantic", specifier = ">=2.14.4" },
-    { name = "pydantic-settings", extras = ["yaml"], specifier = ">=2.16.3" },
-    { name = "python-dotenv", specifier = ">=1.2.4" },
-    { name = "python-jobspy", specifier = ">=1.4.1" },
-    { name = "rich", specifier = ">=15.0.0" },
-    { name = "structlog", specifier = ">=26.1.0" },
-    { name = "typer", specifier = ">=0.29.2" },
-    { name = "tzdata", specifier = ">=2026.1" },
-    { name = "xlsxwriter", specifier = ">=3.3.3" },
-]
-provides-extras = ["ods"]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "poethepoet", specifier = ">=0.49.0" },
-    { name = "pyright", specifier = ">=1.1.414" },
-    { name = "ruff", specifier = ">=0.17.6" },
-]
-lint = [{ name = "ruff", specifier = ">=0.17.6" }]
-release = [{ name = "pyinstaller", specifier = ">=6.22.3" }]
-test = [
-    { name = "anyio", specifier = ">=4.16.0" },
-    { name = "hypothesis", specifier = ">=6.170.17" },
-    { name = "pytest", specifier = ">=9.2.0" },
-    { name = "pytest-asyncio", specifier = ">=1.5.0" },
-    { name = "pytest-cov", specifier = ">=7.1.0" },
-    { name = "ruff", specifier = ">=0.17.6" },
 ]
 
 [[package]]

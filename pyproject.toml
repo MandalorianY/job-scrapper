@@ -1,5 +1,5 @@
 [project]
-name = "scrapper"
+name = "jobsfr"
 version = "0.2.0"
 description = "Open-source Python scraper for French job boards including France Travail, HelloWork, and Welcome to the Jungle. Exports listings to Excel and CSV."
 readme = "README.md"
@@ -40,10 +40,7 @@ dependencies = [
 ]
 
 [project.scripts]
-jobsfr = "scrapper.cli:main"
-jobsfr-install-timer = "scrapper.scheduling:main"
-job-scrapper = "scrapper.cli:main"
-job-scrapper-install-timer = "scrapper.scheduling:main"
+jobsfr = "jobsfr.cli:main"
 
 [project.optional-dependencies]
 ods = ["odfpy>=1.4.1"]
@@ -56,15 +53,17 @@ build-backend = "hatchling.build"
 exclude = ["**/.env", "**/*.local.yaml", "**/README.local.md"]
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/scrapper"]
+packages = ["src/jobsfr"]
 
 [tool.hatch.build.targets.wheel.force-include]
-"datasets/employers/v1/company_types.csv" = "scrapper/catalogs/company_types.csv"
+"datasets/employers/v1/company_types.csv" = "jobsfr/catalogs/company_types.csv"
+"docs/config.local.example.yaml" = "jobsfr/config/config.local.example.yaml"
 
 [tool.hatch.build.targets.sdist]
 include = [
-    "/src/scrapper",
+    "/src/jobsfr",
     "/datasets/employers/v1/company_types.csv",
+    "/docs/config.local.example.yaml",
     "/deploy",
     "/tests",
     "/.github/workflows",
@@ -86,7 +85,7 @@ addopts = [
     "-ra",
     "--strict-markers",
     "--strict-config",
-    "--cov=scrapper",
+    "--cov=jobsfr",
     "--cov-report=term-missing",
     "--cov-report=html",
     "--cov-fail-under=80",
@@ -100,12 +99,7 @@ filterwarnings = ["error"]
 
 [tool.coverage.run]
 branch = true
-source = ["src/scrapper"]
-omit = [
-    "src/scrapper/__init__.py",
-    "src/scrapper/cli.py",
-    "src/scrapper/scrapers/**/*.py",
-]
+source = ["src/jobsfr"]
 
 [tool.coverage.report]
 fail_under = 80
@@ -147,7 +141,7 @@ format = [{ cmd = "ruff check . --fix" }, { cmd = "ruff format ." }]
 
 [tool.poe.tasks.check]
 sequence = ["lint", "typecheck", "_pytest"]
-env = { SCRAPPER_DISABLE_LOCAL_CONFIG = "1", SCRAPPER_RUN_REAL_SMOKE = "0", PYTHONUTF8 = "1", UV_NO_SYNC = "1" }
+env = { JOBSFR_DISABLE_LOCAL_CONFIG = "1", JOBSFR_RUN_REAL_SMOKE = "0", PYTHONUTF8 = "1", UV_NO_SYNC = "1" }
 
 [dependency-groups]
 dev = [{ include-group = "lint" }, "poethepoet>=0.49.0", "pyright>=1.1.414"]

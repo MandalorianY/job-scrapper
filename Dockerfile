@@ -20,20 +20,21 @@ COPY pyproject.toml uv.lock ./
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --locked --no-default-groups --no-install-project --no-build
 COPY README.md LICENSE ./
-COPY src/scrapper ./src/scrapper
+COPY src/jobsfr ./src/jobsfr
 COPY datasets/employers/v1/company_types.csv ./datasets/employers/v1/company_types.csv
+COPY docs/config.local.example.yaml ./docs/config.local.example.yaml
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --locked --no-default-groups --no-editable
 
 FROM gcr.io/distroless/cc-debian13:nonroot@sha256:cb87acc574abe719b6e5c547384defa2f7b1f24af9605d3f618cf852495d8be2
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    SCRAPPER_USE_WORKING_DIRECTORY=1
+    JOBSFR_USE_WORKING_DIRECTORY=1
 COPY --from=build /opt/python /opt/python
 COPY --from=build /opt/venv /opt/venv
 COPY --from=build --chown=65532:65532 /work /work
 WORKDIR /work
 USER 65532:65532
 # Validate the packaged configuration at build time.
-RUN --network=none ["/opt/venv/bin/jobsfr", "--status"]
+RUN --network=none ["/opt/venv/bin/jobsfr", "status"]
 ENTRYPOINT ["/opt/venv/bin/jobsfr"]

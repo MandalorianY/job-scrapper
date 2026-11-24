@@ -11,19 +11,19 @@ import pytest
 from openpyxl import load_workbook
 from openpyxl.utils import get_column_letter
 
-from scrapper.config import SearchConfig
-from scrapper.export import export_job_formats
-from scrapper.scrapers import (
+from jobsfr.config import SearchConfig
+from jobsfr.export import export_job_formats
+from jobsfr.geography.regions import route_location_overrides
+from jobsfr.scrapers import (
     JOBSPY_SITES,
     scrape_aggregators,
     scrape_jobspy_sources,
     scrape_welcome_to_the_jungle,
 )
-from scrapper.search_regions import route_location_overrides
-from scrapper.storage import JobStore
+from jobsfr.storage import JobStore
 
-RUN_REAL_SMOKE_ENV = "SCRAPPER_RUN_REAL_SMOKE"
-SOURCE_FILTER_ENV = "SCRAPPER_REAL_SMOKE_SOURCE"
+RUN_REAL_SMOKE_ENV = "JOBSFR_RUN_REAL_SMOKE"
+SOURCE_FILTER_ENV = "JOBSFR_REAL_SMOKE_SOURCE"
 
 
 @dataclass(frozen=True)

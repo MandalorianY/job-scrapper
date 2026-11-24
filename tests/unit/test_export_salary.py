@@ -3,7 +3,7 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
-from scrapper.salary import _review_note, salary_bounds
+from jobsfr.offers.salary import _review_note, salary_bounds
 
 
 def test_salary_bounds_leave_untrusted_non_annual_units_empty() -> None:

@@ -9,10 +9,10 @@ from hypothesis import given
 from hypothesis import strategies as st
 from openpyxl import load_workbook
 
-from scrapper.export import export_job_formats
-from scrapper.models import JobOffer
-from scrapper.storage import JobStore
-from scrapper.storage.dedupe import build_group_keys
+from jobsfr.export import export_job_formats
+from jobsfr.offers.models import JobOffer
+from jobsfr.storage import JobStore
+from jobsfr.storage.dedupe import build_group_keys
 
 _DESCRIPTION = (
     "Vous piloterez le calendrier éditorial du service culturel, étudierez les retours des visiteurs, "

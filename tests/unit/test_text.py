@@ -4,19 +4,15 @@ import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 
-from scrapper.config import SearchConfig
-from scrapper.filters import RegexRule, TextFilter
-from scrapper.text import (
+from jobsfr.offers.filters import RegexRule, TextFilter, has_excluded_contract_signal
+from jobsfr.offers.text import (
     clean_text,
     dedupe_key,
     description_dedupe_key,
-    has_excluded_contract_signal,
     listing_url_key,
     normalize_text,
     url_key,
 )
-
-SEARCH_CONFIG = SearchConfig()
 
 
 def test_clean_text_strips_html_entities_and_whitespace() -> None:
@@ -51,9 +47,10 @@ def test_filter_keeps_non_student_contract_contexts(title: str, employment_type:
 
 
 def test_include_terms_are_title_focused_for_example_roles() -> None:
-    assert SEARCH_CONFIG.filters.title.allows("Example coordinator")
-    assert SEARCH_CONFIG.filters.title.allows("Sample manager")
-    assert not SEARCH_CONFIG.filters.title.allows("Responsable administratif")
+    title_filter = TextFilter(include=("example", "sample"))
+    assert title_filter.allows("Example coordinator")
+    assert title_filter.allows("Sample manager")
+    assert not title_filter.allows("Responsable administratif")
 
 
 def test_url_key_ignores_tracking_params_but_preserves_known_job_ids() -> None:

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from scrapper.scrapers.jobspy_sources.hellowork import page_metadata
-from scrapper.scrapers.jobspy_sources.offers import row_to_offer
+from jobsfr.scrapers.jobspy_sources.hellowork import page_metadata
+from jobsfr.scrapers.jobspy_sources.offers import row_to_offer
 
 
 def test_hellowork_keeps_detail_contract_advertised_pay_and_hybrid_schedule() -> None:

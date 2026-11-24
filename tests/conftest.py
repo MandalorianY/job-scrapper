@@ -9,9 +9,9 @@ import pytest
 from hypothesis import HealthCheck, settings
 
 if TYPE_CHECKING:
-    from scrapper.config.settings import LocationScopeConfig
+    from jobsfr.config.settings import LocationScopeConfig
 
-os.environ.setdefault("SCRAPPER_DISABLE_LOCAL_CONFIG", "1")
+os.environ.setdefault("JOBSFR_DISABLE_LOCAL_CONFIG", "1")
 
 settings.register_profile("local", max_examples=50)
 settings.register_profile("ci", max_examples=500)
@@ -21,7 +21,7 @@ settings.load_profile(os.getenv("PROFILE", "local"))
 
 @pytest.fixture
 def toulouse_scope() -> LocationScopeConfig:
-    from scrapper.config.settings import LocationCenterConfig, LocationScopeConfig
+    from jobsfr.config.settings import LocationCenterConfig, LocationScopeConfig
 
     return LocationScopeConfig(
         include_unrecognized=False,

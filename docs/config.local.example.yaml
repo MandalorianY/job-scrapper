@@ -1,0 +1,176 @@
+# Run jobsfr status to find your default configuration path, or select this file with --profile.
+# Edit queries, locations, and filters.title.include together for your search.
+# Uncomment individual options as needed. Omitted settings inherit the defaults.
+
+# Search scope
+queries: [data analyst, analyste de données, analyste BI]
+locations: ["Toulouse, France"]
+country: france
+distance_km: 25
+
+# Use location_scope to customize how listings are filtered by city or region.
+# location_scope:
+#   enabled: true
+#   include_unrecognized: true
+#   radius_km: 20
+#   city_aliases:
+#     Toulouse: [Toulouse Métropole]
+
+# Listing filters
+# Text rules accept whole words or phrases and regexes. Use single quotes for regex patterns.
+# The built-in policy already filters out internships and apprenticeships cf config.yaml.
+filters:
+  title:
+    include: [data analyst, analyste de données, analyste BI, BI analyst]
+#     exclude: [chef de projet, {regex: '\b(?:senior|lead)\b'}]
+#   description:
+#     include: [SQL]
+#     exclude: [déplacements fréquents, porte-à-porte]
+#   contract:
+#     include: [CDI, CDD]
+#     exclude: [intérim]
+#   company:
+#     include: [Example Studio]
+#     exclude:
+#       names: [Example Company]
+#       types: [esn, recruitment_agency, temporary_staffing]
+#   remote: true
+#   salary:
+#     min_annual_eur: 40000
+#     max_annual_eur: 70000
+#   posted_after: "2026-01-01"
+#   posted_before: "2026-12-31"
+#   by_source:
+#     linkedin:
+#       company:
+#         exclude:
+#           names: [Example Recruiter]
+
+# Pin a local employer catalog CSV. This path points to the catalog in a checkout.
+# company_catalog_path: datasets/employers/v1/company_types.csv
+
+# Sources and request limits
+# Omitted sources stay enabled unless disabled by the bundled defaults.
+# See the README for the source keys. The aggregators key controls the whole group.
+# enabled_sources:
+#   apec: false
+#   aggregators: true
+#   jobijoba: false
+
+# default_hours_old: 336
+# overlap_hours: 24
+# results_wanted_per_query: 25
+# custom_max_pages: 2
+# refresh_known_details: false
+
+# HTTP settings for custom sources
+# user_agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0 Safari/537.36
+# http_max_connections: 12
+# http_per_host_concurrency: 2
+# http_request_delay_secs: 0.25
+# http:
+#   accept_language: fr-FR,fr;q=0.9,en;q=0.7
+
+# JobSpy
+# Use a fixed window in hours or disable batching for troubleshooting.
+# jobspy_hours_old_override: 168
+# jobspy_batch_sites: false
+# jobspy:
+#   glassdoor_results_wanted_per_query: 5
+#   google_query_places: [Toulouse, Occitanie]
+#   google_query_exclude_terms: [stage, alternance, apprentissage, stagiaire]
+#   glassdoor_regional_fallback_term: Occitanie
+#   glassdoor_location_override: "Toulouse, France"
+
+# Welcome to the Jungle
+# Algolia settings are normally discovered. Replace the example values when overriding them.
+# Set JOBSFR_WELCOME_TO_THE_JUNGLE__ALGOLIA_API_KEY in .env for a credential override.
+# welcome_to_the_jungle:
+#   site_url: https://www.welcometothejungle.com
+#   algolia_url: "https://your-algolia-host.example/1/indexes/*/queries"
+#   algolia_app_id: YOUR_APP_ID
+#   job_index: YOUR_JOBS_INDEX
+#   around_radius: 25000  # Meters
+#   office_country_filter: '["offices.country_code:FR"]'
+
+# Aggregators
+# Provider maps below merge with the built-in specs by source key.
+# Keep the built-in query_template when preserving existing search history.
+# aggregators:
+#   max_detail_pages: 50
+#   location_terms: [Toulouse, Occitanie]
+#   direct_locations: ["76R"]
+#   direct_specs:
+#     jobijoba:
+#       search_url_templates: ["https://www.jobijoba.com/fr/emploi/{query}"]
+#       link_prefixes: [/fr/annonce/]
+#       base_url: https://www.jobijoba.com
+#       max_links: 18
+#       use_direct_locations: false
+#       blocked_direct_hosts: [jobleads.com]
+#       blocked_provider_terms: [jobleads]
+#   site_search_sources:
+#     cadremploi:
+#       host: cadremploi.fr
+#       query_template: 'site:cadremploi.fr emploi CDI "{location}" {query} -stage -alternance'
+#       search_url_templates:
+#         - "https://www.cadremploi.fr/emploi/liste_offres?motscles={query}&ville={city_slug}-{department}"
+#       search_urls_by_location:
+#         "Toulouse, France":
+#           - "https://www.cadremploi.fr/emploi/liste_offres?motscles={query}&ville=toulouse-31"
+#   site_url_templates:
+#     isarta: "https://isarta.fr/cgi-bin/emplois/jobs?cat={region_slug}&query={query}"
+#   site_locations:
+#     "Toulouse, France":
+#       department: "31"
+#       region_slug: occitanie
+
+# Deduplication
+# Smaller source priority numbers are preferred.
+# dedupe_source_priority:
+#   indeed: 0
+#   linkedin: 10
+#   welcome_to_the_jungle: 20
+#   france_travail: 1000
+# dedupe_default_source_priority: 100
+# dedupe_fields:
+#   primary: [title, company]
+#   fallback: [location]
+#   description: [description, company, location]
+
+# Runtime paths for a separate profile. Installed builds have per-user defaults.
+# paths:
+#   database_path: data/toulouse-data-analyst/job_search.duckdb
+#   export_dir: exports/toulouse-data-analyst
+#   log_file: data/toulouse-data-analyst/jobsfr.jsonl
+
+# Defaults for jobsfr schedule enable. Linux uses Paris time and macOS uses system time.
+# schedule:
+#   days: [mon, tue, wed, thu, fri]
+#   time: "15:30"
+
+# Tracker output. Edit the first format in the list. CSV writes jobs.csv and jobs_raw.csv.
+# ODS needs the ods extra in a checkout. The default formats are xlsx and csv.
+# Available columns
+# Postulé, Rejeté, Lien, Statut, Postuler, Offre source, Autres liens, Intitulé,
+# Entreprise, Lieu, Contrat, Télétravail, Salaire min (€ annuel), Salaire max (€ annuel),
+# Salaire, Publié le, Sources, Source principale, Doublons, Description, URL entreprise,
+# Email, Recherche, Zone recherchée, Score complétude, Vu le, Dernière vue, À vérifier
+# export:
+#   formats: [xlsx, ods, csv]
+#   keep_reposts: false  # Use one row per vacancy. Defaults to true.
+#   excel_columns: [Postulé, Statut, Lien, Intitulé, Entreprise, Lieu, Contrat, Publié le, À vérifier]
+#   repair_fields_enabled_by_default: true
+#   repair_fields_by_source:
+#     france_travail: true
+#     linkedin: false
+#   direct_links_enabled_by_source:
+#     jobijoba: false  # Use the original listing URL for Lien and Postuler.
+
+# Tracker sync via rclone. Use a configured remote and match the first export format.
+# sync:
+#   enabled: true
+#   target: "mydrive:Job Search/jobs.xlsx"
+
+# Select the bundled environment overlay. JOBSFR_APP_ENV in the environment or .env takes priority.
+# app_env: dev

@@ -8,11 +8,11 @@ import pytest
 from openpyxl import load_workbook
 from typer.testing import CliRunner
 
-from scrapper.cli import app
-from scrapper.export import export_job_formats
-from scrapper.export.xlsx import read_xlsx_tracker
-from scrapper.models import JobOffer
-from scrapper.storage import JobStore
+from jobsfr.cli import app
+from jobsfr.export import export_job_formats
+from jobsfr.export.xlsx import read_xlsx_tracker
+from jobsfr.offers.models import JobOffer
+from jobsfr.storage import JobStore
 
 _ORIGINAL = JobOffer(
     source="indeed",
@@ -56,7 +56,7 @@ def test_cli_repost_default_and_profile_override(
     result = CliRunner().invoke(
         app,
         [
-            "--export-only",
+            "export",
             "--profile",
             str(profile),
             "--db",
@@ -165,7 +165,7 @@ def test_enabling_reposts_relabels_pending_rows_from_a_previous_export(tmp_path:
 
 def test_ods_keeps_multiple_reposts_and_the_status_dropdown(tmp_path: Path) -> None:
     pytest.importorskip("odf")
-    from scrapper.export.ods import read_ods_tracker
+    from jobsfr.export.ods import read_ods_tracker
 
     store = JobStore(tmp_path / "jobs.duckdb")
     try:

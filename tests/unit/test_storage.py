@@ -3,9 +3,9 @@ from __future__ import annotations
 from collections.abc import Mapping
 from pathlib import Path
 
-from scrapper.config import SearchConfig
-from scrapper.models import JobOffer
-from scrapper.storage import JobStore
+from jobsfr.config import SearchConfig
+from jobsfr.offers.models import JobOffer
+from jobsfr.storage import JobStore
 
 
 def test_bad_apply_links_do_not_merge_jobs_or_replace_source_links(tmp_path: Path) -> None:

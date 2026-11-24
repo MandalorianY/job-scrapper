@@ -6,11 +6,12 @@ applications.
 ```sh
 brew tap mandaloriany/tap
 brew install mandaloriany/tap/jobsfr
-jobsfr
+jobsfr setup
+jobsfr search
 ```
 
-The default tracker is `~/Documents/job-scrapper/jobs.xlsx`. Run `jobsfr --status`
+The default tracker is `~/Documents/jobsfr/jobs.xlsx`. Run `jobsfr status`
 to find your local configuration file.
 
-If you installed `job-scrapper` before the rename, use the upgrade instructions
-in the [deployment guide](https://github.com/MandalorianY/french-job-scraper/blob/main/deploy/README.md#macos-with-homebrew).
+See the [deployment guide](https://github.com/MandalorianY/jobsfr/blob/main/deploy/README.md#macos-with-homebrew)
+for scheduled runs.

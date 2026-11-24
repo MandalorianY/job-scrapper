@@ -1,0 +1,16 @@
+[Unit]
+Description=JobsFR search and tracker export
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/apps/jobsfr
+ExecStart=%h/apps/jobsfr/deploy/run.sh
+UMask=0077
+StandardOutput=append:%h/apps/jobsfr/data/service.log
+StandardError=inherit
+Nice=10
+CPUQuota=400%
+MemoryMax=6G
+TimeoutStartSec=4h
+NoNewPrivileges=true
+PrivateTmp=true

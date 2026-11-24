@@ -61,13 +61,13 @@ map_input() {
         exit 2
     fi
     path=$(realpath -- "$path")
-    if [[ $option == --replay-from ]] && use_mounted_path "$path"; then
+    if [[ $option == --archive ]] && use_mounted_path "$path"; then
         return
     fi
     target=/work/.input-$index
     mapped_path=$target/$(basename -- "$path")
     bind_mount "$path" "$mapped_path" readonly
-    if [[ $option == --replay-from ]]; then
+    if [[ $option == --archive ]]; then
         for companion in "$path.wal" "$path".location-scope-*.json "$(dirname -- "$path")/.geography"; do
             if [[ -e $companion ]]; then
                 bind_mount "$companion" "$target/$(basename -- "$companion")" readonly
@@ -81,7 +81,7 @@ bind_mount "${host_dirs[1]}" "${container_dirs[1]}"
 if [[ -f .env ]]; then
     bind_mount "$checkout/.env" /work/.env readonly
 fi
-local_config=src/scrapper/config/config.local.yaml
+local_config=src/jobsfr/config/config.local.yaml
 if [[ -f "$local_config" ]]; then
     bind_mount "$checkout/$local_config" /work/config.local.yaml readonly
 fi
@@ -93,7 +93,7 @@ for phase in output input; do
         option=${args[i]%%=*}
         case $option in
             --db|--log-file|--export-dir) kind=output ;;
-            --profile|--replay-from) kind=input ;;
+            --profile|--archive) kind=input ;;
             --query|-q|--location|-l|--results-wanted|--custom-pages|--log-level)
                 if [[ ${args[i]} != *=* ]]; then
                     i=$((i + 1))
@@ -128,8 +128,8 @@ for phase in output input; do
     done
 done
 
-image=$(docker build --quiet --tag job-scrapper:local .)
+image=$(docker build --quiet --tag jobsfr:local .)
 exec docker run --rm --init --read-only --cap-drop ALL \
     --security-opt no-new-privileges=true --user "$(id -u):$(id -g)" \
-    --tmpfs /tmp:rw,noexec,nosuid,nodev --env SCRAPPER_DISABLE_LOCAL_CONFIG \
+    --tmpfs /tmp:rw,noexec,nosuid,nodev --env JOBSFR_DISABLE_LOCAL_CONFIG \
     "${mounts[@]}" "$image" ${args[@]+"${args[@]}"}

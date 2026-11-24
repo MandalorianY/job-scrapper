@@ -1,0 +1,122 @@
+# Bundled defaults. See docs/config.local.example.yaml for a copyable profile.
+
+# =============================================================================
+# 1. Core Search Scope
+# =============================================================================
+
+queries:
+  - example role
+  - sample specialist
+  - demo coordinator
+  - example manager
+  - sample lead
+  - demo analyst
+  - placeholder operator
+
+# Override this example town in your YAML configuration or with --location.
+locations: ["Toulouse, France"]
+country: france
+distance_km: 25
+location_scope:
+  include_unrecognized: true
+
+# =============================================================================
+# 2. Listing Filters
+# =============================================================================
+
+filters:
+  contract:
+    exclude: [
+      # Internships
+      stage, stages, stagiaire, stagiaires, intern, internship,
+      # Work-study
+      alternance, alternant, alternante, alternants, alternantes,
+      apprentissage, apprentisage, apprenti, apprentie, apprentis, apprenties, apprenticeship, apprentice,
+      professionnalisation, professionalisation, professionnalization, professionalization,
+      contrat pro, contrat professionnel, contrat de professionnalisation,
+      # Volunteering
+      bénévole, benevolat, benevoles, volunteer, volunteering,
+    ]
+
+# =============================================================================
+# 3. Scrape Limits And Incremental Window
+# =============================================================================
+
+default_hours_old: 336
+overlap_hours: 24
+results_wanted_per_query: 25
+custom_max_pages: 2
+refresh_known_details: false
+
+# =============================================================================
+# 4. Export And Schedule
+# =============================================================================
+
+# Used when installing the timer. Linux uses Paris time, macOS uses the system time zone.
+schedule:
+  days: [mon, tue, wed, thu, fri]
+  time: "15:30"
+
+export:
+  keep_reposts: true
+  excel_columns:
+    - Statut
+    - Publié le
+    - Lien
+    - Intitulé
+    - Entreprise
+    - Lieu
+    - Contrat
+    - Salaire min (€ annuel)
+    - Salaire max (€ annuel)
+    - Recherche
+  repair_fields_by_source:
+    france_travail: true
+
+# =============================================================================
+# 5. Enabled Sources
+# =============================================================================
+
+# Optional per-source switches. Any source omitted here stays enabled.
+# Set a source to false to skip scraping it.
+enabled_sources:
+  apec: false
+
+# =============================================================================
+# 6. Dedupe Source Preference
+# =============================================================================
+
+dedupe_source_priority:
+  indeed: 0
+  linkedin: 10
+  welcome_to_the_jungle: 20
+  france_travail: 1000
+
+# =============================================================================
+# 7. HTTP Defaults
+# =============================================================================
+
+# Direct HTTP requests use this value. JobSpy uses its own user agents.
+user_agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0 Safari/537.36
+http:
+  accept_language: fr-FR,fr;q=0.9,en;q=0.7
+
+# =============================================================================
+# 8. JobSpy
+# =============================================================================
+
+jobspy:
+  glassdoor_results_wanted_per_query: 5
+  # Negative keywords added to Google Jobs queries. The built-in policy applies to all sources.
+  google_query_exclude_terms:
+    - stage
+    - alternance
+    - apprentissage
+    - stagiaire
+
+# =============================================================================
+# 9. Aggregators
+# =============================================================================
+
+aggregators:
+  max_detail_pages: 50

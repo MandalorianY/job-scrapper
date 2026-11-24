@@ -6,15 +6,15 @@ from datetime import UTC, date, datetime
 import pytest
 from bs4 import BeautifulSoup
 
-from scrapper.config import SearchConfig
-from scrapper.config.settings import LocationScopeConfig
-from scrapper.contracts import infer_offer_contract
-from scrapper.dates import absolute_posted_date
-from scrapper.location_scope import mentions_location_in_scope
-from scrapper.models import JobOffer
-from scrapper.scrapers.aggregators.detail import _company_from_domain as aggregator_company_from_domain
-from scrapper.scrapers.aggregators.detail import _offer_is_usable
-from scrapper.scrapers.common import (
+from jobsfr.config import SearchConfig
+from jobsfr.config.settings import LocationScopeConfig
+from jobsfr.geography.scope import mentions_location_in_scope
+from jobsfr.offers.contracts import infer_offer_contract
+from jobsfr.offers.dates import absolute_posted_date
+from jobsfr.offers.models import JobOffer
+from jobsfr.scrapers.aggregators.detail import _company_from_domain as aggregator_company_from_domain
+from jobsfr.scrapers.aggregators.detail import _offer_is_usable
+from jobsfr.scrapers.common import (
     apply_url,
     custom_search_cutoff,
     json_ld_jobposting,
@@ -241,7 +241,6 @@ def test_shared_offer_validation_filters_remote_salary_and_posted_date(
     config = SearchConfig(
         location_scope=toulouse_scope,
         filters={
-            "source": {"include": ["indeed"]},
             "remote": remote,
             "salary": {"min_annual_eur": 40000, "max_annual_eur": 60000},
             "posted_after": "2026-01-01",
@@ -262,7 +261,6 @@ def test_shared_offer_validation_filters_remote_salary_and_posted_date(
         currency="EUR",
     )
     assert offer_matches_search(listing, config)
-    assert not offer_matches_search(replace(listing, source="linkedin"), config)
     assert offer_matches_search(replace(listing, is_remote=None), config)
     assert not offer_matches_search(replace(listing, is_remote=not remote), config)
     assert offer_matches_search(replace(listing, min_amount=None), config)

@@ -1,4 +1,4 @@
-from scrapper.cli import main
+from jobsfr.cli import main
 
 if __name__ == "__main__":
     main()

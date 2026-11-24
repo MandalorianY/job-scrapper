@@ -1,21 +1,24 @@
+import json
 import shutil
 import sys
 from collections.abc import Sequence
-from importlib import import_module
 from pathlib import Path
 from typing import Never
 
 import pandas as pd
 import pytest
+import typer
+import yaml
 from openpyxl import load_workbook
+from typer.testing import CliRunner
 
-from scrapper import tracker_sync
-from scrapper.config import SearchConfig
-from scrapper.config.settings import ExportFormat
-from scrapper.export import export_job_formats, export_paths
-from scrapper.export.jobs import read_tracker
-from scrapper.models import JobOffer
-from scrapper.storage import JobStore
+from jobsfr.cli import app, tracker_sync
+from jobsfr.config import SearchConfig
+from jobsfr.config.settings import ExportFormat
+from jobsfr.export import export_job_formats, export_paths
+from jobsfr.export.jobs import read_tracker
+from jobsfr.offers.models import JobOffer
+from jobsfr.storage import JobStore
 
 
 @pytest.fixture
@@ -87,11 +90,23 @@ def test_sync_lock_excludes_a_second_file_handle(tmp_path: Path) -> None:
             fcntl.flock(competing, fcntl.LOCK_EX | fcntl.LOCK_NB)
 
 
+def test_sync_status_uses_yaml(tmp_path: Path) -> None:
+    database = tmp_path / "jobs.duckdb"
+    profile = tmp_path / "profile.yaml"
+    profile.write_text(yaml.safe_dump({"paths": {"database_path": str(database)}}), encoding="utf-8")
+    checkpoint = tracker_sync.sync_checkpoint_path(database)
+    checkpoint.parent.mkdir(parents=True)
+    checkpoint.write_text('{"enabled": true, "target": "old:jobs.xlsx"}', encoding="utf-8")
+
+    result = CliRunner().invoke(app, ["sync", "--profile", str(profile), "--status"])
+
+    assert result.exit_code == 0, result.output
+    assert "Tracker sync disabled." in result.output
+
+
 @pytest.mark.parametrize("kind", ("xlsx", "ods", "csv"))
-@pytest.mark.parametrize("configured_in_yaml", (False, True))
 def test_tracker_sync_saves_incremental_updates_and_recovers_from_conflicts(
     kind: ExportFormat,
-    configured_in_yaml: bool,
     remote_dir: Path,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -101,15 +116,17 @@ def test_tracker_sync_saves_incremental_updates_and_recovers_from_conflicts(
     formats = ("xlsx", "csv") if kind == "xlsx" else (kind, "xlsx")
     remote = remote_dir / f"tracker.{kind}"
     target = f"fixture:{remote.name}"
-    if configured_in_yaml:
-        local_config = tmp_path / "config.local.yaml"
-        local_config.write_text(f'sync:\n  enabled: true\n  target: "{target}"\n', encoding="utf-8")
-        monkeypatch.setattr(import_module("scrapper.config.settings"), "LOCAL_CONFIG_FILE", local_config)
-        monkeypatch.delenv("SCRAPPER_DISABLE_LOCAL_CONFIG", raising=False)
-    config = SearchConfig(
-        paths={"database_path": tmp_path / "jobs.duckdb", "export_dir": tmp_path / "exports"},
-        export={"formats": formats, "excel_columns": ("Statut", "Lien", "Intitulé")},
-    )
+    profile = tmp_path / "sync profile.yaml"
+    profile_settings: dict[str, object] = {
+        "queries": ["example coordinator"],
+        "locations": ["Toulouse, France"],
+        "paths": {"database_path": str(tmp_path / "jobs.duckdb"), "export_dir": str(tmp_path / "exports")},
+        "export": {"formats": formats, "excel_columns": ("Statut", "Lien", "Intitulé")},
+        "sync": {"enabled": True, "target": target},
+    }
+    profile.write_text(yaml.safe_dump(profile_settings), encoding="utf-8")
+    config = SearchConfig(_profile=profile)
+    monkeypatch.chdir(tmp_path)
     store = JobStore(config.database_path)
     try:
         store.upsert_offer(
@@ -128,24 +145,31 @@ def test_tracker_sync_saves_incremental_updates_and_recovers_from_conflicts(
     shutil.copy2(paths[0], remote)
     _edit_status(remote, "Postulé")
 
-    def run(*, db: Path | None = None, export_dir: Path | None = None) -> None:
+    def run(*, profile: Path | None, db: Path | None = None, export_dir: Path | None = None) -> None:
+        assert profile == Path.cwd() / "sync profile.yaml"
         store = JobStore(db or config.database_path)
         try:
             export_job_formats(
-                store, export_dir or config.export_dir, config.export.excel_columns, formats=config.export.formats
+                store,
+                export_dir or config.export_dir,
+                config.export.excel_columns,
+                formats=config.export.formats,
+                filters=SearchConfig(_profile=profile).filters,
             )
         finally:
             store.close()
 
-    monkeypatch.setattr(tracker_sync, "SearchConfig", lambda: config)
     monkeypatch.setattr(tracker_sync, "run", run)
-    if not configured_in_yaml:
-        tracker_sync.main(["--enable", target])
-    tracker_sync.main(["--status"])
+    runner = CliRunner()
+
+    def sync(*args: str) -> None:
+        result = runner.invoke(app, ["sync", "--profile", profile.name, *args])
+        assert result.exit_code == 0, result.output
+
+    sync("--status")
     assert {path.name for path in remote_dir.iterdir()} == {remote.name}
 
-    monkeypatch.setattr(sys, "argv", ["tracker_sync"])
-    tracker_sync.main()
+    sync()
     outputs = export_paths(config.export_dir, config.export.formats)
     assert {path.name for path in outputs} == {path.name for path in config.export_dir.iterdir()}
     trackers = [path for path in outputs if path.name != "jobs_raw.csv"]
@@ -168,12 +192,15 @@ def test_tracker_sync_saves_incremental_updates_and_recovers_from_conflicts(
     finally:
         store.close()
     expected = {"Example coordinator": "Refusé", "Example analyst": "En Attente"}
-    settings_path = tracker_sync.sync_settings_path(config.database_path)
-    saved_settings = tracker_sync.load_sync_settings(settings_path)
-    checkpoint = saved_settings.checkpoint_for(target)
+    checkpoint_path = tracker_sync.sync_checkpoint_path(config.database_path)
+    saved_checkpoint = tracker_sync.load_sync_checkpoint(checkpoint_path)
+    checkpoint = saved_checkpoint.checkpoint_for(target)
     assert checkpoint is not None
-    assert saved_settings.checkpoint_for(f"fixture:other.{kind}") is None
-    assert saved_settings.enabled == (not configured_in_yaml)
+    assert saved_checkpoint.checkpoint_for(f"fixture:other.{kind}") is None
+    assert json.loads(checkpoint_path.read_text(encoding="utf-8")) == {
+        "last_synced_hash": checkpoint,
+        "last_synced_target": target,
+    }
 
     def fail_upload(_remote: tracker_sync.Remote, _path: Path, *, first_upload: bool) -> Never:
         assert not first_upload
@@ -181,14 +208,14 @@ def test_tracker_sync_saves_incremental_updates_and_recovers_from_conflicts(
 
     with monkeypatch.context() as failed:
         failed.setattr(tracker_sync.Remote, "publish", fail_upload)
-        tracker_sync.main()
+        sync()
     _assert_statuses(trackers, expected)
     _assert_statuses([remote], {"Example coordinator": "Postulé"})
-    assert tracker_sync.load_sync_settings(settings_path).last_synced_hash == checkpoint
+    assert tracker_sync.load_sync_checkpoint(checkpoint_path).last_synced_hash == checkpoint
 
-    tracker_sync.main()
+    sync()
     _assert_statuses([*trackers, remote], expected)
-    tracker_sync.main()
+    sync()
     _assert_statuses([*trackers, remote], expected)
     assert {path.name for path in remote_dir.iterdir()} == {remote.name}
 
@@ -197,19 +224,27 @@ def test_tracker_sync_saves_incremental_updates_and_recovers_from_conflicts(
     _edit_status(remote, "En Attente" if expected[edited_title] != "En Attente" else "Refusé")
     remote_before_conflict = remote.read_bytes()
     remote_statuses = read_tracker(remote).set_index("Intitulé")["Statut"].to_dict()
-    tracker_sync.main()
+    sync()
     assert remote.read_bytes() == remote_before_conflict
-    (backup,) = settings_path.parent.glob("conflict-*")
+    (backup,) = checkpoint_path.parent.glob("conflict-*")
     _assert_statuses([backup / f"local.{kind}"], {**expected, edited_title: "Postulé"})
     _assert_statuses([backup / f"drive.{kind}"], remote_statuses)
 
-    monkeypatch.setattr(sys, "argv", ["tracker_sync", "--prefer", "drive"])
-    tracker_sync.main()
+    sync("--prefer", "drive")
+    _assert_statuses([*trackers, remote], remote_statuses)
+
+    profile_settings["filters"] = {"title": {"include": ["analyst"]}}
+    profile.write_text(yaml.safe_dump(profile_settings), encoding="utf-8")
+    sync()
+    _assert_statuses([*trackers, remote], {"Example analyst": remote_statuses["Example analyst"]})
+    del profile_settings["filters"]
+    profile.write_text(yaml.safe_dump(profile_settings), encoding="utf-8")
+    sync()
     _assert_statuses([*trackers, remote], remote_statuses)
 
 
 def test_remote_extension_must_match_primary_format(remote_dir: Path) -> None:
-    with pytest.raises(tracker_sync.SyncError, match=r"--enable REMOTE:folder/jobs\.ods"):
+    with pytest.raises(tracker_sync.SyncError, match=r"REMOTE:folder/jobs\.ods"):
         tracker_sync.Remote.connect("fixture:jobs.xlsx", ".ods")
     assert not list(remote_dir.iterdir())
 
@@ -232,34 +267,42 @@ def test_sync_reports_prerequisite_failure_before_scraping(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    config = SearchConfig(
-        paths={"database_path": tmp_path / "jobs.duckdb", "export_dir": tmp_path / "exports"},
-        sync={"enabled": True, "target": target},
+    profile_path = tmp_path / "sync profile.yaml"
+    profile_path.write_text(
+        yaml.safe_dump(
+            {
+                "queries": ["example coordinator"],
+                "locations": ["Toulouse, France"],
+                "paths": {"database_path": str(tmp_path / "jobs.duckdb"), "export_dir": str(tmp_path / "exports")},
+                "sync": {"enabled": True, "target": target},
+            }
+        ),
+        encoding="utf-8",
     )
     ran_local = False
 
     def deny_write(_remote: tracker_sync.Remote, _workspace: Path) -> Never:
         raise PermissionError("Read-only remote.")
 
-    def run_locally() -> None:
+    def run_locally(*, profile: Path | None) -> None:
         nonlocal ran_local
+        assert profile == profile_path
         warning = capsys.readouterr().err
         assert message in warning
-        assert "Running local export." in warning
+        assert "Running search and export locally." in warning
         ran_local = True
 
-    monkeypatch.setattr(tracker_sync, "SearchConfig", lambda: config)
     monkeypatch.setattr(tracker_sync.shutil, "which", lambda _: "rclone" if rclone_available else None)
     monkeypatch.setattr(tracker_sync.Remote, "check_write", deny_write)
     monkeypatch.setattr(tracker_sync, "run", run_locally)
 
-    with pytest.raises(SystemExit) as failure:
-        tracker_sync.main(["--status"])
-    assert failure.value.code == 1
+    with pytest.raises(typer.Exit) as failure:
+        tracker_sync.sync(profile=profile_path, status=True)
+    assert failure.value.exit_code == 1
     assert message in capsys.readouterr().err
     assert not ran_local
 
-    tracker_sync.main([])
+    tracker_sync.sync(profile=profile_path)
     assert ran_local
     assert not list(remote_dir.iterdir())
 

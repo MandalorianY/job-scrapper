@@ -3,13 +3,13 @@ from types import SimpleNamespace
 
 import pytest
 
-from scrapper.config import SearchConfig, settings, user_paths
+from jobsfr.config import SearchConfig, settings, user_paths
 
 
 @pytest.mark.parametrize(
     ("platform", "config_dir", "data_dir", "documents", "logs"),
     [
-        ("darwin", "Library/Application Support", "Library/Application Support", "Documents", "Library/Logs"),
+        ("darwin", ".config", "Library/Application Support", "Documents", "Library/Logs"),
         ("linux", "XDG config", "XDG data", "Mes documents $", "XDG state"),
         ("win32", "Roaming data", "Local data", "Redirected Documents", "Local data"),
     ],
@@ -39,14 +39,14 @@ def test_installed_defaults_follow_platform_directories(
     linux_config.mkdir()
     (linux_config / "user-dirs.dirs").write_text('XDG_DOCUMENTS_DIR="$HOME/Mes documents \\$"\n', encoding="utf-8")
 
-    log_dir = tmp_path / logs / "job-scrapper"
+    log_dir = tmp_path / logs / "jobsfr"
     if platform == "win32":
         log_dir /= "Logs"
     config = SearchConfig()
-    assert settings.default_local_config() == tmp_path / config_dir / "job-scrapper/config.local.yaml"
-    assert config.database_path == tmp_path / data_dir / "job-scrapper/job_search.duckdb"
-    assert config.export_dir == tmp_path / documents / "job-scrapper"
-    assert config.log_file == log_dir / "job-scrapper.jsonl"
+    assert settings.default_local_config() == tmp_path / config_dir / "jobsfr/config.yaml"
+    assert config.database_path == tmp_path / data_dir / "jobsfr/job_search.duckdb"
+    assert config.export_dir == tmp_path / documents / "jobsfr"
+    assert config.log_file == log_dir / "jobsfr.jsonl"
 
 
 def test_linux_ignores_relative_xdg_paths(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -55,7 +55,7 @@ def test_linux_ignores_relative_xdg_paths(monkeypatch: pytest.MonkeyPatch, tmp_p
     monkeypatch.setenv("XDG_CONFIG_HOME", "relative")
     monkeypatch.setenv("XDG_DATA_HOME", "")
     monkeypatch.setenv("XDG_STATE_HOME", "relative")
-    assert user_paths.user_config_dir() == tmp_path / ".config/job-scrapper"
-    assert user_paths.user_data_dir() == tmp_path / ".local/share/job-scrapper"
-    assert user_paths.user_log_dir() == tmp_path / ".local/state/job-scrapper"
-    assert user_paths.user_export_dir() == tmp_path / "Documents/job-scrapper"
+    assert user_paths.user_config_dir() == tmp_path / ".config/jobsfr"
+    assert user_paths.user_data_dir() == tmp_path / ".local/share/jobsfr"
+    assert user_paths.user_log_dir() == tmp_path / ".local/state/jobsfr"
+    assert user_paths.user_export_dir() == tmp_path / "Documents/jobsfr"

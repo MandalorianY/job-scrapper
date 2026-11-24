@@ -9,13 +9,13 @@ from unittest.mock import Mock
 import httpx
 import pytest
 
-from scrapper.config import DirectAggregatorConfig, SearchConfig
-from scrapper.config.settings import LocationScopeConfig
-from scrapper.models import JobOffer
-from scrapper.scrapers import cadremploi, france_travail
-from scrapper.scrapers.aggregators import detail, discovery, scrape
-from scrapper.storage import JobStore
-from scrapper.text import listing_url_key, url_key
+from jobsfr.config import DirectAggregatorConfig, SearchConfig
+from jobsfr.config.settings import LocationScopeConfig
+from jobsfr.offers.models import JobOffer
+from jobsfr.offers.text import listing_url_key, url_key
+from jobsfr.scrapers import cadremploi, france_travail
+from jobsfr.scrapers.aggregators import detail, discovery, scrape
+from jobsfr.storage import JobStore
 
 
 @pytest.mark.parametrize("explicit_workplace", [False, True])

@@ -9,11 +9,11 @@ import pandas as pd
 import pytest
 from openpyxl import load_workbook
 
-from scrapper.export import export_job_formats, tracker, xlsx
-from scrapper.export.tracker import _date_fr, _date_value
-from scrapper.filters import ListingFilters, RegexRule, TextFilter
-from scrapper.models import JobOffer
-from scrapper.storage import JobStore
+from jobsfr.export import export_job_formats, tracker, xlsx
+from jobsfr.export.tracker import _date_fr, _date_value
+from jobsfr.offers.filters import ListingFilters, RegexRule, TextFilter
+from jobsfr.offers.models import JobOffer
+from jobsfr.storage import JobStore
 
 
 @pytest.mark.parametrize("stage", ["format", "publish"])

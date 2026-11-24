@@ -14,12 +14,11 @@ from importlib.metadata import distributions
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from scrapper import CLI_NAME, __version__
-from scrapper.company_types import COMPANY_TYPES_PATH
-from scrapper.config.settings import PACKAGE_CONFIG_DIR
+from jobsfr import CLI_NAME, __version__
+from jobsfr.catalogs.company_types import COMPANY_TYPES_PATH
+from jobsfr.config.settings import EXAMPLE_CONFIG_FILE, PACKAGE_CONFIG_DIR
 
 ROOT = Path(__file__).resolve().parents[1]
-LEGACY_NAME = "job-scrapper"
 ARCHITECTURES = {"aarch64": "arm64", "arm64": "arm64", "amd64": "amd64", "x86_64": "amd64"}
 
 
@@ -62,7 +61,7 @@ def _freeze(work: Path, notices: Path, *, onefile: bool) -> Path:
         "--python-option",
         "X utf8",
         "--copy-metadata",
-        "scrapper",
+        CLI_NAME,
         "--collect-submodules",
         "jobspy",
         "--hidden-import",
@@ -72,10 +71,12 @@ def _freeze(work: Path, notices: Path, *, onefile: bool) -> Path:
         "--add-data",
         f"{notices}:notices",
         "--add-data",
-        f"{COMPANY_TYPES_PATH}:scrapper/catalogs",
+        f"{COMPANY_TYPES_PATH}:jobsfr/catalogs",
+        "--add-data",
+        f"{EXAMPLE_CONFIG_FILE}:jobsfr/config",
     ]
-    for filename in ("config.yaml", "config.prod.yaml", "toulouse-graphiste.yaml"):
-        command.extend(("--add-data", f"{PACKAGE_CONFIG_DIR / filename}:scrapper/config"))
+    for filename in ("config.yaml", "config.prod.yaml"):
+        command.extend(("--add-data", f"{PACKAGE_CONFIG_DIR / filename}:jobsfr/config"))
     subprocess.run([*command, str(ROOT / "main.py")], cwd=work, check=True)
     return work / "dist" / (f"{CLI_NAME}.exe" if onefile else CLI_NAME)
 
@@ -92,17 +93,16 @@ def _build_deb(bundle: Path, work: Path, destination: Path, arch: str) -> None:
     control = package / "DEBIAN"
     control.mkdir(parents=True)
     (package / "usr/bin").mkdir(parents=True)
-    for name in (CLI_NAME, LEGACY_NAME):
-        (package / "usr/bin" / name).symlink_to(f"../lib/{LEGACY_NAME}/{CLI_NAME}")
-    shutil.copytree(bundle, package / "usr/lib" / LEGACY_NAME, symlinks=True)
-    docs = package / "usr/share/doc" / LEGACY_NAME
+    (package / "usr/bin" / CLI_NAME).symlink_to(f"../lib/{CLI_NAME}/{CLI_NAME}")
+    shutil.copytree(bundle, package / "usr/lib" / CLI_NAME, symlinks=True)
+    docs = package / "usr/share/doc" / CLI_NAME
     docs.mkdir(parents=True)
     shutil.copyfile(ROOT / "LICENSE", docs / "copyright")
     size_kib = (
         sum(path.stat().st_size for path in bundle.rglob("*") if path.is_file() and not path.is_symlink()) + 1023
     ) // 1024
     (control / "control").write_text(
-        f"Package: {LEGACY_NAME}\n"
+        f"Package: {CLI_NAME}\n"
         f"Version: {__version__}\n"
         f"Architecture: {arch}\n"
         "Section: utils\n"
@@ -110,7 +110,7 @@ def _build_deb(bundle: Path, work: Path, destination: Path, arch: str) -> None:
         "Maintainer: JobsFR contributors <MandalorianY@users.noreply.github.com>\n"
         f"Depends: libc6 (>= {glibc})\n"
         f"Installed-Size: {size_kib}\n"
-        "Homepage: https://github.com/MandalorianY/job-scrapper\n"
+        "Homepage: https://github.com/MandalorianY/jobsfr\n"
         "Description: Job scraper and Excel application tracker\n",
         encoding="utf-8",
     )
@@ -142,11 +142,10 @@ def main() -> None:
         else:
             platform_name = "linux" if sys.platform == "linux" else "macos"
             prefix = f"{CLI_NAME}-{__version__}-{platform_name}-{arch}"
-            (bundle / LEGACY_NAME).symlink_to(CLI_NAME)
             with tarfile.open(output / f"{prefix}.tar.gz", "w:gz") as archive:
                 archive.add(bundle, arcname=CLI_NAME)
             if sys.platform == "linux":
-                _build_deb(bundle, work, output / f"{LEGACY_NAME}_{__version__}_{arch}.deb", arch)
+                _build_deb(bundle, work, output / f"{CLI_NAME}_{__version__}_{arch}.deb", arch)
 
 
 if __name__ == "__main__":

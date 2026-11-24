@@ -7,7 +7,7 @@ from email.utils import format_datetime
 import httpx
 import pytest
 
-from scrapper.scrapers import async_http
+from jobsfr.scrapers import async_http
 
 
 @pytest.mark.asyncio

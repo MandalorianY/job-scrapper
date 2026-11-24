@@ -7,7 +7,7 @@
 .agents/
 skills-lock.json
 
-# Python-generated files
+# Python-generated filesft
 __pycache__/
 *.py[oc]
 .coverage
@@ -27,6 +27,7 @@ wheels/
 data/
 .catalogs/
 exports/
+.jobsfr-tracker-history.csv
 /jobs.xlsx
 trouve-un-travail/
 .crawlee_storage/
@@ -37,5 +38,5 @@ trouve-un-travail/
 !.env.example
 *.env.yaml
 config.local.yaml
-src/scrapper/config/*.local.yaml
+src/jobsfr/config/*.local.yaml
 /deploy/README.local.md

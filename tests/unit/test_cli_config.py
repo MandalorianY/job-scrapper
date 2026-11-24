@@ -8,11 +8,15 @@ import pytest
 from pydantic import ValidationError
 from typer.testing import CliRunner
 
-from scrapper import CLI_NAME, __version__, cli, search_regions
-from scrapper.config import SearchConfig
-from scrapper.config.settings import PACKAGE_CONFIG_DIR
-from scrapper.location_scope import location_is_in_scope
-from scrapper.scrapers.aggregators import site_search_templates
+from jobsfr import CLI_NAME, __version__, cli
+from jobsfr.cli import profile_setup as cli_setup
+from jobsfr.cli import runner as cli_run
+from jobsfr.config import SearchConfig
+from jobsfr.config.settings import EXAMPLE_CONFIG_FILE, PACKAGE_CONFIG_DIR
+from jobsfr.geography import regions as search_regions
+from jobsfr.geography.scope import location_is_in_scope
+from jobsfr.offers.filters import has_excluded_contract_signal
+from jobsfr.scrapers.aggregators import site_search_templates
 
 
 def test_search_configuration_rejects_handwritten_coordinates() -> None:
@@ -26,11 +30,38 @@ def test_search_configuration_rejects_invalid_patterns(field: str) -> None:
         SearchConfig(filters={field: {"exclude": [{"regex": "["}]}})
 
 
-def test_company_filter_accepts_legacy_names_and_rejects_unknown_types() -> None:
-    config = SearchConfig(filters={"company": {"exclude": ["Example Agency"]}})
+def test_search_overrides_do_not_inherit_placeholder_title_filters() -> None:
+    config = SearchConfig(queries=("analyste",), locations=("Lille",), _require_search_setup=True)
+
+    assert config.filters.title.allows("Analyste")
+
+
+def test_builtin_contract_policy_uses_bundled_exclusions(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("JOBSFR_DISABLE_LOCAL_CONFIG", "1")
+    exclusions = SearchConfig().filters.contract.exclude
+    for term in ("internship", "alternance", "apprentissage", "contrat de professionnalisation"):
+        assert term in exclusions
+        assert has_excluded_contract_signal(f"Example role ({term})", "CDI", None)
+        assert has_excluded_contract_signal("Example role", term, None)
+
+    profile = SearchConfig(filters={"contract": {"exclude": ["CDD"]}})
+    assert not profile.filters.contract.allows("CDD")
+    assert not has_excluded_contract_signal("Example role", "CDD", None)
+    assert has_excluded_contract_signal("Example role", "internship", None)
+
+
+def test_company_filter_excludes_named_employers_and_rejects_invalid_rules() -> None:
+    config = SearchConfig(filters={"company": {"exclude": {"names": ["Example Agency"]}}})
     assert not config.filters.company.allows("Example Agency SAS")
+    with pytest.raises(ValidationError, match=r"filters\.company\.exclude"):
+        SearchConfig(filters={"company": {"exclude": ["Example Agency"]}})
     with pytest.raises(ValidationError, match="Unknown company types in the community catalog: esnn"):
         SearchConfig(filters={"company": {"exclude": {"types": ["esnn"]}}})
+
+
+def test_search_configuration_rejects_unknown_settings() -> None:
+    with pytest.raises(ValidationError, match="unknown_setting"):
+        SearchConfig(unknown_setting=True)
 
 
 def test_company_filter_reads_new_types_and_quoted_names_from_csv(tmp_path: Path) -> None:
@@ -69,6 +100,36 @@ def test_company_filter_reports_catalog_schema_errors(tmp_path: Path, header: st
         SearchConfig(company_catalog_path=catalog, filters={"company": {"exclude": {"types": ["esn"]}}})
 
 
+def test_setup_creates_a_search_profile_without_replacing_it(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    profile = tmp_path / "config.local.yaml"
+    monkeypatch.setattr(cli_setup, "default_local_config", lambda: profile)
+    runner = CliRunner()
+
+    result = runner.invoke(cli.app, ["setup"], input="Chargé d'études\nToulouse\n")
+
+    assert result.exit_code == 0, result.output
+    assert str(EXAMPLE_CONFIG_FILE) in result.output
+    assert "jobsfr schedule enable" in result.output
+    assert "jobsfr search" in result.output
+    config = SearchConfig(_profile=profile, _require_search_setup=True)
+    assert config.queries == ("Chargé d'études",)
+    assert config.locations == ("Toulouse",)
+    assert config.filters.title.allows("Chargé d'études H/F")
+    saved = profile.read_bytes()
+
+    result = runner.invoke(cli.app, ["setup"])
+    assert result.exit_code == 2
+    assert "already exists" in result.output
+    assert profile.read_bytes() == saved
+
+    result = runner.invoke(cli.app, ["setup", "--example"])
+    assert result.exit_code == 0, result.output
+    assert result.stdout == EXAMPLE_CONFIG_FILE.read_text(encoding="utf-8")
+    assert profile.read_bytes() == saved
+    example = SearchConfig(_profile=EXAMPLE_CONFIG_FILE, _require_search_setup=True)
+    assert example.filters.allows({"title": "Data Analyst", "company": "Some Employer", "employment_type": "CDI"}.get)
+
+
 def test_version_and_explicit_profile_work_with_invalid_local_config(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -76,31 +137,33 @@ def test_version_and_explicit_profile_work_with_invalid_local_config(
     local_config.write_text("paths: [invalid\n", encoding="utf-8")
     profile = tmp_path / "selected.yaml"
     profile.write_text("queries: [selected]\n", encoding="utf-8")
-    monkeypatch.setattr(import_module("scrapper.config.settings"), "LOCAL_CONFIG_FILE", local_config)
-    monkeypatch.delenv("SCRAPPER_DISABLE_LOCAL_CONFIG", raising=False)
+    monkeypatch.setattr(import_module("jobsfr.config.settings"), "LOCAL_CONFIG_FILE", local_config)
+    monkeypatch.delenv("JOBSFR_DISABLE_LOCAL_CONFIG", raising=False)
     runner = CliRunner()
 
     version = runner.invoke(cli.app, ["--version"])
     assert version.exit_code == 0
     assert version.stdout.strip() == f"{CLI_NAME} {__version__}"
-    bad_config = runner.invoke(cli.app, ["--status"])
+    bad_config = runner.invoke(cli.app, ["status"])
     assert bad_config.exit_code == 2
     assert "Invalid YAML configuration" in bad_config.output
-    selected = runner.invoke(cli.app, ["--profile", str(profile), "--show-config"])
+    selected = runner.invoke(cli.app, ["status", "--json", "--profile", str(profile)])
     assert selected.exit_code == 0, selected.output
     assert json.loads(selected.stdout)["values"]["queries"] == ["selected"]
 
 
-def test_show_config_stays_offline_when_geography_is_missing(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_status_stays_offline_when_geography_is_missing(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     def forbidden(*args: object, **kwargs: object) -> Never:
         raise AssertionError("Configuration preview must not open an HTTP client")
 
     monkeypatch.setattr(search_regions.httpx, "Client", forbidden)
+    profile = tmp_path / "profile.yaml"
+    profile.write_text('locations: ["Paris, France"]\n', encoding="utf-8")
     database = tmp_path / "missing.duckdb"
     cache = tmp_path / ".geography" / "town-paris.json"
     cache.parent.mkdir()
     cache.write_text("invalid json", encoding="utf-8")
-    result = CliRunner().invoke(cli.app, ["--show-config", "--db", str(database), "--location", "Paris, France"])
+    result = CliRunner().invoke(cli.app, ["status", "--json", "--db", str(database), "--profile", str(profile)])
     assert result.exit_code == 0, result.output
     assert json.loads(result.stdout)["values"]["locations"] == ["Paris, France"]
     assert not database.exists()
@@ -112,7 +175,7 @@ def test_installed_config_and_cli_paths_use_the_home_directory(monkeypatch: pyte
     home.mkdir()
     workdir = tmp_path / "tracker"
     workdir.mkdir()
-    settings_module = import_module("scrapper.config.settings")
+    settings_module = import_module("jobsfr.config.settings")
     monkeypatch.chdir(workdir)
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("USERPROFILE", str(home))
@@ -120,26 +183,36 @@ def test_installed_config_and_cli_paths_use_the_home_directory(monkeypatch: pyte
     monkeypatch.setattr(settings_module, "LOCAL_CONFIG_FILE", tmp_path / "package" / "config.local.yaml")
     config_dir = home / "app config"
     monkeypatch.setattr(settings_module, "user_config_dir", lambda: config_dir)
-    monkeypatch.delenv("SCRAPPER_DISABLE_LOCAL_CONFIG", raising=False)
+    monkeypatch.delenv("JOBSFR_DISABLE_LOCAL_CONFIG", raising=False)
+    monkeypatch.delenv("JOBSFR_USE_WORKING_DIRECTORY", raising=False)
+    default_queries = SearchConfig().queries
     (workdir / "config.local.yaml").write_text("queries: [local]\n", encoding="utf-8")
+    (workdir / "config.yaml").write_text("queries: [working directory]\n", encoding="utf-8")
     profile = home / "profile.yaml"
     profile.write_text(
-        'queries: [profile]\npaths:\n  database_path: "~/jobs.duckdb"\n  log_file: "~/jobs.jsonl"\n',
+        'queries: [profile]\npaths:\n  database_path: "~/jobs.duckdb"\n  export_dir: "~/exports"\n'
+        '  log_file: "~/jobs.jsonl"\n',
         encoding="utf-8",
     )
 
-    assert SearchConfig().queries == ("local",)
-    config_dir.mkdir()
-    (config_dir / "config.local.yaml").write_text("queries: [installed]\n", encoding="utf-8")
-    (config_dir / ".env").write_text("SCRAPPER_APP_ENV=prod\n", encoding="utf-8")
-    assert SearchConfig().queries == ("installed",)
-    assert SearchConfig().custom_max_pages == 3
-
+    assert SearchConfig().queries == default_queries
     runner = CliRunner()
-    result = runner.invoke(
-        cli.app,
-        ["--show-config", "--export-only", "--profile", "~/profile.yaml", "--export-dir", "~/exports"],
+    result = runner.invoke(cli.app, ["setup"], input="installed\nToulouse\n")
+    assert result.exit_code == 0, result.output
+    assert (config_dir / "config.yaml").is_file()
+    (config_dir / ".env").write_text(
+        "JOBSFR_APP_ENV=prod\nJOBSFR_USE_WORKING_DIRECTORY=true\nJOBSFR_DISABLE_LOCAL_CONFIG=true\n"
+        "OTHER_TOOL_SETTING=shared\n",
+        encoding="utf-8",
     )
+    config = SearchConfig(_require_search_setup=True)
+    assert config.queries == ("installed",)
+    assert config.custom_max_pages == 3
+
+    result = runner.invoke(cli.app, ["status"])
+    assert result.exit_code == 0, result.output
+    assert "Search profile config.yaml (overrides applied)" in " ".join(result.stdout.split())
+    result = runner.invoke(cli.app, ["status", "--json", "--profile", "~/profile.yaml"])
     assert result.exit_code == 0, result.output
     report = json.loads(result.stdout)
     assert report["values"]["queries"] == ["profile"]
@@ -149,18 +222,22 @@ def test_installed_config_and_cli_paths_use_the_home_directory(monkeypatch: pyte
         "log_file": str(home / "jobs.jsonl"),
     }
     assert report["sources"]["paths.database_path"] == str(profile)
-    assert report["sources"]["paths.export_dir"] == "command line"
+    assert report["sources"]["paths.export_dir"] == str(profile)
     assert report["sources"]["app_env"] == str(config_dir / ".env")
 
-    monkeypatch.setenv("SCRAPPER_USE_WORKING_DIRECTORY", "1")
+    monkeypatch.setenv("JOBSFR_USE_WORKING_DIRECTORY", "true")
     config = SearchConfig()
     assert config.queries == ("local",)
     assert config.database_path.resolve() == (workdir / "data/job_search.duckdb").resolve()
     assert config.export_dir.resolve() == (workdir / "exports").resolve()
-    assert config.log_file.resolve() == (workdir / "data/job-scrapper.jsonl").resolve()
+    assert config.log_file.resolve() == (workdir / "data/jobsfr.jsonl").resolve()
+
+    monkeypatch.setenv("JOBSFR_DISABLE_LOCAL_CONFIG", "1")
+    assert SearchConfig().queries == default_queries
+    assert SearchConfig(_profile=profile).queries == ("profile",)
 
 
-def test_show_config_reports_effective_values_and_origins(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_status_json_reports_effective_values_and_origins(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     local_config = tmp_path / "config.local.yaml"
     local_config.write_text(
         'queries: [Linux]\nlocations: ["Lille, France"]\ndistance_km: 10\n'
@@ -172,33 +249,31 @@ def test_show_config_reports_effective_values_and_origins(monkeypatch: pytest.Mo
     )
     dotenv = tmp_path / ".env"
     dotenv.write_text(
-        "SCRAPPER_APP_ENV=prod\nSCRAPPER_WELCOME_TO_THE_JUNGLE__ALGOLIA_API_KEY=private-key\n",
+        "JOBSFR_APP_ENV=prod\nJOBSFR_WELCOME_TO_THE_JUNGLE__ALGOLIA_API_KEY=private-key\n",
         encoding="utf-8",
     )
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(import_module("scrapper.config.settings"), "LOCAL_CONFIG_FILE", local_config)
-    monkeypatch.delenv("SCRAPPER_DISABLE_LOCAL_CONFIG")
-    monkeypatch.delenv("SCRAPPER_APP_ENV", raising=False)
-    monkeypatch.setenv("SCRAPPER_EXTRA_HEADERS", '{"Authorization": "private-header"}')
-    monkeypatch.setenv("SCRAPPER_RESULTS_WANTED_PER_QUERY", "30")
-    monkeypatch.setenv("SCRAPPER_AGGREGATORS__MAX_DETAIL_PAGES", "25")
+    monkeypatch.setattr(import_module("jobsfr.config.settings"), "LOCAL_CONFIG_FILE", local_config)
+    monkeypatch.delenv("JOBSFR_DISABLE_LOCAL_CONFIG")
+    monkeypatch.delenv("JOBSFR_APP_ENV", raising=False)
+    monkeypatch.setenv("JOBSFR_EXTRA_HEADERS", '{"Authorization": "private-header"}')
+    monkeypatch.setenv("JOBSFR_RESULTS_WANTED_PER_QUERY", "30")
+    monkeypatch.setenv("JOBSFR_AGGREGATORS__MAX_DETAIL_PAGES", "25")
 
     def forbidden(*args: object, **kwargs: object) -> Never:
         raise AssertionError("Printing configuration must have no run side effects")
 
     for name in ("configure_logging", "_job_store"):
-        monkeypatch.setattr(cli, name, forbidden)
+        monkeypatch.setattr(cli_run, name, forbidden)
 
-    result = CliRunner().invoke(
-        cli.app, ["--show-config", "--export-only", "--query", "Administrateur Système", "--db", "test.duckdb"]
-    )
+    result = CliRunner().invoke(cli.app, ["status", "--json", "--db", "test.duckdb"])
     assert result.exit_code == 0, result.output
     assert "private-key" not in result.output
     assert "private-header" not in result.output
     report = json.loads(result.stdout)
     values, sources = report["values"], report["sources"]
     assert values["app_env"] == "prod"
-    assert values["queries"] == ["Administrateur Système"]
+    assert values["queries"] == ["Linux"]
     assert values["locations"] == ["Lille, France"]
     assert values["distance_km"] == 10
     assert "jobspy_sites" not in values
@@ -218,7 +293,8 @@ def test_show_config_reports_effective_values_and_origins(monkeypatch: pytest.Mo
     assert site_specs["cadremploi"]["query_template"] == "existing key {location} {query}"
     assert values["paths"]["database_path"] == str(tmp_path / "test.duckdb")
     assert sources["app_env"] == str(dotenv)
-    assert sources["queries"] == sources["paths.database_path"] == "command line"
+    assert sources["paths.database_path"] == "command line"
+    assert sources["queries"] == str(local_config)
     assert sources["locations"] == sources["enabled_sources.welcome_to_the_jungle"] == str(local_config)
     assert sources["enabled_sources.apec"] == str(PACKAGE_CONFIG_DIR / "config.yaml")
     assert sources["custom_max_pages"] == str(PACKAGE_CONFIG_DIR / "config.prod.yaml")
@@ -230,72 +306,107 @@ def test_show_config_reports_effective_values_and_origins(monkeypatch: pytest.Mo
     assert sources["welcome_to_the_jungle.algolia_api_key"] == str(dotenv)
 
 
-def test_status_previews_search_configuration_without_running(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+@pytest.mark.parametrize("explicit_profile", [False, True])
+def test_yaml_app_env_selects_overlay_with_environment_precedence(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, explicit_profile: bool
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("JOBSFR_APP_ENV", raising=False)
+    monkeypatch.delenv("JOBSFR_DISABLE_LOCAL_CONFIG")
+    profile = tmp_path / "profile.yaml"
+    profile.write_text("app_env: prod\naggregators: {max_detail_pages: 17}\n", encoding="utf-8")
+    args = ["status", "--json"]
+    if explicit_profile:
+        args += ["--profile", str(profile)]
+    else:
+        monkeypatch.setattr(import_module("jobsfr.config.settings"), "LOCAL_CONFIG_FILE", profile)
+
+    runner = CliRunner()
+    result = runner.invoke(cli.app, args)
+    assert result.exit_code == 0, result.output
+    report = json.loads(result.stdout)
+    assert report["values"]["app_env"] == "prod"
+    assert report["values"]["custom_max_pages"] == 3
+    assert report["values"]["aggregators"]["max_detail_pages"] == 17
+    assert report["sources"]["app_env"] == str(profile)
+    assert report["sources"]["custom_max_pages"] == str(PACKAGE_CONFIG_DIR / "config.prod.yaml")
+
+    (tmp_path / ".env").write_text("JOBSFR_APP_ENV=dev\n", encoding="utf-8")
+    result = runner.invoke(cli.app, args)
+    assert result.exit_code == 0, result.output
+    report = json.loads(result.stdout)
+    assert report["values"]["app_env"] == "dev"
+    assert report["values"]["custom_max_pages"] == 2
+
+    monkeypatch.setenv("JOBSFR_APP_ENV", "prod")
+    result = runner.invoke(cli.app, args)
+    assert result.exit_code == 0, result.output
+    report = json.loads(result.stdout)
+    assert report["values"]["app_env"] == "prod"
+    assert report["values"]["custom_max_pages"] == 3
+    assert report["sources"]["app_env"] == "environment"
+    assert SearchConfig(_profile=profile, app_env="dev").custom_max_pages == 2
+
+
+def test_status_inspects_search_configuration_without_running(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.chdir(tmp_path)
     local_config = tmp_path / "config.local.yaml"
     local_config.write_text(
+        'queries: [analytics]\nlocations: ["Lille, France"]\n'
         "filters:\n"
         "  title: {include: [data analyst], exclude: [{regex: senior}]}\n"
         "  contract: {exclude: [temporary]}\n"
-        "  by_source: {linkedin: {company: {exclude: [Example Company]}}}\n"
+        "  by_source: {linkedin: {company: {exclude: {names: [Example Company]}}}}\n"
         "aggregators:\n  max_detail_pages: 42\n  direct_locations: [32R]\n",
         encoding="utf-8",
     )
-    monkeypatch.setattr(import_module("scrapper.config.settings"), "LOCAL_CONFIG_FILE", local_config)
-    monkeypatch.delenv("SCRAPPER_DISABLE_LOCAL_CONFIG", raising=False)
-    monkeypatch.setenv("SCRAPPER_DISTANCE_KM", "10")
-    monkeypatch.setenv("SCRAPPER_ENABLED_SOURCES__GOOGLE", "false")
-    monkeypatch.setenv("SCRAPPER_ENABLED_SOURCES__AGGREGATORS", "false")
-    monkeypatch.setenv("SCRAPPER_PATHS__DATABASE_PATH", str(tmp_path / "jobs.duckdb"))
-    monkeypatch.setenv("SCRAPPER_WELCOME_TO_THE_JUNGLE__ALGOLIA_API_KEY", "private-key")
+    monkeypatch.setattr(import_module("jobsfr.config.settings"), "LOCAL_CONFIG_FILE", local_config)
+    monkeypatch.delenv("JOBSFR_DISABLE_LOCAL_CONFIG", raising=False)
+    monkeypatch.setenv("JOBSFR_DISTANCE_KM", "10")
+    monkeypatch.setenv("JOBSFR_ENABLED_SOURCES__GOOGLE", "false")
+    monkeypatch.setenv("JOBSFR_ENABLED_SOURCES__AGGREGATORS", "false")
+    monkeypatch.setenv("JOBSFR_PATHS__DATABASE_PATH", str(tmp_path / "jobs.duckdb"))
+    monkeypatch.setenv("JOBSFR_WELCOME_TO_THE_JUNGLE__ALGOLIA_API_KEY", "private-key")
 
     def forbidden(*args: object, **kwargs: object) -> Never:
         raise AssertionError("Status must be offline and have no run side effects")
 
     for name in ("configure_logging", "_job_store", "route_location_overrides"):
-        monkeypatch.setattr(cli, name, forbidden)
+        monkeypatch.setattr(cli_run, name, forbidden)
 
     runner = CliRunner()
-    for flags, jobspy_status, custom_status in (
-        ([], "Enabled", "Enabled"),
-        (["--skip-jobspy"], "Disabled", "Enabled"),
-        (["--skip-custom"], "Enabled", "Disabled"),
-        (["--skip-jobspy", "--skip-custom"], "Disabled", "Disabled"),
-        (["--export-only"], "Disabled", "Disabled"),
-    ):
-        result = runner.invoke(cli.app, ["--status", "--query", "analytics", "--location", "Lille, France", *flags])
-        assert result.exit_code == 0, result.output
-        for value in ("Lille, France", "10 km", "analytics", "data analyst", "temporary", "senior", "Example Company"):
-            assert value in result.stdout
-        assert "Search profile config.local.yaml (overrides applied)" in " ".join(result.stdout.split())
-        assert "config.local.yaml: aggregators, filters" in result.stdout
-        assert "environment: distance_km, enabled_sources" in result.stdout
-        assert "command line: location_label, locations, queries" in result.stdout
-        assert "42 aggregator detail pages" in " ".join(result.stdout.split())
-        assert "private-key" not in result.stdout
-        rows = [
-            tuple(cell.strip() for cell in line.strip("│").split("│"))
-            for line in result.stdout.splitlines()
-            if line.startswith("│")
-        ]
-        assert ("indeed", "JobSpy", jobspy_status) in rows
-        assert ("google", "JobSpy", "Disabled") in rows
-        assert ("hellowork", "JobSpy", jobspy_status) in rows
-        assert ("welcome_to_the_jungle", "Custom", custom_status) in rows
-        assert ("emploi_territorial", "Aggregator", "Disabled") in rows
-        assert ("cadremploi", "Aggregator", "Disabled") in rows
-        assert "32R" in result.stdout
+    result = runner.invoke(cli.app, ["status"])
+    assert result.exit_code == 0, result.output
+    for value in ("Lille, France", "10 km", "analytics", "data analyst", "temporary", "senior", "Example Company"):
+        assert value in result.stdout
+    assert "Search profile config.local.yaml (overrides applied)" in " ".join(result.stdout.split())
+    assert "config.local.yaml: aggregators, filters, locations, queries" in result.stdout
+    assert "environment: distance_km, enabled_sources" in result.stdout
+    assert "42 aggregator detail pages" in " ".join(result.stdout.split())
+    assert "private-key" not in result.stdout
+    rows = [
+        tuple(cell.strip() for cell in line.strip("│").split("│"))
+        for line in result.stdout.splitlines()
+        if line.startswith("│")
+    ]
+    assert ("indeed", "JobSpy", "Enabled") in rows
+    assert ("google", "JobSpy", "Disabled") in rows
+    assert ("hellowork", "JobSpy", "Enabled") in rows
+    assert ("welcome_to_the_jungle", "Custom", "Enabled") in rows
+    assert ("emploi_territorial", "Aggregator", "Disabled") in rows
+    assert ("cadremploi", "Aggregator", "Disabled") in rows
+    assert "32R" in result.stdout
 
     profile = tmp_path / "config.yaml"
     profile.write_text("queries: [graphiste]\n", encoding="utf-8")
-    result = runner.invoke(cli.app, ["--status", "--profile", str(profile)])
+    result = runner.invoke(cli.app, ["status", "--profile", str(profile)])
     assert result.exit_code == 0, result.output
     assert "Search profile config.yaml (overrides applied)" in " ".join(result.stdout.split())
     assert "config.yaml: queries" in result.stdout
     assert "config.local.yaml:" not in result.stdout
 
-    monkeypatch.setenv("SCRAPPER_DISABLE_LOCAL_CONFIG", "1")
-    result = runner.invoke(cli.app, ["--status"])
+    monkeypatch.setenv("JOBSFR_DISABLE_LOCAL_CONFIG", "1")
+    result = runner.invoke(cli.app, ["status"])
     assert result.exit_code == 0, result.output
     assert "Search profile None" in " ".join(result.stdout.split())
     assert "config.local.yaml for local settings." in " ".join(result.stdout.split())
@@ -303,26 +414,12 @@ def test_status_previews_search_configuration_without_running(monkeypatch: pytes
 
 
 @pytest.mark.parametrize(
-    ("settings_json", "yaml_enabled", "indicator"),
-    [
-        (None, None, "✕ Disabled"),
-        ('{"enabled": false}', None, "✕ Disabled"),
-        ('{"enabled": true, "target": "private-remote:jobs.xlsx"}', None, "✓ Enabled"),
-        ("invalid json", None, "⚠ Unavailable"),
-        ('{"enabled": false}', True, "✓ Enabled"),
-        ('{"enabled": true, "target": "private-remote:jobs.xlsx"}', False, "✕ Disabled"),
-    ],
+    ("yaml_enabled", "indicator"),
+    [(None, "✕ Disabled"), (True, "✓ Enabled"), (False, "✕ Disabled")],
 )
-def test_status_shows_tracker_sync_for_selected_database(
-    tmp_path: Path, settings_json: str | None, yaml_enabled: bool | None, indicator: str
-) -> None:
+def test_status_shows_tracker_sync_from_yaml(tmp_path: Path, yaml_enabled: bool | None, indicator: str) -> None:
     database = tmp_path / "jobs.duckdb"
-    settings_path = tmp_path / ".tracker-sync" / "settings.json"
-    if settings_json is not None:
-        settings_path.parent.mkdir()
-        settings_path.write_text(settings_json, encoding="utf-8")
-
-    args = ["--status", "--export-only", "--db", str(database)]
+    args = ["status", "--db", str(database)]
     if yaml_enabled is not None:
         profile = tmp_path / "profile.yaml"
         profile.write_text(
@@ -451,13 +548,6 @@ def test_location_override_routes_each_provider_and_admits_nearby_municipalities
     assert site["isarta"][0].endswith("?cat=ile-de-france&query={query}")
     assert site["apec"][0].endswith("?q={query}&l=paris-75&page=0")
 
-    preview_args = ["--show-config", "--db", str(original.database_path)]
-    preview = CliRunner().invoke(cli.app, [*preview_args, "--location", "Paris, France"])
-    assert preview.exit_code == 0, preview.output
-    report = json.loads(preview.stdout)
-    assert report["values"]["aggregators"]["direct_locations"] == ["11R"]
-    assert report["sources"]["aggregators.direct_locations"] == "resolved from --location"
-
     profile = tmp_path / "designer.yaml"
     profile.write_text(
         'locations: ["Paris, France"]\nqueries: [graphiste]\nfilters: {title: {include: [graphiste]}}\ndistance_km: 15\n',
@@ -468,21 +558,22 @@ def test_location_override_routes_each_provider_and_admits_nearby_municipalities
         'locations: ["Toulouse, France"]\nqueries: [marketing]\njobspy:\n  google_query_places: [Toulouse]\n',
         encoding="utf-8",
     )
-    monkeypatch.delenv("SCRAPPER_DISABLE_LOCAL_CONFIG")
-    monkeypatch.setattr(import_module("scrapper.config.settings"), "LOCAL_CONFIG_FILE", local)
+    monkeypatch.delenv("JOBSFR_DISABLE_LOCAL_CONFIG")
+    monkeypatch.setattr(import_module("jobsfr.config.settings"), "LOCAL_CONFIG_FILE", local)
 
-    for args, origin in (
-        (["--profile", str(profile)], "resolved from locations"),
-        (["--location", "Paris, France"], "resolved from --location"),
-    ):
-        preview = CliRunner().invoke(cli.app, [*preview_args, *args])
-        assert preview.exit_code == 0, preview.output
-        report = json.loads(preview.stdout)
-        assert report["values"]["jobspy"]["google_query_places"] == []
-        assert report["values"]["aggregators"]["direct_locations"] == ["11R"]
-        assert report["sources"]["aggregators.direct_locations"] == origin
-        if origin == "resolved from locations":
-            assert report["values"]["queries"] == ["graphiste"]
-            assert report["values"]["location_scope"]["radius_km"] == 15
-            assert report["sources"]["queries"] == str(profile)
+    runner = CliRunner()
+    status_args = ["status", "--db", str(original.database_path), "--profile", str(profile)]
+    text_status = runner.invoke(cli.app, status_args)
+    assert text_status.exit_code == 0, text_status.output
+    assert "15 km around Paris" in text_status.stdout
+    assert "Derived from search locations" in text_status.stdout
+    json_status = runner.invoke(cli.app, [*status_args, "--json"])
+    assert json_status.exit_code == 0, json_status.output
+    report = json.loads(json_status.stdout)
+    assert report["values"]["jobspy"]["google_query_places"] == []
+    assert report["values"]["aggregators"]["direct_locations"] == []
+    assert report["values"]["queries"] == ["graphiste"]
+    assert report["values"]["location_scope"]["radius_km"] == 15
+    assert report["values"]["location_scope"]["centers"][0]["name"] == "Paris"
+    assert report["sources"]["queries"] == str(profile)
     assert requests == []

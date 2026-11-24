@@ -3,8 +3,9 @@
 !uv.lock
 !README.md
 !LICENSE
-!src/scrapper/**/*.py
-!src/scrapper/config/config.yaml
-!src/scrapper/config/config.dev.yaml
-!src/scrapper/config/config.prod.yaml
+!src/jobsfr/**/*.py
+!src/jobsfr/config/config.yaml
+!src/jobsfr/config/config.dev.yaml
+!src/jobsfr/config/config.prod.yaml
 !datasets/employers/v1/company_types.csv
+!docs/config.local.example.yaml

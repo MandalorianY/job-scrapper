@@ -11,7 +11,7 @@ concurrency: homebrew-tap
 
 jobs:
   update:
-    if: github.repository == 'MandalorianY/french-job-scraper' && !github.event.release.prerelease
+    if: github.repository == 'MandalorianY/jobsfr' && !github.event.release.prerelease
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
@@ -39,19 +39,15 @@ jobs:
           fi
 
           version=${RELEASE_TAG#v}
-          asset="scrapper-$version.tar.gz"
+          asset="jobsfr-$version.tar.gz"
           gh release download "$RELEASE_TAG" --pattern "$asset" --dir "$RUNNER_TEMP"
           checksum=$(sha256sum "$RUNNER_TEMP/$asset" | cut -d ' ' -f 1)
 
-          message="Update jobsfr to $version"
-          if [[ -f tap/Formula/job-scrapper.rb ]]; then
-            message="jobsfr: renamed from job-scrapper"
-          fi
           bash deploy/homebrew/stage-tap.sh tap "$version" "$checksum"
           if git -C tap diff --cached --quiet; then
             exit 0
           fi
           git -C tap -c user.name='github-actions[bot]' \
             -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
-            commit -m "$message"
+            commit -m "Update jobsfr to $version"
           git -C tap push origin HEAD:main

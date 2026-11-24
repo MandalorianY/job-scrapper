@@ -38,8 +38,8 @@ jobs:
           - {runner: windows-11-arm, arch: aarch64}
         python-version: ["3.13", "3.14"]
     env:
-      SCRAPPER_DISABLE_LOCAL_CONFIG: "1"
-      SCRAPPER_RUN_REAL_SMOKE: "0"
+      JOBSFR_DISABLE_LOCAL_CONFIG: "1"
+      JOBSFR_RUN_REAL_SMOKE: "0"
       PYTHONUTF8: "1"
       UV_PYTHON_PREFERENCE: only-managed
       UV_PYTHON_ARCH: ${{ matrix.target.arch }}
@@ -65,13 +65,13 @@ jobs:
         run: uv build --no-sources
 
       - name: Install built wheel
-        run: uv pip install --no-deps --no-index --find-links dist scrapper
+        run: uv pip install --no-deps --no-index --find-links dist jobsfr
 
       - name: Check installed CLI and employer catalog
         run: |
-          uv run --locked --no-sync jobsfr --status
-          uv run --locked --no-sync job-scrapper --version
-          uv run --locked --no-sync python -c "from scrapper.company_types import company_types; company_types()"
+          uv run --locked --no-sync jobsfr status
+          uv run --locked --no-sync jobsfr --version
+          uv run --locked --no-sync python -c "from jobsfr.catalogs.company_types import company_types; company_types()"
 
       - name: Type-check Windows, Linux, and macOS
         if: matrix.target.runner == 'ubuntu-24.04' && matrix.python-version == '3.14'

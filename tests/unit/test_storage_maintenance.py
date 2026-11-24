@@ -2,12 +2,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from scrapper.config import SearchConfig
-from scrapper.filters import ListingFilters
-from scrapper.models import JobOffer
-from scrapper.storage import JobStore
+import pytest
 
-SEARCH_CONFIG = SearchConfig()
+from jobsfr.offers.filters import ListingFilters
+from jobsfr.offers.models import JobOffer
+from jobsfr.storage import JobStore
 
 
 def test_stores_cadremploi_rows_with_distinct_query_ids(tmp_path: Path) -> None:
@@ -57,6 +56,27 @@ def test_replay_preserves_contract_exclusions_from_original_database(tmp_path: P
             assert rebuilt.replay_observations(archive.path) == 0
             assert rebuilt.raw_dataframe().empty
             assert rebuilt.excluded_url_keys() == original_exclusions
+    finally:
+        rebuilt.close()
+
+
+def test_replay_rolls_back_after_invalid_observation(tmp_path: Path) -> None:
+    archive_path = tmp_path / "archive.duckdb"
+    archive = JobStore(archive_path)
+    try:
+        archive.upsert_offer(JobOffer(source="board", source_url="https://example.test/jobs/1"))
+        archive.conn.execute(
+            "INSERT INTO offer_observations VALUES ('invalid', ?, now() + INTERVAL 1 SECOND, '{}')",
+            [archive.run_id],
+        )
+    finally:
+        archive.close()
+
+    rebuilt = JobStore(tmp_path / "rebuilt.duckdb")
+    try:
+        with pytest.raises(KeyError, match="source"):
+            rebuilt.replay_observations(archive_path)
+        assert rebuilt.raw_dataframe().empty
     finally:
         rebuilt.close()
 
@@ -147,7 +167,8 @@ def test_contract_purge_and_title_filter_preserve_nonmatching_raw_listings(tmp_p
 
         assert store.purge_excluded_offers() == 1
         assert len(store.raw_dataframe()) == 2
-        canonical = store.canonical_dataframe(allows=lambda row: SEARCH_CONFIG.filters.allows(row.get))
+        filters = ListingFilters.model_validate({"title": {"include": ["example coordinator"]}})
+        canonical = store.canonical_dataframe(allows=lambda row: filters.allows(row.get))
         assert canonical["title"].to_list() == ["Example coordinator"]
     finally:
         store.close()
@@ -178,7 +199,7 @@ def test_source_specific_company_filter_keeps_matching_duplicate(tmp_path: Path)
         )
 
         filters = ListingFilters.model_validate(
-            {"by_source": {"linkedin": {"company": {"exclude": ["France Travail"]}}}}
+            {"by_source": {"linkedin": {"company": {"exclude": {"names": ["France Travail"]}}}}}
         )
         canonical = store.canonical_dataframe(allows=lambda row: filters.allows(row.get))
         assert canonical["best_source"].to_list() == ["indeed"]

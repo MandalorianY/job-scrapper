@@ -9,10 +9,10 @@ from pathlib import Path
 import httpx
 import pytest
 
-from scrapper.config import SearchConfig
-from scrapper.models import JobOffer
-from scrapper.scrapers.aggregators import detail, scrape
-from scrapper.storage import JobStore
+from jobsfr.config import SearchConfig
+from jobsfr.offers.models import JobOffer
+from jobsfr.scrapers.aggregators import detail, scrape
+from jobsfr.storage import JobStore
 
 
 def test_blocked_detail_page_does_not_become_unverified_offer() -> None:

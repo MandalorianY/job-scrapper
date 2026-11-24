@@ -7,7 +7,7 @@ project_dir="$(cd -- "$(dirname -- "$launcher")/.." && pwd -P)"
 cd "$project_dir"
 export PATH="$HOME/.local/bin:/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin:/bin:/sbin"
 
-environment_file="$HOME/.config/job-scrapper/environment"
+environment_file="$HOME/.config/jobsfr/environment"
 if [[ -f "$environment_file" ]]; then
     set -a
     # shellcheck source=/dev/null
@@ -22,4 +22,4 @@ if ! flock --nonblock 9; then
     exit 0
 fi
 
-exec "${JOB_SCRAPPER_EXECUTABLE:-.venv/bin/jobsfr}" "$@"
+exec "${JOBSFR_EXECUTABLE:-.venv/bin/jobsfr}" search "$@"

@@ -11,11 +11,16 @@ Replay reads separate archives in read-only mode. Use an archive created or
 opened for a normal run by the current version.
 
 To carry application statuses forward, put a copy of your editable tracker in
-`exports/rebuilt` before running the command.
+`exports/rebuilt` before running the command. Copy `.jobsfr-tracker-history.csv`
+too if it exists. It holds statuses for rows temporarily hidden by filters.
+
+If JobsFR reports that it could not read the primary tracker, the original
+file is still in place. Move it to a backup location before regenerating from
+DuckDB, or restore a healthy copy first to carry application statuses forward.
 
 ```sh
-uv run --locked jobsfr \
-  --replay-from data/job_search.duckdb \
+uv run --locked jobsfr replay \
+  --archive data/job_search.duckdb \
   --db data/rebuilt.duckdb \
   --export-dir exports/rebuilt \
   --log-file data/rebuilt.jsonl

@@ -7,19 +7,54 @@ import pytest
 from openpyxl import load_workbook
 from typer.testing import CliRunner
 
-from scrapper import cli, search_regions
-from scrapper.config import SearchConfig
-from scrapper.config.settings import LocationScopeConfig
-from scrapper.models import JobOffer
-from scrapper.scrapers.async_http import SourceBlockedError
-from scrapper.storage import JobStore
+from jobsfr import cli
+from jobsfr.cli import runner as cli_run
+from jobsfr.config import SearchConfig
+from jobsfr.config.settings import LocationScopeConfig
+from jobsfr.geography import regions as search_regions
+from jobsfr.offers.models import JobOffer
+from jobsfr.scrapers.async_http import SourceBlockedError
+from jobsfr.storage import JobStore
+
+
+@pytest.mark.parametrize("command", ["search", "sync"])
+def test_live_commands_require_search_setup(command: str, tmp_path: Path) -> None:
+    profile = tmp_path / "incomplete.yaml"
+    profile.write_text("queries: [data analyst]\n", encoding="utf-8")
+    for args in ([], ["--profile", str(profile)]):
+        result = CliRunner().invoke(cli.app, [command, *args])
+        assert result.exit_code != 0, result.output
+        assert "jobsfr setup" in " ".join(result.output.split())
+
+
+def test_search_setup_command_has_its_own_colored_line() -> None:
+    result = CliRunner().invoke(
+        cli.app, ["search"], env={"TTY_COMPATIBLE": "1", "TERM": "xterm", "NO_COLOR": None}, color=True
+    )
+
+    assert result.exit_code == 2
+    assert "Invalid value" in result.stderr
+    assert any("  \x1b[1;36mjobsfr setup\x1b[0m" in line for line in result.stderr.splitlines())
+    assert "See the example YAML at" in result.stderr
+
+
+def test_search_requires_a_source_group() -> None:
+    result = CliRunner().invoke(cli.app, ["search", "--skip-custom", "--skip-jobspy"])
+    assert result.exit_code == 2
+    assert "jobsfr export" in " ".join(result.output.split())
+
+
+def test_status_rejects_search_overrides() -> None:
+    result = CliRunner().invoke(cli.app, ["status", "--query", "illustrateur"])
+    assert result.exit_code == 2
+    assert "No such option: --query" in result.output
 
 
 def test_export_only_preserves_existing_tracker_if_database_is_missing(tmp_path: Path) -> None:
     workbook = tmp_path / "jobs.xlsx"
     workbook.write_bytes(b"existing tracker")
     database = tmp_path / "missing.duckdb"
-    result = CliRunner().invoke(cli.app, ["--export-only", "--db", str(database), "--export-dir", str(tmp_path)])
+    result = CliRunner().invoke(cli.app, ["export", "--db", str(database), "--export-dir", str(tmp_path)])
     assert result.exit_code == 2
     assert "Database file not found" in result.output
     assert workbook.read_bytes() == b"existing tracker"
@@ -73,7 +108,7 @@ def test_export_only_applies_title_and_description_filters_to_saved_listings_and
     result = CliRunner().invoke(
         cli.app,
         [
-            "--export-only",
+            "export",
             "--profile",
             str(profile),
             "--db",
@@ -101,7 +136,7 @@ def test_replay_rejects_log_path_pointing_to_archive(tmp_path: Path) -> None:
     archive.write_bytes(b"archive")
     database = tmp_path / "new.duckdb"
     result = CliRunner().invoke(
-        cli.app, ["--replay-from", str(archive), "--log-file", str(archive), "--db", str(database)]
+        cli.app, ["replay", "--archive", str(archive), "--log-file", str(archive), "--db", str(database)]
     )
     assert result.exit_code == 2
     assert "Replay archive and Log point to the same file" in result.output
@@ -137,7 +172,7 @@ def test_company_types_filter_saved_offers_and_tracker_history(tmp_path: Path) -
         encoding="utf-8",
     )
     args = [
-        "--export-only",
+        "export",
         "--profile",
         str(profile),
         "--db",
@@ -171,8 +206,8 @@ def test_database_startup_failure_is_recorded(monkeypatch: pytest.MonkeyPatch, t
     def fail(config: SearchConfig, run_id: str) -> Never:
         raise OSError("Database is unavailable")
 
-    monkeypatch.setattr(cli, "_job_store", fail)
-    result = CliRunner().invoke(cli.app, ["--export-only", "--db", str(database), "--log-file", str(log_path)])
+    monkeypatch.setattr(cli_run, "_job_store", fail)
+    result = CliRunner().invoke(cli.app, ["export", "--db", str(database), "--log-file", str(log_path)])
     assert result.exit_code == 1
     assert "Run failed: Database is unavailable" in result.output
     records = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
@@ -183,47 +218,49 @@ def test_database_startup_failure_is_recorded(monkeypatch: pytest.MonkeyPatch, t
 def test_offline_export_reuses_geographic_scope_from_live_run(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, toulouse_scope: LocationScopeConfig
 ) -> None:
-    monkeypatch.setenv("SCRAPPER_LOCATION_SCOPE__INCLUDE_UNRECOGNIZED", "false")
+    monkeypatch.setenv("JOBSFR_LOCATION_SCOPE__INCLUDE_UNRECOGNIZED", "false")
 
     def resolve(config: SearchConfig, *, write_cache: bool) -> SearchConfig:
         assert not config.location_scope.centers
         assert write_cache
         return config.model_copy(update={"location_scope": toulouse_scope})
 
-    def no_offers(config: SearchConfig, store: JobStore, *, progress: cli.ProgressReporter) -> dict[str, int]:
+    def no_offers(config: SearchConfig, store: JobStore, *, progress: cli_run.ProgressReporter) -> dict[str, int]:
         return {}
 
-    monkeypatch.setattr(cli, "route_location_overrides", resolve)
-    monkeypatch.setattr(cli, "scrape_jobspy_sources", no_offers)
+    monkeypatch.setattr(cli_run, "route_location_overrides", resolve)
+    monkeypatch.setattr(cli_run, "scrape_jobspy_sources", no_offers)
+    status_args = ["--db", str(tmp_path / "jobs.duckdb")]
     args = [
-        "--db",
-        str(tmp_path / "jobs.duckdb"),
+        *status_args,
         "--export-dir",
         str(tmp_path),
         "--log-file",
         str(tmp_path / "run.jsonl"),
     ]
     runner = CliRunner()
-    live = runner.invoke(cli.app, [*args, "--skip-custom"])
+    live = runner.invoke(
+        cli.app, ["search", *args, "--skip-custom", "--query", "example role", "--location", "Toulouse, France"]
+    )
     assert live.exit_code == 0, live.output
 
     def forbidden(*args: object, **kwargs: object) -> Never:
         raise AssertionError("Offline commands must reuse the saved coordinates")
 
-    monkeypatch.setattr(cli, "route_location_overrides", forbidden)
-    status = runner.invoke(cli.app, [*args, "--status"])
+    monkeypatch.setattr(cli_run, "route_location_overrides", forbidden)
+    status = runner.invoke(cli.app, ["status", *status_args])
     assert status.exit_code == 0, status.output
     assert "25 km around Toulouse" in status.stdout
     assert "saved geographic scope" in status.stdout
 
-    offline = runner.invoke(cli.app, [*args, "--export-only", "--show-config"])
+    offline = runner.invoke(cli.app, ["status", *status_args, "--json"])
     assert offline.exit_code == 0, offline.output
     report = json.loads(offline.stdout)
     assert report["values"]["location_scope"] == toulouse_scope.model_dump(mode="json")
     assert report["sources"]["location_scope.centers"] == "saved geographic scope"
 
-    monkeypatch.setenv("SCRAPPER_DISTANCE_KM", "15")
-    changed = runner.invoke(cli.app, [*args, "--export-only", "--show-config"])
+    monkeypatch.setenv("JOBSFR_DISTANCE_KM", "15")
+    changed = runner.invoke(cli.app, ["status", *status_args, "--json"])
     assert changed.exit_code == 0, changed.output
     assert json.loads(changed.stdout)["values"]["location_scope"]["centers"] == []
 
@@ -235,17 +272,17 @@ def test_disabling_aggregators_controls_dispatch_and_status(monkeypatch: pytest.
     async def unexpected(*args: object) -> Never:
         raise AssertionError("The disabled aggregator scraper ran")
 
-    monkeypatch.setattr(cli, "scrape_welcome_to_the_jungle", welcome_to_the_jungle)
-    monkeypatch.setattr(cli, "scrape_aggregators", unexpected)
-    monkeypatch.setenv("SCRAPPER_ENABLED_SOURCES__AGGREGATORS", "false")
+    monkeypatch.setattr(cli_run, "scrape_welcome_to_the_jungle", welcome_to_the_jungle)
+    monkeypatch.setattr(cli_run, "scrape_aggregators", unexpected)
+    monkeypatch.setenv("JOBSFR_ENABLED_SOURCES__AGGREGATORS", "false")
     config = SearchConfig(paths={"database_path": tmp_path / "jobs.duckdb"})
     store = JobStore(config.database_path)
     try:
-        assert asyncio.run(cli._run_custom_sources(config, store)) == ({"welcome_to_the_jungle": 3}, {})
+        assert asyncio.run(cli_run._run_custom_sources(config, store)) == ({"welcome_to_the_jungle": 3}, {})
     finally:
         store.close()
 
-    status = CliRunner().invoke(cli.app, ["--status"])
+    status = CliRunner().invoke(cli.app, ["status"])
     assert status.exit_code == 0, status.output
     sources = {
         row[0]: row[-1]
@@ -274,16 +311,19 @@ def test_local_export_survives_source_failure(
         )
         return {"example": 1}, {"unavailable_board": "Temporary source outage"}
 
-    monkeypatch.setattr(cli, "_run_custom_sources", sources)
+    monkeypatch.setattr(cli_run, "_run_custom_sources", sources)
     monkeypatch.setattr(
-        cli,
+        cli_run,
         "route_location_overrides",
         lambda config, *, write_cache: config.model_copy(update={"location_scope": toulouse_scope}),
     )
     result = CliRunner().invoke(
         cli.app,
         [
+            "search",
             "--skip-jobspy",
+            "--query",
+            "example coordinator",
             "--location",
             "Toulouse, France",
             "--db",
@@ -321,13 +361,13 @@ def test_export_only_regenerates_local_files_from_duckdb(monkeypatch: pytest.Mon
         raise AssertionError("Export-only must skip scraping and observation pruning")
 
     for name in ("_run_custom_sources", "_run_all_sources_parallel", "scrape_jobspy_sources"):
-        monkeypatch.setattr(cli, name, forbidden)
+        monkeypatch.setattr(cli_run, name, forbidden)
     monkeypatch.setattr(JobStore, "prune_observations", forbidden)
 
     result = CliRunner().invoke(
         cli.app,
         [
-            "--export-only",
+            "export",
             "--db",
             str(database),
             "--export-dir",
@@ -424,7 +464,7 @@ def test_export_only_recalculates_a_changed_radius_from_cached_towns(
     monkeypatch.setattr(search_regions.httpx, "Client", forbidden)
     export_dir = tmp_path / "exports"
     args = [
-        "--export-only",
+        "export",
         "--profile",
         str(profile),
         "--db",
@@ -487,14 +527,15 @@ def test_offline_replay_restores_purged_offers_and_is_idempotent(
         raise AssertionError("Replay must never scrape")
 
     for name in ("_run_custom_sources", "_run_all_sources_parallel", "scrape_jobspy_sources"):
-        monkeypatch.setattr(cli, name, forbidden)
+        monkeypatch.setattr(cli_run, name, forbidden)
 
     target = tmp_path / "rebuilt.duckdb"
     for _ in range(2):
         result = CliRunner().invoke(
             cli.app,
             [
-                "--replay-from",
+                "replay",
+                "--archive",
                 str(archive_path),
                 "--db",
                 str(target),

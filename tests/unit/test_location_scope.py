@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import pytest
 
-from scrapper.config.settings import LocationScopeConfig
-from scrapper.location_scope import location_is_allowed, location_is_in_scope
-from scrapper.source_rules import get_source_rules
+from jobsfr.config.settings import LocationScopeConfig
+from jobsfr.geography.scope import location_is_allowed, location_is_in_scope
+from jobsfr.source_rules import get_source_rules
 
 
 @pytest.mark.parametrize(
