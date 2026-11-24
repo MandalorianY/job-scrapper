@@ -29,7 +29,7 @@ from jobsfr.storage import JobStore
     ],
 )
 def test_invalid_cli_usage_explains_the_error(args: list[str], message: str) -> None:
-    result = CliRunner().invoke(cli.app, args)
+    result = CliRunner().invoke(cli.app, args, env={"NO_COLOR": "1"})
     assert result.exit_code == 2, result.output
     assert message in result.stderr
 

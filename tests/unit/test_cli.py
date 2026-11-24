@@ -45,7 +45,7 @@ def test_search_requires_a_source_group() -> None:
 
 
 def test_status_rejects_search_overrides() -> None:
-    result = CliRunner().invoke(cli.app, ["status", "--query", "illustrateur"])
+    result = CliRunner().invoke(cli.app, ["status", "--query", "illustrateur"], env={"NO_COLOR": "1"})
     assert result.exit_code == 2
     assert "No such option: --query" in result.output
 

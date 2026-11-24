@@ -5,6 +5,7 @@ applications.
 
 ```sh
 brew tap mandaloriany/tap
+brew trust --formula mandaloriany/tap/jobsfr
 brew install mandaloriany/tap/jobsfr
 jobsfr setup
 jobsfr search
