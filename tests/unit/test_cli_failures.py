@@ -6,6 +6,7 @@ import pytest
 import yaml
 from hypothesis import given
 from hypothesis import strategies as st
+from rich.text import Text
 from typer.testing import CliRunner
 
 from jobsfr import cli
@@ -29,9 +30,9 @@ from jobsfr.storage import JobStore
     ],
 )
 def test_invalid_cli_usage_explains_the_error(args: list[str], message: str) -> None:
-    result = CliRunner().invoke(cli.app, args, env={"NO_COLOR": "1"})
+    result = CliRunner().invoke(cli.app, args)
     assert result.exit_code == 2, result.output
-    assert message in result.stderr
+    assert message in Text.from_ansi(result.stderr).plain
 
 
 @pytest.mark.property

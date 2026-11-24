@@ -5,6 +5,7 @@ from typing import Never
 
 import pytest
 from openpyxl import load_workbook
+from rich.text import Text
 from typer.testing import CliRunner
 
 from jobsfr import cli
@@ -45,9 +46,9 @@ def test_search_requires_a_source_group() -> None:
 
 
 def test_status_rejects_search_overrides() -> None:
-    result = CliRunner().invoke(cli.app, ["status", "--query", "illustrateur"], env={"NO_COLOR": "1"})
+    result = CliRunner().invoke(cli.app, ["status", "--query", "illustrateur"])
     assert result.exit_code == 2
-    assert "No such option: --query" in result.output
+    assert "No such option: --query" in Text.from_ansi(result.output).plain
 
 
 def test_export_only_preserves_existing_tracker_if_database_is_missing(tmp_path: Path) -> None:
